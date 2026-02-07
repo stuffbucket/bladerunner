@@ -1,0 +1,26 @@
+#!/bin/sh
+# Fast pre-commit checks - keep these quick (<5s)
+set -e
+
+# Check for staged Go files
+STAGED_GO=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+if [ -z "$STAGED_GO" ]; then
+  exit 0
+fi
+
+echo "Running pre-commit checks..."
+
+# Check formatting
+echo "→ Checking format..."
+UNFORMATTED=$(echo "$STAGED_GO" | xargs gofmt -l 2>/dev/null || true)
+if [ -n "$UNFORMATTED" ]; then
+  echo "Error: Files need formatting (run 'make fmt'):"
+  echo "$UNFORMATTED"
+  exit 1
+fi
+
+# Quick vet check
+echo "→ Vetting..."
+go vet ./...
+
+echo "✓ Pre-commit checks passed"

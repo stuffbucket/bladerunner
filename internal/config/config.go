@@ -1,0 +1,230 @@
+package config
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+)
+
+const (
+	NetworkModeShared  = "shared"
+	NetworkModeBridged = "bridged"
+)
+
+type Config struct {
+	Name              string
+	Hostname          string
+	StateDir          string
+	VMDir             string
+	DiskPath          string
+	DiskSizeGiB       int
+	BaseImageURL      string
+	BaseImagePath     string
+	MachineIDPath     string
+	EFIVarsPath       string
+	CloudInitISO      string
+	CloudInitDir      string
+	ConsoleLogPath    string
+	LogPath           string
+	ReportPath        string
+	MetadataPath      string
+	SSHUser           string
+	SSHPublicKey      string
+	SSHPrivateKeyPath string
+	SSHConfigPath     string
+	ClientCertPath    string
+	ClientKeyPath     string
+	TrustPassword     string
+	LocalSSHPort      int
+	LocalAPIPort      int
+	VsockSSHPort      uint32
+	VsockAPIPort      uint32
+	NetworkMode       string
+	BridgeInterface   string
+	GUI               bool
+	CPUs              uint
+	MemoryGiB         uint64
+	Arch              string
+	WaitForIncus      time.Duration
+	DashboardPath     string
+}
+
+func DefaultBaseImageURL(goarch string) (string, error) {
+	switch goarch {
+	case "arm64":
+		return "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img", nil
+	case "amd64":
+		return "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img", nil
+	default:
+		return "", fmt.Errorf("unsupported architecture: %s", goarch)
+	}
+}
+
+func Default(baseDir, name string) (*Config, error) {
+	if name == "" {
+		name = "incus-vm"
+	}
+
+	if baseDir == "" {
+		baseDir = defaultStateDir()
+	}
+
+	imageURL, err := DefaultBaseImageURL(runtime.GOARCH)
+	if err != nil {
+		return nil, err
+	}
+
+	trustPassword, err := randomHex(16)
+	if err != nil {
+		return nil, fmt.Errorf("generate trust password: %w", err)
+	}
+
+	vmDir := filepath.Join(baseDir, name)
+	cpus := 4
+
+	cfg := &Config{
+		Name:              name,
+		Hostname:          name,
+		StateDir:          baseDir,
+		VMDir:             vmDir,
+		DiskPath:          filepath.Join(vmDir, "disk.raw"),
+		DiskSizeGiB:       64,
+		BaseImageURL:      imageURL,
+		BaseImagePath:     "",
+		MachineIDPath:     filepath.Join(vmDir, "machine-id.bin"),
+		EFIVarsPath:       filepath.Join(vmDir, "efi-vars.bin"),
+		CloudInitISO:      filepath.Join(vmDir, "cloud-init.iso"),
+		CloudInitDir:      filepath.Join(vmDir, "cloud-init"),
+		ConsoleLogPath:    filepath.Join(vmDir, "console.log"),
+		LogPath:           filepath.Join(vmDir, "bladerunner.log"),
+		ReportPath:        filepath.Join(vmDir, "startup-report.json"),
+		MetadataPath:      filepath.Join(vmDir, "runtime-metadata.json"),
+		SSHUser:           "incus",
+		SSHPublicKey:      "", // Set by EnsureSSHKeys
+		SSHPrivateKeyPath: "", // Set by EnsureSSHKeys
+		SSHConfigPath:     "", // Set after VM starts
+		ClientCertPath:    filepath.Join(vmDir, "client.crt"),
+		ClientKeyPath:     filepath.Join(vmDir, "client.key"),
+		TrustPassword:     trustPassword,
+		LocalSSHPort:      6022,
+		LocalAPIPort:      18443,
+		VsockSSHPort:      10022,
+		VsockAPIPort:      18443,
+		NetworkMode:       NetworkModeShared,
+		BridgeInterface:   "en0",
+		GUI:               true,
+		CPUs:              uint(cpus),
+		MemoryGiB:         8,
+		Arch:              runtime.GOARCH,
+		WaitForIncus:      5 * time.Minute,
+		DashboardPath:     "/ui/",
+	}
+
+	return cfg, nil
+}
+
+func (c *Config) Validate() error {
+	if c.Name == "" {
+		return errors.New("name is required")
+	}
+	if c.Hostname == "" {
+		return errors.New("hostname is required")
+	}
+	if c.VMDir == "" {
+		return errors.New("vm directory is required")
+	}
+	if c.LogPath == "" {
+		return errors.New("log path is required")
+	}
+	if c.NetworkMode != NetworkModeShared && c.NetworkMode != NetworkModeBridged {
+		return fmt.Errorf("invalid network mode: %s", c.NetworkMode)
+	}
+	if c.SSHUser == "" {
+		return errors.New("ssh user is required")
+	}
+	if c.SSHPublicKey == "" {
+		return errors.New("ssh public key is required")
+	}
+	if !strings.Contains(c.SSHPublicKey, "ssh-") {
+		return errors.New("ssh public key does not look valid")
+	}
+	if c.LocalSSHPort < 1 || c.LocalSSHPort > 65535 {
+		return errors.New("local ssh port must be in range 1-65535")
+	}
+	if c.LocalAPIPort < 1 || c.LocalAPIPort > 65535 {
+		return errors.New("local api port must be in range 1-65535")
+	}
+	if c.LocalSSHPort == c.LocalAPIPort {
+		return errors.New("local ssh and api ports must differ")
+	}
+	if c.VsockSSHPort == c.VsockAPIPort {
+		return errors.New("guest vsock ssh and api ports must differ")
+	}
+	if c.DiskSizeGiB < 16 {
+		return errors.New("disk size must be at least 16 GiB")
+	}
+	if c.CPUs < 1 {
+		return errors.New("cpus must be >= 1")
+	}
+	if c.MemoryGiB < 2 {
+		return errors.New("memory must be at least 2 GiB")
+	}
+	if c.BaseImagePath == "" && c.BaseImageURL == "" {
+		return errors.New("either base image path or base image url must be set")
+	}
+	if c.WaitForIncus < time.Second {
+		return errors.New("wait-for-incus must be at least 1s")
+	}
+	return nil
+}
+
+// SetSSHKeys sets the SSH key paths from externally provided values.
+func (c *Config) SetSSHKeys(publicKey, privateKeyPath string) {
+	if c.SSHPublicKey == "" {
+		c.SSHPublicKey = publicKey
+	}
+	if c.SSHPrivateKeyPath == "" {
+		c.SSHPrivateKeyPath = privateKeyPath
+	}
+}
+
+func randomHex(bytesLen int) (string, error) {
+	b := make([]byte, bytesLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// defaultStateDir returns the XDG-compliant state directory for bladerunner.
+// Precedence: BLADERUNNER_STATE_DIR > XDG_STATE_HOME/bladerunner > ~/.local/state/bladerunner
+func defaultStateDir() string {
+	if d := os.Getenv("BLADERUNNER_STATE_DIR"); d != "" {
+		return d
+	}
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+		return filepath.Join(xdg, "bladerunner")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".local", "state", "bladerunner")
+	}
+	return filepath.Join(home, ".local", "state", "bladerunner")
+}
+
+// DefaultAptMirrorURI returns a fast Ubuntu apt mirror URI appropriate for the
+// given architecture. arm64 packages live under ubuntu-ports, not ubuntu.
+func DefaultAptMirrorURI(goarch string) string {
+	switch goarch {
+	case "arm64":
+		return "http://mirrors.ocf.berkeley.edu/ubuntu-ports/"
+	default:
+		return "http://mirrors.ocf.berkeley.edu/ubuntu/"
+	}
+}

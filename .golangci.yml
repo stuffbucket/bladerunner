@@ -1,0 +1,139 @@
+# golangci-lint configuration v2
+# https://golangci-lint.run/docs/configuration/
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Security
+    - gosec        # Security issues
+    - bodyclose    # HTTP response body close
+
+    # Code quality
+    - gocyclo      # Cyclomatic complexity
+    - gocognit     # Cognitive complexity
+    - goconst      # Repeated strings that could be constants
+    - gocritic     # Comprehensive linting
+    - misspell     # Common spelling mistakes
+    - unconvert    # Unnecessary type conversions
+    - unparam      # Unused function parameters
+    - nakedret     # Naked returns in long functions
+    - prealloc     # Slice preallocation
+    - nolintlint   # Ill-formed //nolint directives
+
+    # Error handling
+    - errorlint    # Error wrapping issues
+
+    # Style
+    - revive       # Fast, configurable linter
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false  # allow _ = to explicitly ignore errors
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+
+    gocyclo:
+      min-complexity: 25  # raised for complex validation funcs
+
+    gocognit:
+      min-complexity: 30
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - hugeParam        # VZ types are large by design
+        - unnamedResult    # Named results not always needed
+        - paramTypeCombine # Style preference
+
+    gosec:
+      excludes:
+        - G104  # Unhandled errors (covered by errcheck)
+        - G204  # Subprocess with variable (we use exec.LookPath)
+        - G301  # Dir permissions > 0750 (intentional for shared dirs)
+        - G302  # File permissions > 0600 (intentional for log files)
+        - G304  # File path from variable (we validate paths)
+        - G306  # WriteFile permissions > 0600 (intentional for readable files)
+        - G115  # Integer overflow (we check bounds)
+
+    govet:
+      enable-all: true
+      disable:
+        - shadow          # Too noisy
+        - fieldalignment  # Optimization suggestions not worth churn
+
+    misspell:
+      locale: US
+
+    nakedret:
+      max-func-lines: 30
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Test files can have longer functions
+      - path: '_test\.go'
+        linters:
+          - gocyclo
+          - gocognit
+          - funlen
+
+      # Main and command files often have setup code
+      - path: cmd/
+        linters:
+          - gocognit
+
+      # Allow log.Fatal in main
+      - path: main\.go
+        linters:
+          - gocritic
+        text: "exitAfterDefer"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

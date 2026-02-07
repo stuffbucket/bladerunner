@@ -1,0 +1,12 @@
+#!/bin/sh
+# Validate conventional commit format
+msg=$(cat "$1")
+pattern="^(feat|fix|refactor|test|build|chore|docs|perf|ci)(\(.+\))?: .{1,50}"
+if ! echo "$msg" | head -1 | grep -qE "$pattern"; then
+  echo "Error: Invalid commit message format"
+  echo "Expected: type(scope)?: description (50 chars max)"
+  echo "Types: feat, fix, refactor, test, build, chore, docs, perf, ci"
+  echo ""
+  echo "Your message: $msg"
+  exit 1
+fi

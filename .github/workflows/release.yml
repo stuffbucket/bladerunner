@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build release binary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          go build -trimpath -ldflags="${LDFLAGS}" -o bin/br ./cmd/bladerunner
+          
+      - name: Sign binary with entitlements
+        run: |
+          codesign --entitlements vz.entitlements -s - bin/br
+          
+      - name: Create release archive
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd bin
+          tar -czf "../bladerunner_${VERSION}_darwin_arm64.tar.gz" br
+          cd ..
+          shasum -a 256 "bladerunner_${VERSION}_darwin_arm64.tar.gz" > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bladerunner_*.tar.gz
+            checksums.txt
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
