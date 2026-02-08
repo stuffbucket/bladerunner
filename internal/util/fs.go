@@ -1,5 +1,5 @@
 // Package util provides shared filesystem utility functions.
-package util //nolint:revive // "util" is intentional for internal utilities
+package util
 
 import (
 	"os"

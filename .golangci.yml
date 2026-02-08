@@ -25,11 +25,27 @@ linters:
     - errorlint    # Error wrapping issues
     - nilerr       # Returning nil error when err != nil
     - nilnil       # Returning (nil, nil) hides errors
+    - errchkjson   # JSON marshal/unmarshal error checking
 
     # Type safety (∂S: make invalid unrepresentable)
     - exhaustive   # Enum switch exhaustiveness
     - durationcheck # Duration multiplication errors
     - contextcheck # Context propagation across boundaries
+    - forcetypeassert # Unchecked type assertions
+    - musttag      # Required struct tags for marshaling
+    - recvcheck    # Receiver type consistency
+
+    # Anti-patterns (∂S: code smells, LLM pitfalls)
+    - containedctx # Context stored in struct
+    - fatcontext   # Nested context in loops
+    - nestif       # Deeply nested if statements
+    - dogsled      # Too many blank identifiers
+    - noctx        # Missing context in HTTP/SQL calls
+    - predeclared  # Shadowing predeclared identifiers
+
+    # Architecture (∂S: separation of concerns)
+    - dupl         # Code duplication detection
+    - iface        # Interface pollution detection
 
     # Style
     - revive       # Fast, configurable linter
@@ -92,6 +108,17 @@ linters:
     exhaustive:
       default-signifies-exhaustive: true  # switch default: case counts as exhaustive
 
+    nestif:
+      min-complexity: 5  # allow moderate nesting
+
+    dupl:
+      threshold: 150  # lines threshold for duplication
+
+    iface:
+      enable:
+        - identical  # interfaces with identical methods
+        - unused     # unused interface methods
+
     revive:
       rules:
         - name: blank-imports
@@ -122,12 +149,18 @@ linters:
       - comments
       - std-error-handling
     rules:
-      # Test files can have longer functions
+      # Test files can have longer functions and test-specific patterns
       - path: '_test\.go'
         linters:
           - gocyclo
           - gocognit
           - funlen
+          - dupl          # Test cases often repeat patterns
+          - nestif        # Test setup can be nested
+          - forcetypeassert # Test assertions often type-assert
+          - containedctx  # Test helpers may store context
+          - errchkjson    # Test data often ignores errors
+          - noctx         # Test helpers use simplified net calls
 
       # Main and command files often have setup code
       - path: cmd/
@@ -139,6 +172,23 @@ linters:
         linters:
           - gocritic
         text: "exitAfterDefer"
+
+      # Transport layer uses simplified net calls by design
+      # TODO: consider adding context to Transport interface
+      - path: 'internal/control/(transport|client)\.go'
+        linters:
+          - noctx
+
+      # Internal VM operations are sync and don't need cancellation
+      - path: 'internal/vm/(assets|forwarder)\.go'
+        linters:
+          - noctx
+
+      # Util package name is intentional
+      - path: 'internal/util/'
+        linters:
+          - revive
+        text: "var-naming"
 
 formatters:
   enable:
