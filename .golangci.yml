@@ -21,11 +21,19 @@ linters:
     - prealloc     # Slice preallocation
     - nolintlint   # Ill-formed //nolint directives
 
-    # Error handling
+    # Error handling (∂S: boundary verification)
     - errorlint    # Error wrapping issues
+    - nilerr       # Returning nil error when err != nil
+    - nilnil       # Returning (nil, nil) hides errors
+
+    # Type safety (∂S: make invalid unrepresentable)
+    - exhaustive   # Enum switch exhaustiveness
+    - durationcheck # Duration multiplication errors
+    - contextcheck # Context propagation across boundaries
 
     # Style
     - revive       # Fast, configurable linter
+    - dupword      # Duplicate words in comments/strings
 
   settings:
     errcheck:
@@ -80,6 +88,9 @@ linters:
 
     nakedret:
       max-func-lines: 30
+
+    exhaustive:
+      default-signifies-exhaustive: true  # switch default: case counts as exhaustive
 
     revive:
       rules:

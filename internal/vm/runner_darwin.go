@@ -199,6 +199,8 @@ func (r *Runner) Wait(ctx context.Context) error {
 				return fmt.Errorf("vm entered error state")
 			case vz.VirtualMachineStateStopped:
 				return nil
+			default:
+				// Other states: continue waiting
 			}
 		}
 	}
@@ -265,6 +267,8 @@ func (r *Runner) waitForRunning(ctx context.Context, timeout time.Duration, onSt
 				return errors.New("vm entered error state during startup")
 			case vz.VirtualMachineStateStopped:
 				return errors.New("vm stopped during startup")
+			default:
+				// Other states (Starting, Pausing, etc.): continue waiting
 			}
 		}
 	}

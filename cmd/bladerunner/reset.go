@@ -104,14 +104,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	}
 
 	if !resetFlags.confirm {
-		fmt.Print("\nProceed? [y/N] ")
-		var response string
-		if _, err := fmt.Scanln(&response); err != nil {
-			// EOF or error reading - treat as "no"
-			fmt.Println("Aborted.")
-			return nil
-		}
-		if response != "y" && response != "Y" {
+		if !confirmReset() {
 			fmt.Println("Aborted.")
 			return nil
 		}
@@ -154,4 +147,15 @@ func runReset(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// confirmReset prompts the user for confirmation.
+// Returns true if user confirms, false otherwise.
+func confirmReset() bool {
+	fmt.Print("\nProceed? [y/N] ")
+	var response string
+	if _, err := fmt.Scanln(&response); err != nil {
+		return false
+	}
+	return response == "y" || response == "Y"
 }
