@@ -597,14 +597,14 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 	var sshCommand string
 	var sshConfigPath string
 	if r.cfg.SSHPrivateKeyPath != "" {
-		configPath, err := ssh.WriteSSHConfig(r.cfg.Name, r.cfg.LocalSSHPort, r.cfg.SSHUser, r.cfg.SSHPrivateKeyPath)
+		configPath, err := ssh.WriteSSHConfig(r.cfg.LocalSSHPort, r.cfg.SSHUser, r.cfg.SSHPrivateKeyPath)
 		if err != nil {
 			logging.L().Warn("failed to write SSH config", "err", err)
 			sshCommand = fmt.Sprintf("ssh -p %d -i %s %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHPrivateKeyPath, r.cfg.SSHUser)
 		} else {
 			sshConfigPath = configPath
 			r.cfg.SSHConfigPath = configPath
-			sshCommand = ssh.Command(configPath, r.cfg.Name)
+			sshCommand = ssh.Command(configPath)
 		}
 	} else {
 		sshCommand = fmt.Sprintf("ssh -p %d %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHUser)

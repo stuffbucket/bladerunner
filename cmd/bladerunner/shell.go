@@ -11,17 +11,15 @@ import (
 )
 
 var shellCmd = &cobra.Command{
-	Use:                "shell [vm-name] [-- command...]",
+	Use:                "shell [-- command...]",
 	Short:              "Open an interactive shell in the VM",
-	Long:               `Open an interactive shell in a running VM. Any arguments after -- are run as a command.`,
+	Long:               `Open an interactive shell in the running Bladerunner VM. Any arguments after -- are run as a command.`,
 	DisableFlagParsing: true,
 	RunE:               runShell,
 }
 
 func runShell(cmd *cobra.Command, args []string) error {
-	vmName := "incus-vm"
-
-	// Parse args: [vm-name] [-- command...]
+	// Parse args: [-- command...]
 	var shellArgs []string
 	for i, arg := range args {
 		if arg == "--" {
@@ -31,9 +29,6 @@ func runShell(cmd *cobra.Command, args []string) error {
 		if arg == "--help" || arg == "-h" {
 			return cmd.Help()
 		}
-		if i == 0 && arg != "" && arg[0] != '-' {
-			vmName = arg
-		}
 	}
 
 	// Find SSH config
@@ -41,11 +36,11 @@ func runShell(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	configPath := filepath.Join(configDir, vmName+".ssh_config")
+	configPath := filepath.Join(configDir, "config")
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Fprintln(os.Stderr, errorf("VM not running or not configured: ")+vmName)
-		fmt.Fprintln(os.Stderr, subtle("Start it with: br start --name "+vmName))
+		fmt.Fprintln(os.Stderr, errorf("VM not running or not configured"))
+		fmt.Fprintln(os.Stderr, subtle("Start it with: br start"))
 		return nil
 	}
 
@@ -55,7 +50,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ssh not found: %w", err)
 	}
 
-	sshExecArgs := []string{"ssh", "-t", "-F", configPath, vmName}
+	sshExecArgs := []string{"ssh", "-t", "-F", configPath, "bladerunner"}
 	if len(shellArgs) > 0 {
 		sshExecArgs = append(sshExecArgs, shellArgs...)
 	}

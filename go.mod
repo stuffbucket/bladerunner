@@ -82,3 +82,5 @@ require (
 replace github.com/charmbracelet/x/ansi => github.com/charmbracelet/x/ansi v0.9.3
 
 replace github.com/charmbracelet/x/cellbuf => github.com/charmbracelet/x/cellbuf v0.0.13
+
+replace github.com/Code-Hex/vz/v3 => github.com/stuffbucket/vz/v3 v3.0.0-20260207160428-91ace1e21525

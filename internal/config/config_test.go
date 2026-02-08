@@ -52,18 +52,17 @@ func TestDefaultBaseImageURL(t *testing.T) {
 
 func TestDefaultConfig(t *testing.T) {
 	tmpDir := t.TempDir()
-	name := "test-vm"
 
-	cfg, err := Default(tmpDir, name)
+	cfg, err := Default(tmpDir)
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
 
-	if cfg.Name != name {
-		t.Errorf("Name = %v, want %v", cfg.Name, name)
+	if cfg.Name != "bladerunner" {
+		t.Errorf("Name = %v, want bladerunner", cfg.Name)
 	}
-	if cfg.Hostname != name {
-		t.Errorf("Hostname = %v, want %v", cfg.Hostname, name)
+	if cfg.Hostname != "bladerunner" {
+		t.Errorf("Hostname = %v, want bladerunner", cfg.Hostname)
 	}
 	if cfg.CPUs != 4 {
 		t.Errorf("CPUs = %v, want 4", cfg.CPUs)
@@ -78,9 +77,8 @@ func TestDefaultConfig(t *testing.T) {
 		t.Error("GUI should be enabled by default")
 	}
 
-	expectedVMDir := filepath.Join(tmpDir, name)
-	if cfg.VMDir != expectedVMDir {
-		t.Errorf("VMDir = %v, want %v", cfg.VMDir, expectedVMDir)
+	if cfg.VMDir != tmpDir {
+		t.Errorf("VMDir = %v, want %v", cfg.VMDir, tmpDir)
 	}
 
 	expectedURL, _ := DefaultBaseImageURL(runtime.GOARCH)
@@ -126,7 +124,7 @@ func TestConfigValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			cfg, err := Default(tmpDir, "test-vm")
+			cfg, err := Default(tmpDir)
 			if err != nil {
 				t.Fatalf("Default() error = %v", err)
 			}
@@ -169,7 +167,7 @@ func TestStateDirectoryDefault(t *testing.T) {
 	t.Setenv("BLADERUNNER_STATE_DIR", "")
 	t.Setenv("XDG_STATE_HOME", "")
 
-	cfg, err := Default("", "test-vm")
+	cfg, err := Default("")
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
@@ -190,7 +188,7 @@ func TestStateDirectoryXDG(t *testing.T) {
 	t.Setenv("BLADERUNNER_STATE_DIR", "")
 	t.Setenv("XDG_STATE_HOME", tmpDir)
 
-	cfg, err := Default("", "test-vm")
+	cfg, err := Default("")
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
@@ -205,7 +203,7 @@ func TestStateDirectoryEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("BLADERUNNER_STATE_DIR", tmpDir)
 
-	cfg, err := Default("", "test-vm")
+	cfg, err := Default("")
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}

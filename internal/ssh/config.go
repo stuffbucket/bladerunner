@@ -7,16 +7,16 @@ import (
 	"text/template"
 )
 
-const sshConfigTemplate = `# Bladerunner VM SSH configuration
+const sshConfigTemplate = `# Bladerunner SSH configuration
 # Generated automatically - do not edit manually
 #
 # Usage:
-#   ssh -F {{.ConfigPath}} {{.VMName}}
+#   ssh -F {{.ConfigPath}} bladerunner
 #
 # Or add to ~/.ssh/config:
 #   Include {{.ConfigPath}}
 
-Host {{.VMName}}
+Host bladerunner
     HostName 127.0.0.1
     Port {{.Port}}
     User {{.User}}
@@ -29,24 +29,22 @@ Host {{.VMName}}
 
 // ConfigParams holds parameters for generating SSH config.
 type ConfigParams struct {
-	VMName       string
 	Port         int
 	User         string
 	IdentityFile string
 	ConfigPath   string
 }
 
-// WriteSSHConfig writes an SSH config file for the VM to the bladerunner config directory.
+// WriteSSHConfig writes an SSH config file for Bladerunner to the config directory.
 // Returns the path to the generated config file.
-func WriteSSHConfig(vmName string, port int, user string, identityFile string) (string, error) {
-	configPath := filepath.Join(ConfigDir(), "ssh", fmt.Sprintf("%s.ssh_config", vmName))
+func WriteSSHConfig(port int, user string, identityFile string) (string, error) {
+	configPath := filepath.Join(ConfigDir(), "ssh", "config")
 
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		return "", fmt.Errorf("create ssh config directory: %w", err)
 	}
 
 	params := ConfigParams{
-		VMName:       vmName,
 		Port:         port,
 		User:         user,
 		IdentityFile: identityFile,
@@ -72,6 +70,6 @@ func WriteSSHConfig(vmName string, port int, user string, identityFile string) (
 }
 
 // Command returns the SSH command to connect to the VM.
-func Command(configPath, vmName string) string {
-	return fmt.Sprintf("ssh -F %s %s", configPath, vmName)
+func Command(configPath string) string {
+	return fmt.Sprintf("ssh -F %s bladerunner", configPath)
 }

@@ -22,6 +22,8 @@ It provides a full Incus container environment inside the VM.`,
 func init() {
 	rootCmd.SetVersionTemplate(fmt.Sprintf("br version %s\n", version))
 	rootCmd.AddCommand(startCmd)
+	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(shellCmd)
+	rootCmd.AddCommand(resetCmd)
 }

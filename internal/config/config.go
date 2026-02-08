@@ -15,6 +15,12 @@ import (
 const (
 	NetworkModeShared  = "shared"
 	NetworkModeBridged = "bridged"
+
+	// Default values for CLI flags and config
+	DefaultCPUs        = 4
+	DefaultMemoryGiB   = 8
+	DefaultDiskSizeGiB = 64
+	DefaultTimeout     = 5 * time.Minute
 )
 
 type Config struct {
@@ -66,11 +72,7 @@ func DefaultBaseImageURL(goarch string) (string, error) {
 	}
 }
 
-func Default(baseDir, name string) (*Config, error) {
-	if name == "" {
-		name = "incus-vm"
-	}
-
+func Default(baseDir string) (*Config, error) {
 	if baseDir == "" {
 		baseDir = defaultStateDir()
 	}
@@ -85,32 +87,29 @@ func Default(baseDir, name string) (*Config, error) {
 		return nil, fmt.Errorf("generate trust password: %w", err)
 	}
 
-	vmDir := filepath.Join(baseDir, name)
-	cpus := 4
-
 	cfg := &Config{
-		Name:              name,
-		Hostname:          name,
+		Name:              "bladerunner",
+		Hostname:          "bladerunner",
 		StateDir:          baseDir,
-		VMDir:             vmDir,
-		DiskPath:          filepath.Join(vmDir, "disk.raw"),
-		DiskSizeGiB:       64,
+		VMDir:             baseDir,
+		DiskPath:          filepath.Join(baseDir, "disk.raw"),
+		DiskSizeGiB:       DefaultDiskSizeGiB,
 		BaseImageURL:      imageURL,
 		BaseImagePath:     "",
-		MachineIDPath:     filepath.Join(vmDir, "machine-id.bin"),
-		EFIVarsPath:       filepath.Join(vmDir, "efi-vars.bin"),
-		CloudInitISO:      filepath.Join(vmDir, "cloud-init.iso"),
-		CloudInitDir:      filepath.Join(vmDir, "cloud-init"),
-		ConsoleLogPath:    filepath.Join(vmDir, "console.log"),
-		LogPath:           filepath.Join(vmDir, "bladerunner.log"),
-		ReportPath:        filepath.Join(vmDir, "startup-report.json"),
-		MetadataPath:      filepath.Join(vmDir, "runtime-metadata.json"),
+		MachineIDPath:     filepath.Join(baseDir, "machine-id.bin"),
+		EFIVarsPath:       filepath.Join(baseDir, "efi-vars.bin"),
+		CloudInitISO:      filepath.Join(baseDir, "cloud-init.iso"),
+		CloudInitDir:      filepath.Join(baseDir, "cloud-init"),
+		ConsoleLogPath:    filepath.Join(baseDir, "console.log"),
+		LogPath:           filepath.Join(baseDir, "bladerunner.log"),
+		ReportPath:        filepath.Join(baseDir, "startup-report.json"),
+		MetadataPath:      filepath.Join(baseDir, "runtime-metadata.json"),
 		SSHUser:           "incus",
 		SSHPublicKey:      "", // Set by EnsureSSHKeys
 		SSHPrivateKeyPath: "", // Set by EnsureSSHKeys
 		SSHConfigPath:     "", // Set after VM starts
-		ClientCertPath:    filepath.Join(vmDir, "client.crt"),
-		ClientKeyPath:     filepath.Join(vmDir, "client.key"),
+		ClientCertPath:    filepath.Join(baseDir, "client.crt"),
+		ClientKeyPath:     filepath.Join(baseDir, "client.key"),
 		TrustPassword:     trustPassword,
 		LocalSSHPort:      6022,
 		LocalAPIPort:      18443,
@@ -119,10 +118,10 @@ func Default(baseDir, name string) (*Config, error) {
 		NetworkMode:       NetworkModeShared,
 		BridgeInterface:   "en0",
 		GUI:               true,
-		CPUs:              uint(cpus),
-		MemoryGiB:         8,
+		CPUs:              DefaultCPUs,
+		MemoryGiB:         DefaultMemoryGiB,
 		Arch:              runtime.GOARCH,
-		WaitForIncus:      5 * time.Minute,
+		WaitForIncus:      DefaultTimeout,
 		DashboardPath:     "/ui/",
 	}
 

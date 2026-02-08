@@ -35,8 +35,15 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	b.WriteString("    shell: /bin/bash\n")
 	b.WriteString("    sudo: ALL=(ALL) NOPASSWD:ALL\n")
 	b.WriteString("    groups: [sudo]\n")
+	b.WriteString("    lock_passwd: false\n")
 	b.WriteString("    ssh_authorized_keys:\n")
 	b.WriteString(fmt.Sprintf("      - %s\n", cfg.SSHPublicKey))
+	b.WriteString("chpasswd:\n")
+	b.WriteString("  expire: false\n")
+	b.WriteString("  users:\n")
+	b.WriteString(fmt.Sprintf("    - name: %s\n", cfg.SSHUser))
+	b.WriteString("      password: bladerunner\n")
+	b.WriteString("      type: text\n")
 	b.WriteString("write_files:\n")
 	b.WriteString("  - path: /var/lib/bladerunner/host-client.crt\n")
 	b.WriteString("    permissions: '0644'\n")
@@ -129,6 +136,17 @@ export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /var/lib/bladerunner
 
+# Load vsock kernel modules early (required for socat VSOCK-LISTEN)
+# These may be built-in on some kernels, so ignore errors.
+modprobe vsock 2>/dev/null || true
+modprobe vmw_vsock_virtio_transport 2>/dev/null || true
+modprobe vhost_vsock 2>/dev/null || true
+
+# Verify vsock is available
+if [ ! -e /dev/vsock ]; then
+  echo "WARNING: /dev/vsock not found, vsock forwarding may not work" >&2
+fi
+
 install_zabbly_repo() {
   if [ ! -e /etc/apt/keyrings/zabbly.asc ]; then
     mkdir -p /etc/apt/keyrings
@@ -185,22 +203,24 @@ for i in $(seq 1 60); do
 done
 
 incus admin init --auto || true
-incus config set core.https_address "[::]:8443"
-incus config set core.trust_password "%s"
+incus config set core.https_address "[::]:8443" || true
 
-if incus config trust add-certificate /var/lib/bladerunner/host-client.crt --name bladerunner-host >/dev/null 2>&1; then
-  true
-elif incus config trust add /var/lib/bladerunner/host-client.crt --name bladerunner-host >/dev/null 2>&1; then
-  true
-fi
+# Add the host client certificate to trust store (try multiple command variants)
+incus config trust add-certificate /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
+  incus config trust add /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
+  echo "Note: Could not add host certificate to trust store (may already exist)"
 
 cat >/etc/systemd/system/bladerunner-vsock-ssh.service <<'UNIT'
 [Unit]
 Description=Bladerunner vsock SSH forward
-After=network.target
+After=network.target ssh.service sshd.service
+Wants=ssh.service sshd.service
+ConditionPathExists=/usr/bin/socat
+ConditionPathExists=/dev/vsock
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sh -c 'until ss -tln | grep -q ":22 "; do sleep 0.5; done'
 ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:22
 Restart=always
 RestartSec=1
@@ -213,9 +233,13 @@ cat >/etc/systemd/system/bladerunner-vsock-incus.service <<'UNIT'
 [Unit]
 Description=Bladerunner vsock Incus API forward
 After=network.target incus.service incus.socket
+Wants=incus.socket
+ConditionPathExists=/usr/bin/socat
+ConditionPathExists=/dev/vsock
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sh -c 'until ss -tln | grep -q ":8443 "; do sleep 0.5; done'
 ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:8443
 Restart=always
 RestartSec=1
@@ -228,10 +252,24 @@ systemctl daemon-reload
 systemctl enable --now bladerunner-vsock-ssh.service
 systemctl enable --now bladerunner-vsock-incus.service
 
+# Wait a moment for services to start
+sleep 2
+
+# Log vsock service status for debugging
+echo "=== vsock diagnostics ===" | tee /var/lib/bladerunner/vsock-diag.txt
+echo "--- /dev/vsock ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
+ls -la /dev/vsock 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || echo "not found"
+echo "--- lsmod | grep vsock ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
+lsmod | grep vsock 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || echo "no modules loaded"
+echo "--- bladerunner-vsock-ssh status ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
+systemctl status bladerunner-vsock-ssh.service --no-pager 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || true
+echo "--- bladerunner-vsock-incus status ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
+systemctl status bladerunner-vsock-incus.service --no-pager 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || true
+
 ip -4 -br addr show scope global > /var/lib/bladerunner/ipv4.txt || true
 incus info > /var/lib/bladerunner/incus-info.txt || true
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
-`, cfg.SSHUser, cfg.TrustPassword, cfg.VsockSSHPort, cfg.VsockAPIPort)
+`, cfg.SSHUser, cfg.VsockSSHPort, cfg.VsockAPIPort)
 }
 
 func indent(s string, spaces int) string {

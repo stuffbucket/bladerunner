@@ -13,27 +13,16 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
 
-const (
-	defaultVMName      = "incus-vm"
-	defaultCPUs        = 4
-	defaultMemoryGiB   = 8
-	defaultDiskSizeGiB = 64
-	defaultTimeout     = 5 * time.Minute
-)
-
-// Use constants to satisfy the linter (they document defaults)
-var _ = []any{defaultVMName, defaultCPUs, defaultMemoryGiB, defaultDiskSizeGiB, defaultTimeout}
-
 var startFlags struct {
-	name      string
 	cpus      uint
 	memory    uint64
 	disk      int
-	headless  bool
+	gui       bool
 	stateDir  string
 	imageURL  string
 	imagePath string
@@ -50,15 +39,14 @@ with cloud-init provisioning.`,
 
 func init() {
 	f := startCmd.Flags()
-	f.StringVarP(&startFlags.name, "name", "n", "incus-vm", "VM name")
-	f.UintVar(&startFlags.cpus, "cpus", 4, "Number of CPUs")
-	f.Uint64Var(&startFlags.memory, "memory", 8, "Memory in GiB")
-	f.IntVar(&startFlags.disk, "disk", 64, "Disk size in GiB")
-	f.BoolVar(&startFlags.headless, "headless", false, "Run without GUI")
+	f.UintVar(&startFlags.cpus, "cpus", config.DefaultCPUs, "Number of CPUs")
+	f.Uint64Var(&startFlags.memory, "memory", config.DefaultMemoryGiB, "Memory in GiB")
+	f.IntVar(&startFlags.disk, "disk", config.DefaultDiskSizeGiB, "Disk size in GiB")
+	f.BoolVar(&startFlags.gui, "gui", false, "Open GUI console window")
 	f.StringVar(&startFlags.stateDir, "state-dir", "", "State directory (default: ~/.local/state/bladerunner)")
 	f.StringVar(&startFlags.imageURL, "image-url", "", "Base image URL")
 	f.StringVar(&startFlags.imagePath, "image-path", "", "Local base image path")
-	f.DurationVar(&startFlags.timeout, "timeout", 5*time.Minute, "Wait timeout for Incus")
+	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -66,16 +54,30 @@ func runStart(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	// Build config
-	cfg, err := config.Default(startFlags.stateDir, startFlags.name)
+	cfg, err := config.Default(startFlags.stateDir)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+
+	// Check if already running
+	client := control.NewClient(cfg.VMDir)
+	if client.IsRunning() {
+		return fmt.Errorf("VM is already running (use 'br stop' first)")
+	}
+
+	// Start control server
+	ctrlServer, err := control.NewServer(cfg.VMDir, cancel)
+	if err != nil {
+		return fmt.Errorf("start control server: %w", err)
+	}
+	defer ctrlServer.Close()
+	go ctrlServer.Start(ctx)
 
 	// Apply flags
 	cfg.CPUs = startFlags.cpus
 	cfg.MemoryGiB = startFlags.memory
 	cfg.DiskSizeGiB = startFlags.disk
-	cfg.GUI = !startFlags.headless
+	cfg.GUI = startFlags.gui
 	cfg.WaitForIncus = startFlags.timeout
 
 	if startFlags.imageURL != "" {
@@ -118,21 +120,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("start vm: %w", err)
 	}
 
-	if cfg.GUI {
-		fmt.Println(subtle("GUI window opened. Waiting for Incus to initialize..."))
-	} else {
-		fmt.Println(subtle("Headless mode. Waiting for Incus to initialize..."))
-	}
-
-	// Wait for Incus in background
-	go func() {
-		if _, err := runner.WaitForIncus(ctx); err != nil {
-			log.Error("wait for incus", "error", err)
-		}
-	}()
-
 	// Write SSH config after VM starts
-	sshConfigPath, err := ssh.WriteSSHConfig(cfg.Name, cfg.LocalSSHPort, cfg.SSHUser, cfg.SSHPrivateKeyPath)
+	sshConfigPath, err := ssh.WriteSSHConfig(cfg.LocalSSHPort, cfg.SSHUser, cfg.SSHPrivateKeyPath)
 	if err != nil {
 		log.Warn("ssh config", "error", err)
 	} else {
@@ -141,13 +130,30 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	fmt.Println(success("✓ VM is running"))
-	fmt.Printf("  %s %s\n", key("SSH:"), command(fmt.Sprintf("br ssh %s", cfg.Name)))
-	fmt.Printf("  %s %s\n", key("Shell:"), command(fmt.Sprintf("br shell %s", cfg.Name)))
+	fmt.Printf("  %s %s\n", key("SSH:"), command("br ssh"))
+	fmt.Printf("  %s %s\n", key("Shell:"), command("br shell"))
 	fmt.Printf("  %s %s\n", key("API:"), value(result.Endpoint))
 	fmt.Println()
 
-	// Wait for shutdown signal
-	<-ctx.Done()
+	// Wait for Incus in background
+	go func() {
+		if _, err := runner.WaitForIncus(ctx); err != nil {
+			log.Error("wait for incus", "error", err)
+		}
+	}()
+
+	if cfg.GUI {
+		fmt.Println(subtle("Opening GUI window (runs on main thread)..."))
+		// StartGUI blocks and runs the macOS event loop on main thread
+		if err := runner.StartGUI(); err != nil {
+			return fmt.Errorf("start gui: %w", err)
+		}
+	} else {
+		fmt.Println(subtle("Headless mode. Press Ctrl+C to stop."))
+		// Wait for shutdown signal
+		<-ctx.Done()
+	}
+
 	fmt.Println(subtle("\nShutting down..."))
 	return nil
 }
