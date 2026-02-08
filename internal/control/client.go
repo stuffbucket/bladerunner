@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -8,24 +9,25 @@ import (
 
 // ClientConfig holds client configuration options.
 type ClientConfig struct {
-	StateDir  string
-	Transport Transport
-	Codec     Codec
+	StateDir   string
+	Transport  Transport
+	WireFormat WireFormat
 }
 
-// Client sends commands to a running control server.
+// Client sends commands to a running control listener.
+// It also implements the Controller interface for remote access.
 type Client struct {
-	address   string
-	transport Transport
-	codec     Codec
+	address    string
+	transport  Transport
+	wireFormat WireFormat
 }
 
-// NewClient creates a client with default transport and codec.
+// NewClient creates a client with default transport and wire format.
 func NewClient(stateDir string) *Client {
 	return NewClientWithConfig(ClientConfig{
-		StateDir:  stateDir,
-		Transport: DefaultTransport,
-		Codec:     DefaultCodec,
+		StateDir:   stateDir,
+		Transport:  DefaultTransport,
+		WireFormat: DefaultWireFormat,
 	})
 }
 
@@ -34,13 +36,13 @@ func NewClientWithConfig(cfg ClientConfig) *Client {
 	if cfg.Transport == nil {
 		cfg.Transport = DefaultTransport
 	}
-	if cfg.Codec == nil {
-		cfg.Codec = DefaultCodec
+	if cfg.WireFormat == nil {
+		cfg.WireFormat = DefaultWireFormat
 	}
 	return &Client{
-		address:   SocketPath(cfg.StateDir),
-		transport: cfg.Transport,
-		codec:     cfg.Codec,
+		address:    SocketPath(cfg.StateDir),
+		transport:  cfg.Transport,
+		wireFormat: cfg.WireFormat,
 	}
 }
 
@@ -66,9 +68,9 @@ func (NetDialer) Dial(network, address string, timeout time.Duration) (net.Conn,
 // Deprecated: Use NewClientWithConfig with a custom Transport instead.
 func NewClientWithDialer(stateDir string, dialer Dialer) *Client {
 	return &Client{
-		address:   SocketPath(stateDir),
-		transport: &dialerAdapter{dialer: dialer},
-		codec:     DefaultCodec,
+		address:    SocketPath(stateDir),
+		transport:  &dialerAdapter{dialer: dialer},
+		wireFormat: DefaultWireFormat,
 	}
 }
 
@@ -101,11 +103,11 @@ func (c *Client) sendCommand(cmd string, timeout time.Duration) (*Message, error
 		return nil, fmt.Errorf("set deadline: %w", err)
 	}
 
-	if err := c.codec.Encode(conn, &Message{Command: cmd}); err != nil {
+	if err := c.wireFormat.Encode(conn, &Message{Command: cmd}); err != nil {
 		return nil, fmt.Errorf("send command: %w", err)
 	}
 
-	resp, err := c.codec.Decode(conn)
+	resp, err := c.wireFormat.Decode(conn)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -113,22 +115,23 @@ func (c *Client) sendCommand(cmd string, timeout time.Duration) (*Message, error
 	return resp, nil
 }
 
-// Send sends an arbitrary command and returns the response.
-func (c *Client) Send(cmd string) (*Message, error) {
-	return c.sendCommand(cmd, clientCmdTimeout)
-}
+// --- Controller interface implementation ---
+// Client implements Controller for remote VM control.
 
-// IsRunning checks if a bladerunner instance is running.
-func (c *Client) IsRunning() bool {
+// PingContext implements Controller.Ping.
+func (c *Client) PingContext(ctx context.Context) error {
 	resp, err := c.sendCommand(CmdPing, clientPingTimeout)
 	if err != nil {
-		return false
+		return err
 	}
-	return resp.Response == RespPong
+	if resp.Error != "" {
+		return fmt.Errorf("ping failed: %s", resp.Error)
+	}
+	return nil
 }
 
-// Stop sends a stop command to the running instance.
-func (c *Client) Stop() error {
+// StopContext implements Controller.Stop.
+func (c *Client) StopContext(ctx context.Context) error {
 	resp, err := c.sendCommand(CmdStop, clientCmdTimeout)
 	if err != nil {
 		if isSocketNotAvailable(err) {
@@ -145,12 +148,12 @@ func (c *Client) Stop() error {
 	return nil
 }
 
-// Status gets the status of the running instance.
-func (c *Client) Status() (string, error) {
+// StatusContext implements Controller.Status.
+func (c *Client) StatusContext(ctx context.Context) (string, error) {
 	resp, err := c.sendCommand(CmdStatus, clientPingTimeout)
 	if err != nil {
 		if isSocketNotAvailable(err) {
-			return RespStopped, nil
+			return StatusStopped, nil
 		}
 		return "", fmt.Errorf("get status: %w", err)
 	}
@@ -158,4 +161,40 @@ func (c *Client) Status() (string, error) {
 		return "", fmt.Errorf("server error: %s", resp.Error)
 	}
 	return resp.Response, nil
+}
+
+// Controller interface adapter
+
+func (c *Client) Ping(ctx context.Context) error {
+	return c.PingContext(ctx)
+}
+
+func (c *Client) Stop(ctx context.Context) error {
+	return c.StopContext(ctx)
+}
+
+func (c *Client) Status(ctx context.Context) (string, error) {
+	return c.StatusContext(ctx)
+}
+
+// --- Convenience methods (without context) ---
+
+// IsRunning checks if a bladerunner instance is running.
+func (c *Client) IsRunning() bool {
+	return c.PingContext(context.Background()) == nil
+}
+
+// StopVM stops the VM (convenience method without context).
+func (c *Client) StopVM() error {
+	return c.StopContext(context.Background())
+}
+
+// GetStatus returns the VM status (convenience method without context).
+func (c *Client) GetStatus() (string, error) {
+	return c.StatusContext(context.Background())
+}
+
+// Send sends an arbitrary command and returns the response.
+func (c *Client) Send(cmd string) (*Message, error) {
+	return c.sendCommand(cmd, clientCmdTimeout)
 }

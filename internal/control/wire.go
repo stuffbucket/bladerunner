@@ -8,29 +8,29 @@ import (
 	"strings"
 )
 
-// Message represents a protocol message (command or response).
+// Message represents a control protocol message.
 type Message struct {
 	Command  string `json:"command,omitempty"`
 	Response string `json:"response,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
-// Codec handles message encoding and decoding.
-// Implementations can provide line-based, JSON, protobuf, etc.
-type Codec interface {
-	// Encode writes a message to the writer
+// WireFormat handles message serialization for the control protocol.
+// Implementations provide different encoding strategies (text, JSON, etc.).
+type WireFormat interface {
+	// Encode writes a message to the writer.
 	Encode(w io.Writer, msg *Message) error
-	// Decode reads a message from the reader
+	// Decode reads a message from the reader.
 	Decode(r io.Reader) (*Message, error)
 }
 
-// LineCodec implements a simple newline-delimited text protocol.
+// LineFormat implements a simple newline-delimited text protocol.
 // Commands: "ping\n", "stop\n", "status\n"
 // Responses: "ok\n", "pong\n", "running\n", "error: message\n"
-type LineCodec struct{}
+type LineFormat struct{}
 
 // Encode writes a message as a newline-terminated string.
-func (LineCodec) Encode(w io.Writer, msg *Message) error {
+func (LineFormat) Encode(w io.Writer, msg *Message) error {
 	var line string
 	switch {
 	case msg.Error != "":
@@ -47,7 +47,7 @@ func (LineCodec) Encode(w io.Writer, msg *Message) error {
 }
 
 // Decode reads a newline-terminated message.
-func (LineCodec) Decode(r io.Reader) (*Message, error) {
+func (LineFormat) Decode(r io.Reader) (*Message, error) {
 	reader := bufio.NewReader(r)
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -55,21 +55,21 @@ func (LineCodec) Decode(r io.Reader) (*Message, error) {
 	}
 	text := strings.TrimSpace(line)
 
-	// Parse as error response
+	// Parse error response
 	if strings.HasPrefix(text, "error: ") {
 		return &Message{Error: strings.TrimPrefix(text, "error: ")}, nil
 	}
 
-	// Could be a command or response - context determines interpretation
+	// Context determines if this is command or response
 	return &Message{Response: text, Command: text}, nil
 }
 
-// JSONCodec implements a JSON-based protocol.
+// JSONFormat implements a JSON-based wire format.
 // Each message is a single JSON object followed by a newline.
-type JSONCodec struct{}
+type JSONFormat struct{}
 
 // Encode writes a message as JSON.
-func (JSONCodec) Encode(w io.Writer, msg *Message) error {
+func (JSONFormat) Encode(w io.Writer, msg *Message) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -79,7 +79,7 @@ func (JSONCodec) Encode(w io.Writer, msg *Message) error {
 }
 
 // Decode reads a JSON message.
-func (JSONCodec) Decode(r io.Reader) (*Message, error) {
+func (JSONFormat) Decode(r io.Reader) (*Message, error) {
 	reader := bufio.NewReader(r)
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -92,5 +92,18 @@ func (JSONCodec) Decode(r io.Reader) (*Message, error) {
 	return &msg, nil
 }
 
-// DefaultCodec is the codec used by default (line-based).
-var DefaultCodec Codec = LineCodec{}
+// DefaultWireFormat is the wire format used by default (line-based).
+var DefaultWireFormat WireFormat = LineFormat{}
+
+// Backward compatibility aliases
+type (
+	// Codec is deprecated, use WireFormat instead.
+	Codec = WireFormat
+	// LineCodec is deprecated, use LineFormat instead.
+	LineCodec = LineFormat
+	// JSONCodec is deprecated, use JSONFormat instead.
+	JSONCodec = JSONFormat
+)
+
+// DefaultCodec is deprecated, use DefaultWireFormat instead.
+var DefaultCodec = DefaultWireFormat

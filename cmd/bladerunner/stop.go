@@ -35,7 +35,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("Stopping VM (sending graceful shutdown signal)...")
-	if err := client.Stop(); err != nil {
+	if err := client.StopVM(); err != nil {
 		return err
 	}
 

@@ -40,18 +40,18 @@ func TestServerAndClient(t *testing.T) {
 	})
 
 	t.Run("status", func(t *testing.T) {
-		status, err := client.Status()
+		status, err := client.GetStatus()
 		if err != nil {
-			t.Fatalf("Status() error = %v", err)
+			t.Fatalf("GetStatus() error = %v", err)
 		}
 		if status != "running" {
-			t.Errorf("Status() = %q, want %q", status, "running")
+			t.Errorf("GetStatus() = %q, want %q", status, "running")
 		}
 	})
 
 	t.Run("stop", func(t *testing.T) {
-		if err := client.Stop(); err != nil {
-			t.Fatalf("Stop() error = %v", err)
+		if err := client.StopVM(); err != nil {
+			t.Fatalf("StopVM() error = %v", err)
 		}
 		if !stopCalled.Load() {
 			t.Error("stopFunc was not called")
@@ -70,19 +70,19 @@ func TestClientNotRunning(t *testing.T) {
 	})
 
 	t.Run("Status returns stopped when not running", func(t *testing.T) {
-		status, err := client.Status()
+		status, err := client.GetStatus()
 		if err != nil {
-			t.Fatalf("Status() error = %v", err)
+			t.Fatalf("GetStatus() error = %v", err)
 		}
 		if status != "stopped" {
-			t.Errorf("Status() = %q, want %q", status, "stopped")
+			t.Errorf("GetStatus() = %q, want %q", status, "stopped")
 		}
 	})
 
 	t.Run("Stop returns error when not running", func(t *testing.T) {
-		err := client.Stop()
+		err := client.StopVM()
 		if err == nil {
-			t.Error("Stop() error = nil, want error")
+			t.Error("StopVM() error = nil, want error")
 		}
 	})
 }
@@ -214,8 +214,8 @@ func TestClientWithMockDialer(t *testing.T) {
 		dialer := &mockDialer{conn: conn}
 		client := NewClientWithDialer("/tmp/test", dialer)
 
-		if err := client.Stop(); err != nil {
-			t.Errorf("Stop() error = %v", err)
+		if err := client.StopVM(); err != nil {
+			t.Errorf("StopVM() error = %v", err)
 		}
 		if string(conn.writeData) != "stop\n" {
 			t.Errorf("sent = %q, want %q", conn.writeData, "stop\n")
@@ -227,12 +227,12 @@ func TestClientWithMockDialer(t *testing.T) {
 		dialer := &mockDialer{conn: conn}
 		client := NewClientWithDialer("/tmp/test", dialer)
 
-		status, err := client.Status()
+		status, err := client.GetStatus()
 		if err != nil {
-			t.Errorf("Status() error = %v", err)
+			t.Errorf("GetStatus() error = %v", err)
 		}
 		if status != "running" {
-			t.Errorf("Status() = %q, want %q", status, "running")
+			t.Errorf("GetStatus() = %q, want %q", status, "running")
 		}
 	})
 }
