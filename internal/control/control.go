@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	SocketName = "control.sock"
+	SocketName         = "control.sock"
+	SocketCheckTimeout = 100 * time.Millisecond
 )
 
 // Server listens on a Unix socket for control commands
@@ -31,7 +32,12 @@ type Server struct {
 func NewServer(stateDir string, stopFunc func()) (*Server, error) {
 	socketPath := filepath.Join(stateDir, SocketName)
 
-	// Remove stale socket if exists
+	// Remove socket only if it's not responding (stale)
+	if _, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond); err == nil {
+		// Socket is responsive, server still running
+		return nil, fmt.Errorf("server already running on %s", socketPath)
+	}
+	// Socket is not responsive or doesn't exist, safe to remove
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove stale socket: %w", err)
 	}
@@ -76,7 +82,7 @@ func (s *Server) Start(ctx context.Context) {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
@@ -87,18 +93,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 	cmd := strings.TrimSpace(line)
 	switch cmd {
 	case "stop":
-		conn.Write([]byte("ok\n"))
+		_, _ = conn.Write([]byte("ok\n"))
 		s.mu.Lock()
 		if s.stopFunc != nil {
 			s.stopFunc()
 		}
 		s.mu.Unlock()
 	case "status":
-		conn.Write([]byte("running\n"))
+		_, _ = conn.Write([]byte("running\n"))
 	case "ping":
-		conn.Write([]byte("pong\n"))
+		_, _ = conn.Write([]byte("pong\n"))
 	default:
-		conn.Write([]byte("error: unknown command\n"))
+		_, _ = conn.Write([]byte("error: unknown command\n"))
 	}
 }
 
@@ -148,8 +154,12 @@ func (c *Client) IsRunning() bool {
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(2 * time.Second))
-	conn.Write([]byte("ping\n"))
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return false
+	}
+	if _, err := conn.Write([]byte("ping\n")); err != nil {
+		return false
+	}
 
 	reader := bufio.NewReader(conn)
 	resp, err := reader.ReadString('\n')
@@ -170,7 +180,9 @@ func (c *Client) Stop() error {
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return fmt.Errorf("set deadline: %w", err)
+	}
 	if _, err := conn.Write([]byte("stop\n")); err != nil {
 		return fmt.Errorf("send stop command: %w", err)
 	}
@@ -198,7 +210,9 @@ func (c *Client) Status() (string, error) {
 	}
 	defer conn.Close()
 
-	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return "", fmt.Errorf("set deadline: %w", err)
+	}
 	if _, err := conn.Write([]byte("status\n")); err != nil {
 		return "", fmt.Errorf("send status command: %w", err)
 	}

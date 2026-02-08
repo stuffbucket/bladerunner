@@ -139,9 +139,14 @@ func TestUnknownCommand(t *testing.T) {
 	}
 	defer conn.Close()
 
-	conn.Write([]byte("unknown\n"))
+	if _, err := conn.Write([]byte("unknown\n")); err != nil {
+		t.Fatalf("write error = %v", err)
+	}
 	buf := make([]byte, 100)
-	n, _ := conn.Read(buf)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read error = %v", err)
+	}
 	resp := string(buf[:n])
 	if resp != "error: unknown command\n" {
 		t.Errorf("response = %q, want %q", resp, "error: unknown command\n")
