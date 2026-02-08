@@ -77,8 +77,8 @@ func TestClientNotRunning(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetStatus() error = %v", err)
 		}
-		if status != "stopped" {
-			t.Errorf("GetStatus() = %q, want %q", status, "stopped")
+		if status != StatusStopped {
+			t.Errorf("GetStatus() = %q, want %q", status, StatusStopped)
 		}
 	})
 
@@ -234,8 +234,8 @@ func TestClientWithMockDialer(t *testing.T) {
 		if err != nil {
 			t.Errorf("GetStatus() error = %v", err)
 		}
-		if status != "running" {
-			t.Errorf("GetStatus() = %q, want %q", status, "running")
+		if status != StatusRunning {
+			t.Errorf("GetStatus() = %q, want %q", status, StatusRunning)
 		}
 	})
 }
@@ -394,8 +394,8 @@ func TestClientDialError(t *testing.T) {
 		if err != nil {
 			t.Errorf("GetStatus() error = %v, want nil", err)
 		}
-		if status != "stopped" {
-			t.Errorf("GetStatus() = %q, want %q", status, "stopped")
+		if status != StatusStopped {
+			t.Errorf("GetStatus() = %q, want %q", status, StatusStopped)
 		}
 	})
 }
@@ -547,7 +547,7 @@ func TestConcurrentClients(t *testing.T) {
 					}
 				} else {
 					status, err := client.GetStatus()
-					if err != nil || status != "running" {
+					if err != nil || status != StatusRunning {
 						statusErrors.Add(1)
 					} else {
 						successfulStatuses.Add(1)
