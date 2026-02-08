@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
 var shellCmd = &cobra.Command{
@@ -32,16 +32,12 @@ func runShell(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find SSH config
-	configDir, err := sshConfigDir()
-	if err != nil {
-		return err
-	}
-	configPath := filepath.Join(configDir, "config")
+	configPath := ssh.ConfigPath()
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		fmt.Fprintln(os.Stderr, errorf("VM not running or not configured"))
 		fmt.Fprintln(os.Stderr, subtle("Start it with: br start"))
-		return nil
+		return fmt.Errorf("VM not configured")
 	}
 
 	// Build ssh command with -t for PTY

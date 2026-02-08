@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
 var sshCmd = &cobra.Command{
@@ -32,16 +32,12 @@ func runSSH(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find SSH config
-	configDir, err := sshConfigDir()
-	if err != nil {
-		return err
-	}
-	configPath := filepath.Join(configDir, "config")
+	configPath := ssh.ConfigPath()
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		fmt.Fprintln(os.Stderr, errorf("VM not running or not configured"))
 		fmt.Fprintln(os.Stderr, subtle("Start it with: br start"))
-		return nil
+		return fmt.Errorf("VM not configured")
 	}
 
 	// Build ssh command
@@ -55,15 +51,4 @@ func runSSH(cmd *cobra.Command, args []string) error {
 	sshExecArgs = append(sshExecArgs, sshArgs...)
 
 	return syscall.Exec(sshPath, sshExecArgs, os.Environ())
-}
-
-func sshConfigDir() (string, error) {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bladerunner", "ssh"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config", "bladerunner", "ssh"), nil
 }

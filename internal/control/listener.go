@@ -65,7 +65,7 @@ func NewListenerWithConfig(cfg ListenerConfig) (*Listener, error) {
 	// Check if listener is already running
 	conn, err := cfg.Transport.Dial(address, SocketCheckTimeout)
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("listener already running on %s", address)
 	}
 
@@ -82,7 +82,7 @@ func NewListenerWithConfig(cfg ListenerConfig) (*Listener, error) {
 	// Restrict permissions for Unix sockets
 	if _, ok := cfg.Transport.(UnixTransport); ok {
 		if err := os.Chmod(address, 0o600); err != nil {
-			netListen.Close()
+			_ = netListen.Close()
 			return nil, fmt.Errorf("chmod socket: %w", err)
 		}
 	}
@@ -127,12 +127,12 @@ func (l *Listener) Start(ctx context.Context) {
 				continue
 			}
 		}
-		go l.handleConnection(conn)
+		go l.handleConnection(ctx, conn)
 	}
 }
 
-func (l *Listener) handleConnection(conn net.Conn) {
-	defer conn.Close()
+func (l *Listener) handleConnection(ctx context.Context, conn net.Conn) {
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(listenerRWTimeout))
 
 	msg, err := l.wireFormat.Decode(conn)
@@ -140,7 +140,6 @@ func (l *Listener) handleConnection(conn net.Conn) {
 		return
 	}
 
-	ctx := context.Background()
 	req := NewRequest(msg.Command)
 	resp := l.router.Dispatch(ctx, req)
 	_ = l.wireFormat.Encode(conn, resp)

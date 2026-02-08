@@ -68,7 +68,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("start control server: %w", err)
 	}
-	defer ctrlServer.Close()
+	defer func() { _ = ctrlServer.Close() }()
 	go ctrlServer.Start(ctx)
 
 	// Apply flags

@@ -95,7 +95,7 @@ func TestConfigValidation(t *testing.T) {
 	}{
 		{
 			name:    "valid config passes",
-			setup:   func(c *Config) {},
+			setup:   func(_ *Config) {},
 			wantErr: false,
 		},
 		{

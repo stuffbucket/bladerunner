@@ -69,6 +69,11 @@ func WriteSSHConfig(port int, user string, identityFile string) (string, error) 
 	return configPath, nil
 }
 
+// ConfigPath returns the path to the SSH config file.
+func ConfigPath() string {
+	return filepath.Join(Dir(), "config")
+}
+
 // Command returns the SSH command to connect to the VM.
 func Command(configPath string) string {
 	return fmt.Sprintf("ssh -F %s bladerunner", configPath)

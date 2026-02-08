@@ -79,7 +79,7 @@ type dialerAdapter struct {
 	dialer Dialer
 }
 
-func (d *dialerAdapter) Listen(address string) (net.Listener, error) {
+func (d *dialerAdapter) Listen(_ string) (net.Listener, error) {
 	return nil, fmt.Errorf("dialerAdapter does not support Listen")
 }
 
@@ -87,7 +87,7 @@ func (d *dialerAdapter) Dial(address string, timeout time.Duration) (net.Conn, e
 	return d.dialer.Dial("unix", address, timeout)
 }
 
-func (d *dialerAdapter) Cleanup(address string) error {
+func (d *dialerAdapter) Cleanup(_ string) error {
 	return nil
 }
 
@@ -97,7 +97,7 @@ func (c *Client) sendCommand(cmd string, timeout time.Duration) (*Message, error
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, fmt.Errorf("set deadline: %w", err)
@@ -119,7 +119,7 @@ func (c *Client) sendCommand(cmd string, timeout time.Duration) (*Message, error
 // Client implements Controller for remote VM control.
 
 // PingContext implements Controller.Ping.
-func (c *Client) PingContext(ctx context.Context) error {
+func (c *Client) PingContext(_ context.Context) error {
 	resp, err := c.sendCommand(CmdPing, clientPingTimeout)
 	if err != nil {
 		return err
@@ -131,7 +131,7 @@ func (c *Client) PingContext(ctx context.Context) error {
 }
 
 // StopContext implements Controller.Stop.
-func (c *Client) StopContext(ctx context.Context) error {
+func (c *Client) StopContext(_ context.Context) error {
 	resp, err := c.sendCommand(CmdStop, clientCmdTimeout)
 	if err != nil {
 		if isSocketNotAvailable(err) {
@@ -149,7 +149,7 @@ func (c *Client) StopContext(ctx context.Context) error {
 }
 
 // StatusContext implements Controller.Status.
-func (c *Client) StatusContext(ctx context.Context) (string, error) {
+func (c *Client) StatusContext(_ context.Context) (string, error) {
 	resp, err := c.sendCommand(CmdStatus, clientPingTimeout)
 	if err != nil {
 		if isSocketNotAvailable(err) {

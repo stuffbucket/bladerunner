@@ -191,7 +191,7 @@ func downloadFile(ctx context.Context, url, path string) error {
 	progress := logging.NewByteProgress("Downloading base image", resp.ContentLength)
 	if _, err := io.Copy(f, io.TeeReader(resp.Body, progress)); err != nil {
 		progress.Fail(err)
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("write image to disk: %w", err)
 	}
 	progress.Finish()

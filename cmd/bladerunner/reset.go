@@ -132,13 +132,13 @@ func runReset(cmd *cobra.Command, args []string) error {
 	// Clean up empty cloud-init directory
 	cloudInitDir := filepath.Join(stateDir, "cloud-init")
 	if entries, err := os.ReadDir(cloudInitDir); err == nil && len(entries) == 0 {
-		os.Remove(cloudInitDir)
+		_ = os.Remove(cloudInitDir)
 	}
 
 	// If --all, remove the entire directory if empty
 	if resetFlags.all {
 		if entries, err := os.ReadDir(stateDir); err == nil && len(entries) == 0 {
-			os.Remove(stateDir)
+			_ = os.Remove(stateDir)
 			fmt.Printf("\n✓ Removed empty VM directory\n")
 		}
 	}

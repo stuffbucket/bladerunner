@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -46,8 +47,8 @@ func TestServerAndClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetStatus() error = %v", err)
 		}
-		if status != "running" {
-			t.Errorf("GetStatus() = %q, want %q", status, "running")
+		if status != StatusRunning {
+			t.Errorf("GetStatus() = %q, want %q", status, StatusRunning)
 		}
 	})
 
@@ -180,9 +181,9 @@ func (m *mockConn) Write(b []byte) (n int, err error) {
 func (m *mockConn) Close() error                       { m.closed = true; return nil }
 func (m *mockConn) LocalAddr() net.Addr                { return nil }
 func (m *mockConn) RemoteAddr() net.Addr               { return nil }
-func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
-func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
-func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
+func (m *mockConn) SetDeadline(_ time.Time) error      { return nil }
+func (m *mockConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (m *mockConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 // mockDialer implements Dialer for testing
 type mockDialer struct {
@@ -190,7 +191,7 @@ type mockDialer struct {
 	err  error
 }
 
-func (m *mockDialer) Dial(network, address string, timeout time.Duration) (net.Conn, error) {
+func (m *mockDialer) Dial(_, _ string, _ time.Duration) (net.Conn, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -335,7 +336,7 @@ type errorConn struct {
 	closed   bool
 }
 
-func (e *errorConn) Read(b []byte) (n int, err error) {
+func (e *errorConn) Read(_ []byte) (n int, err error) {
 	if e.readErr != nil {
 		return 0, e.readErr
 	}
@@ -352,9 +353,9 @@ func (e *errorConn) Write(b []byte) (n int, err error) {
 func (e *errorConn) Close() error                       { e.closed = true; return nil }
 func (e *errorConn) LocalAddr() net.Addr                { return nil }
 func (e *errorConn) RemoteAddr() net.Addr               { return nil }
-func (e *errorConn) SetDeadline(t time.Time) error      { return nil }
-func (e *errorConn) SetReadDeadline(t time.Time) error  { return nil }
-func (e *errorConn) SetWriteDeadline(t time.Time) error { return nil }
+func (e *errorConn) SetDeadline(_ time.Time) error      { return nil }
+func (e *errorConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (e *errorConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 // errorDialer returns errors or faulty connections
 type errorDialer struct {
@@ -362,7 +363,7 @@ type errorDialer struct {
 	conn    net.Conn
 }
 
-func (e *errorDialer) Dial(network, address string, timeout time.Duration) (net.Conn, error) {
+func (e *errorDialer) Dial(_, _ string, _ time.Duration) (net.Conn, error) {
 	if e.dialErr != nil {
 		return nil, e.dialErr
 	}
@@ -834,7 +835,7 @@ func TestControllerFunc(t *testing.T) {
 				return context.DeadlineExceeded
 			},
 		}
-		if err := ctrl.Ping(context.Background()); err != context.DeadlineExceeded {
+		if err := ctrl.Ping(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("Ping() = %v, want %v", err, context.DeadlineExceeded)
 		}
 	})

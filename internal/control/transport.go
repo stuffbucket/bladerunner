@@ -48,7 +48,7 @@ func (TCPTransport) Dial(address string, timeout time.Duration) (net.Conn, error
 }
 
 // Cleanup is a no-op for TCP (no file to remove).
-func (TCPTransport) Cleanup(address string) error {
+func (TCPTransport) Cleanup(_ string) error {
 	return nil
 }
 
