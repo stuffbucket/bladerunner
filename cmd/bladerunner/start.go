@@ -3,17 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
@@ -88,11 +86,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Setup logging
-	logFile, err := setupLogging(cfg.LogPath)
-	if err != nil {
+	if err := logging.Init(cfg.LogPath); err != nil {
 		return err
 	}
-	defer func() { _ = logFile.Close() }()
 
 	// Ensure SSH keys
 	keyPair, err := ssh.EnsureKeyPair()
@@ -123,7 +119,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Write SSH config after VM starts
 	sshConfigPath, err := ssh.WriteSSHConfig(cfg.LocalSSHPort, cfg.SSHUser, cfg.SSHPrivateKeyPath)
 	if err != nil {
-		log.Warn("ssh config", "error", err)
+		logging.L().Warn("ssh config", "error", err)
 	} else {
 		cfg.SSHConfigPath = sshConfigPath
 	}
@@ -138,7 +134,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Wait for Incus in background
 	go func() {
 		if _, err := runner.WaitForIncus(ctx); err != nil {
-			log.Error("wait for incus", "error", err)
+			logging.L().Error("wait for incus", "error", err)
 		}
 	}()
 
@@ -156,17 +152,4 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	fmt.Println(subtle("\nShutting down..."))
 	return nil
-}
-
-func setupLogging(logPath string) (*os.File, error) {
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	log.SetOutput(f)
-	log.SetLevel(log.DebugLevel)
-	return f, nil
 }

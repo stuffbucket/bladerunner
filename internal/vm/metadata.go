@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 type runtimeMetadata struct {
@@ -15,7 +16,7 @@ type runtimeMetadata struct {
 }
 
 func loadOrCreateMetadata(cfg *config.Config) (*runtimeMetadata, error) {
-	if fileExists(cfg.MetadataPath) {
+	if util.FileExists(cfg.MetadataPath) {
 		b, err := os.ReadFile(cfg.MetadataPath)
 		if err == nil {
 			var md runtimeMetadata

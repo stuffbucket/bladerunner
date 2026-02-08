@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/log"
+	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
 const (
@@ -66,7 +66,7 @@ func (s *Server) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			default:
-				log.Warn("control socket accept error", "error", err)
+				logging.L().Warn("control socket accept error", "error", err)
 				continue
 			}
 		}
@@ -108,10 +108,18 @@ func (s *Server) Close() error {
 	s.stopFunc = nil // prevent stop from being called during shutdown
 	s.mu.Unlock()
 
+	var errs []error
 	if s.listener != nil {
-		s.listener.Close()
+		if err := s.listener.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close listener: %w", err))
+		}
 	}
-	os.Remove(s.socketPath)
+	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("remove socket: %w", err))
+	}
+	if len(errs) > 0 {
+		return errs[0] // return first error
+	}
 	return nil
 }
 
@@ -155,7 +163,7 @@ func (c *Client) IsRunning() bool {
 func (c *Client) Stop() error {
 	conn, err := net.DialTimeout("unix", c.socketPath, time.Second)
 	if err != nil {
-		if os.IsNotExist(err) || strings.Contains(err.Error(), "connection refused") {
+		if isSocketNotAvailable(err) {
 			return fmt.Errorf("VM is not running")
 		}
 		return fmt.Errorf("connect to control socket: %w", err)
@@ -183,7 +191,7 @@ func (c *Client) Stop() error {
 func (c *Client) Status() (string, error) {
 	conn, err := net.DialTimeout("unix", c.socketPath, time.Second)
 	if err != nil {
-		if os.IsNotExist(err) || strings.Contains(err.Error(), "connection refused") {
+		if isSocketNotAvailable(err) {
 			return "stopped", nil
 		}
 		return "", fmt.Errorf("connect to control socket: %w", err)
@@ -202,4 +210,18 @@ func (c *Client) Status() (string, error) {
 	}
 
 	return strings.TrimSpace(resp), nil
+}
+
+// isSocketNotAvailable returns true if the error indicates the socket doesn't exist
+// or the connection was refused (server not running).
+func isSocketNotAvailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "no such file") ||
+		strings.Contains(errStr, "connection refused")
 }

@@ -3,10 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 )
 
@@ -26,10 +26,7 @@ func init() {
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
-	stateDir, err := getDefaultStateDir()
-	if err != nil {
-		return err
-	}
+	stateDir := config.DefaultStateDir()
 
 	client := control.NewClient(stateDir)
 
@@ -56,12 +53,4 @@ func runStop(cmd *cobra.Command, args []string) error {
 	}
 
 	return fmt.Errorf("timeout waiting for VM to stop")
-}
-
-func getDefaultStateDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "state", "bladerunner"), nil
 }

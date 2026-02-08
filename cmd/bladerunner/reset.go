@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
 var resetCmd = &cobra.Command{
@@ -32,7 +33,7 @@ func init() {
 }
 
 func runReset(cmd *cobra.Command, args []string) error {
-	stateDir := defaultStateDir()
+	stateDir := config.DefaultStateDir()
 
 	if _, err := os.Stat(stateDir); os.IsNotExist(err) {
 		fmt.Printf("No VM found at %s\n", stateDir)
@@ -149,15 +150,4 @@ func runReset(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-func defaultStateDir() string {
-	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bladerunner")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".local", "state", "bladerunner")
-	}
-	return filepath.Join(home, ".local", "state", "bladerunner")
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 func ensureVMDir(cfg *config.Config) error {
@@ -25,7 +26,7 @@ func ensureVMDir(cfg *config.Config) error {
 
 func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	if cfg.BaseImagePath != "" {
-		if !fileExists(cfg.BaseImagePath) {
+		if !util.FileExists(cfg.BaseImagePath) {
 			return "", fmt.Errorf("base image path does not exist: %s", cfg.BaseImagePath)
 		}
 		if err := ensureRawDiskImage(cfg.BaseImagePath); err != nil {
@@ -36,7 +37,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	}
 
 	path := filepath.Join(cfg.VMDir, "base-image.raw")
-	if fileExists(path) {
+	if util.FileExists(path) {
 		if err := ensureRawDiskImage(path); err != nil {
 			return "", err
 		}
@@ -62,7 +63,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 }
 
 func ensureMainDisk(cfg *config.Config, baseImagePath string) error {
-	if fileExists(cfg.DiskPath) {
+	if util.FileExists(cfg.DiskPath) {
 		logging.L().Info("reusing existing VM disk", "path", cfg.DiskPath)
 		return nil
 	}

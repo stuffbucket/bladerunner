@@ -74,7 +74,7 @@ func DefaultBaseImageURL(goarch string) (string, error) {
 
 func Default(baseDir string) (*Config, error) {
 	if baseDir == "" {
-		baseDir = defaultStateDir()
+		baseDir = DefaultStateDir()
 	}
 
 	imageURL, err := DefaultBaseImageURL(runtime.GOARCH)
@@ -201,9 +201,9 @@ func randomHex(bytesLen int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// defaultStateDir returns the XDG-compliant state directory for bladerunner.
+// DefaultStateDir returns the XDG-compliant state directory for bladerunner.
 // Precedence: BLADERUNNER_STATE_DIR > XDG_STATE_HOME/bladerunner > ~/.local/state/bladerunner
-func defaultStateDir() string {
+func DefaultStateDir() string {
 	if d := os.Getenv("BLADERUNNER_STATE_DIR"); d != "" {
 		return d
 	}

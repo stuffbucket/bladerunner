@@ -18,8 +18,6 @@ var (
 		ReportTimestamp: true,
 		TimeFormat:      "2006-01-02 15:04:05",
 	})
-
-	configuredLogPath string
 )
 
 // Init configures a logger that writes to stdout and a rotating file.
@@ -49,7 +47,6 @@ func Init(logPath string) error {
 
 	mu.Lock()
 	logger = l
-	configuredLogPath = logPath
 	mu.Unlock()
 
 	logger.Info("logging initialized", "path", logPath)
@@ -66,10 +63,4 @@ func L() *charmlog.Logger {
 	mu.RLock()
 	defer mu.RUnlock()
 	return logger
-}
-
-func Path() string {
-	mu.RLock()
-	defer mu.RUnlock()
-	return configuredLogPath
 }

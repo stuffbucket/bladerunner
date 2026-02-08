@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/stuffbucket/bladerunner/internal/util"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -39,7 +40,7 @@ func EnsureKeyPair() (*KeyPair, error) {
 	pubPath := filepath.Join(sshDir, pubKeyFileName)
 
 	// Check if keys already exist
-	if fileExists(privPath) && fileExists(pubPath) {
+	if util.FileExists(privPath) && util.FileExists(pubPath) {
 		pubKey, err := os.ReadFile(pubPath)
 		if err != nil {
 			return nil, fmt.Errorf("read public key: %w", err)
@@ -101,9 +102,4 @@ func ConfigDir() string {
 		return filepath.Join(".", ".config", "bladerunner")
 	}
 	return filepath.Join(home, ".config", "bladerunner")
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

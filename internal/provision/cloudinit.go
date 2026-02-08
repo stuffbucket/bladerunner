@@ -12,6 +12,7 @@ import (
 
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
@@ -114,7 +115,7 @@ func BuildCloudInitISO(ctx context.Context, cfg *config.Config) error {
 
 	candidates := []string{baseOut, baseOut + ".iso", baseOut + ".cdr", cfg.CloudInitISO}
 	for _, c := range candidates {
-		if fileExists(c) {
+		if util.FileExists(c) {
 			if c != cfg.CloudInitISO {
 				_ = os.Remove(cfg.CloudInitISO)
 				if err := os.Rename(c, cfg.CloudInitISO); err != nil {
@@ -283,9 +284,4 @@ func indent(s string, spaces int) string {
 		lines[i] = prefix + lines[i]
 	}
 	return strings.Join(lines, "\n") + "\n"
-}
-
-func fileExists(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && !st.IsDir()
 }
