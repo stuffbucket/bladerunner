@@ -78,7 +78,7 @@ sign: build ## Codesign binary with virtualization entitlements
 	@codesign --entitlements "$(ENTITLEMENTS)" -s "$(CODESIGN_IDENTITY)" "$(BIN_PATH)"
 	@echo "Signed $(BIN_PATH) with $(ENTITLEMENTS)"
 
-check: fmt-check vet test ## Run formatting check, vet, and tests
+check: fmt-check vet lint test ## Run formatting check, vet, lint, and tests
 
 lint: ## Run golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "Install: brew install golangci-lint"; exit 1; }

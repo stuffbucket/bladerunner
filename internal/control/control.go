@@ -14,9 +14,32 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
+// Socket and timeout constants
 const (
 	SocketName         = "control.sock"
 	SocketCheckTimeout = 100 * time.Millisecond
+
+	// Timeouts for client/server operations
+	dialTimeout       = 1 * time.Second
+	serverRWTimeout   = 5 * time.Second
+	clientPingTimeout = 2 * time.Second
+	clientCmdTimeout  = 5 * time.Second
+)
+
+// Protocol commands
+const (
+	cmdPing   = "ping"
+	cmdStop   = "stop"
+	cmdStatus = "status"
+)
+
+// Protocol responses
+const (
+	respOK      = "ok"
+	respPong    = "pong"
+	respRunning = "running"
+	respStopped = "stopped"
+	respErrFmt  = "error: %s"
 )
 
 // Server listens on a Unix socket for control commands
@@ -33,7 +56,7 @@ func NewServer(stateDir string, stopFunc func()) (*Server, error) {
 	socketPath := filepath.Join(stateDir, SocketName)
 
 	// Remove socket only if it's not responding (stale)
-	if _, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond); err == nil {
+	if _, err := net.DialTimeout("unix", socketPath, SocketCheckTimeout); err == nil {
 		// Socket is responsive, server still running
 		return nil, fmt.Errorf("server already running on %s", socketPath)
 	}
@@ -82,7 +105,7 @@ func (s *Server) Start(ctx context.Context) {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(serverRWTimeout))
 
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
@@ -92,19 +115,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	cmd := strings.TrimSpace(line)
 	switch cmd {
-	case "stop":
-		_, _ = conn.Write([]byte("ok\n"))
+	case cmdStop:
+		_, _ = conn.Write([]byte(respOK + "\n"))
 		s.mu.Lock()
 		if s.stopFunc != nil {
 			s.stopFunc()
 		}
 		s.mu.Unlock()
-	case "status":
-		_, _ = conn.Write([]byte("running\n"))
-	case "ping":
-		_, _ = conn.Write([]byte("pong\n"))
+	case cmdStatus:
+		_, _ = conn.Write([]byte(respRunning + "\n"))
+	case cmdPing:
+		_, _ = conn.Write([]byte(respPong + "\n"))
 	default:
-		_, _ = conn.Write([]byte("error: unknown command\n"))
+		_, _ = conn.Write([]byte(fmt.Sprintf(respErrFmt, "unknown command") + "\n"))
 	}
 }
 
@@ -134,87 +157,54 @@ func SocketPath(stateDir string) string {
 	return filepath.Join(stateDir, SocketName)
 }
 
+// Dialer abstracts connection creation for testing
+type Dialer interface {
+	Dial(network, address string, timeout time.Duration) (net.Conn, error)
+}
+
+// NetDialer is the default Dialer using net.DialTimeout
+type NetDialer struct{}
+
+// Dial implements Dialer using net.DialTimeout
+func (NetDialer) Dial(network, address string, timeout time.Duration) (net.Conn, error) {
+	return net.DialTimeout(network, address, timeout)
+}
+
 // Client sends commands to a running bladerunner instance
 type Client struct {
 	socketPath string
+	dialer     Dialer
 }
 
 // NewClient creates a client for the control socket
 func NewClient(stateDir string) *Client {
 	return &Client{
 		socketPath: SocketPath(stateDir),
+		dialer:     NetDialer{},
 	}
 }
 
-// IsRunning checks if a bladerunner instance is running
-func (c *Client) IsRunning() bool {
-	conn, err := net.DialTimeout("unix", c.socketPath, time.Second)
-	if err != nil {
-		return false
+// NewClientWithDialer creates a client with a custom dialer for testing
+func NewClientWithDialer(stateDir string, dialer Dialer) *Client {
+	return &Client{
+		socketPath: SocketPath(stateDir),
+		dialer:     dialer,
 	}
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		return false
-	}
-	if _, err := conn.Write([]byte("ping\n")); err != nil {
-		return false
-	}
-
-	reader := bufio.NewReader(conn)
-	resp, err := reader.ReadString('\n')
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(resp) == "pong"
 }
 
-// Stop sends a stop command to the running instance
-func (c *Client) Stop() error {
-	conn, err := net.DialTimeout("unix", c.socketPath, time.Second)
+// sendCommand sends a command and returns the response
+func (c *Client) sendCommand(cmd string, timeout time.Duration) (string, error) {
+	conn, err := c.dialer.Dial("unix", c.socketPath, dialTimeout)
 	if err != nil {
-		if isSocketNotAvailable(err) {
-			return fmt.Errorf("VM is not running")
-		}
-		return fmt.Errorf("connect to control socket: %w", err)
+		return "", err
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return fmt.Errorf("set deadline: %w", err)
-	}
-	if _, err := conn.Write([]byte("stop\n")); err != nil {
-		return fmt.Errorf("send stop command: %w", err)
-	}
-
-	reader := bufio.NewReader(conn)
-	resp, err := reader.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-
-	if strings.TrimSpace(resp) != "ok" {
-		return fmt.Errorf("unexpected response: %s", resp)
-	}
-	return nil
-}
-
-// Status gets the status of the running instance
-func (c *Client) Status() (string, error) {
-	conn, err := net.DialTimeout("unix", c.socketPath, time.Second)
-	if err != nil {
-		if isSocketNotAvailable(err) {
-			return "stopped", nil
-		}
-		return "", fmt.Errorf("connect to control socket: %w", err)
-	}
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return "", fmt.Errorf("set deadline: %w", err)
 	}
-	if _, err := conn.Write([]byte("status\n")); err != nil {
-		return "", fmt.Errorf("send status command: %w", err)
+	if _, err := conn.Write([]byte(cmd + "\n")); err != nil {
+		return "", fmt.Errorf("send command: %w", err)
 	}
 
 	reader := bufio.NewReader(conn)
@@ -224,6 +214,42 @@ func (c *Client) Status() (string, error) {
 	}
 
 	return strings.TrimSpace(resp), nil
+}
+
+// IsRunning checks if a bladerunner instance is running
+func (c *Client) IsRunning() bool {
+	resp, err := c.sendCommand(cmdPing, clientPingTimeout)
+	if err != nil {
+		return false
+	}
+	return resp == respPong
+}
+
+// Stop sends a stop command to the running instance
+func (c *Client) Stop() error {
+	resp, err := c.sendCommand(cmdStop, clientCmdTimeout)
+	if err != nil {
+		if isSocketNotAvailable(err) {
+			return fmt.Errorf("VM is not running")
+		}
+		return fmt.Errorf("send stop: %w", err)
+	}
+	if resp != respOK {
+		return fmt.Errorf("unexpected response: %s", resp)
+	}
+	return nil
+}
+
+// Status gets the status of the running instance
+func (c *Client) Status() (string, error) {
+	resp, err := c.sendCommand(cmdStatus, clientPingTimeout)
+	if err != nil {
+		if isSocketNotAvailable(err) {
+			return respStopped, nil
+		}
+		return "", fmt.Errorf("get status: %w", err)
+	}
+	return resp, nil
 }
 
 // isSocketNotAvailable returns true if the error indicates the socket doesn't exist

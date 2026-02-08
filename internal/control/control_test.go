@@ -152,3 +152,87 @@ func TestUnknownCommand(t *testing.T) {
 		t.Errorf("response = %q, want %q", resp, "error: unknown command\n")
 	}
 }
+
+// mockConn implements net.Conn for testing
+type mockConn struct {
+	readData  []byte
+	readPos   int
+	writeData []byte
+	closed    bool
+}
+
+func (m *mockConn) Read(b []byte) (n int, err error) {
+	if m.readPos >= len(m.readData) {
+		return 0, net.ErrClosed
+	}
+	n = copy(b, m.readData[m.readPos:])
+	m.readPos += n
+	return n, nil
+}
+
+func (m *mockConn) Write(b []byte) (n int, err error) {
+	m.writeData = append(m.writeData, b...)
+	return len(b), nil
+}
+
+func (m *mockConn) Close() error                       { m.closed = true; return nil }
+func (m *mockConn) LocalAddr() net.Addr                { return nil }
+func (m *mockConn) RemoteAddr() net.Addr               { return nil }
+func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
+func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
+func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
+
+// mockDialer implements Dialer for testing
+type mockDialer struct {
+	conn *mockConn
+	err  error
+}
+
+func (m *mockDialer) Dial(network, address string, timeout time.Duration) (net.Conn, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.conn, nil
+}
+
+func TestClientWithMockDialer(t *testing.T) {
+	t.Run("IsRunning with mock", func(t *testing.T) {
+		conn := &mockConn{readData: []byte("pong\n")}
+		dialer := &mockDialer{conn: conn}
+		client := NewClientWithDialer("/tmp/test", dialer)
+
+		if !client.IsRunning() {
+			t.Error("IsRunning() = false, want true")
+		}
+		if string(conn.writeData) != "ping\n" {
+			t.Errorf("sent = %q, want %q", conn.writeData, "ping\n")
+		}
+	})
+
+	t.Run("Stop with mock", func(t *testing.T) {
+		conn := &mockConn{readData: []byte("ok\n")}
+		dialer := &mockDialer{conn: conn}
+		client := NewClientWithDialer("/tmp/test", dialer)
+
+		if err := client.Stop(); err != nil {
+			t.Errorf("Stop() error = %v", err)
+		}
+		if string(conn.writeData) != "stop\n" {
+			t.Errorf("sent = %q, want %q", conn.writeData, "stop\n")
+		}
+	})
+
+	t.Run("Status with mock", func(t *testing.T) {
+		conn := &mockConn{readData: []byte("running\n")}
+		dialer := &mockDialer{conn: conn}
+		client := NewClientWithDialer("/tmp/test", dialer)
+
+		status, err := client.Status()
+		if err != nil {
+			t.Errorf("Status() error = %v", err)
+		}
+		if status != "running" {
+			t.Errorf("Status() = %q, want %q", status, "running")
+		}
+	})
+}
