@@ -277,10 +277,7 @@ func renderBar(fraction float64, width int) string {
 		fraction = 1
 	}
 
-	full := int(fraction * float64(width))
-	if full > width {
-		full = width
-	}
+	full := min(int(fraction*float64(width)), width)
 	empty := width - full
 	return fmt.Sprintf("[%s%s] %3.0f%%", strings.Repeat("#", full), strings.Repeat("-", empty), fraction*100)
 }

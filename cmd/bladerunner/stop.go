@@ -22,7 +22,7 @@ var stopCmd = &cobra.Command{
 }
 
 func init() {
-	stopCmd.Flags().IntVarP(&stopFlags.timeout, "timeout", "t", 30, "Seconds to wait for graceful shutdown")
+	stopCmd.Flags().IntVarP(&stopFlags.timeout, "timeout", "t", config.DefaultStopTimeout, "Seconds to wait for graceful shutdown")
 }
 
 func runStop(cmd *cobra.Command, args []string) error {

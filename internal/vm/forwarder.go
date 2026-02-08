@@ -44,9 +44,7 @@ func (f *portForwarder) Start() error {
 	f.ln = ln
 	logging.L().Info("started port forwarder", "name", f.name, "listen", f.listenAddr, "guest_vsock_port", f.guestPort)
 
-	f.wg.Add(1)
-	go func() {
-		defer f.wg.Done()
+	f.wg.Go(func() {
 		for {
 			conn, err := f.ln.Accept()
 			if err != nil {
@@ -58,10 +56,8 @@ func (f *portForwarder) Start() error {
 				return
 			}
 
-			f.wg.Add(1)
-			go func(hostConn net.Conn) {
-				defer f.wg.Done()
-				defer func() { _ = hostConn.Close() }()
+			f.wg.Go(func() {
+				defer func() { _ = conn.Close() }()
 
 				guestConn, err := f.dialWithRetry()
 				if err != nil {
@@ -70,17 +66,17 @@ func (f *portForwarder) Start() error {
 				}
 				defer func() { _ = guestConn.Close() }()
 
-				proxyBidirectional(hostConn, guestConn)
-			}(conn)
+				proxyBidirectional(conn, guestConn)
+			})
 		}
-	}()
+	})
 
 	return nil
 }
 
 func (f *portForwarder) dialWithRetry() (net.Conn, error) {
 	var lastErr error
-	for i := 0; i < forwarderDialRetries; i++ {
+	for i := range forwarderDialRetries {
 		select {
 		case <-f.stop:
 			return nil, net.ErrClosed

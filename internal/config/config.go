@@ -21,6 +21,17 @@ const (
 	DefaultMemoryGiB   = 8
 	DefaultDiskSizeGiB = 64
 	DefaultTimeout     = 5 * time.Minute
+
+	// Port assignments (avoid conflicts with common services)
+	DefaultLocalSSHPort = 6022
+	DefaultLocalAPIPort = 18443
+	DefaultVsockSSHPort = 10022
+	DefaultVsockAPIPort = 18443
+
+	// Validation constraints
+	MinDiskSizeGiB     = 16
+	TrustPasswordLen   = 16
+	DefaultStopTimeout = 30 // seconds
 )
 
 type Config struct {
@@ -82,7 +93,7 @@ func Default(baseDir string) (*Config, error) {
 		return nil, err
 	}
 
-	trustPassword, err := randomHex(16)
+	trustPassword, err := randomHex(TrustPasswordLen)
 	if err != nil {
 		return nil, fmt.Errorf("generate trust password: %w", err)
 	}
@@ -111,10 +122,10 @@ func Default(baseDir string) (*Config, error) {
 		ClientCertPath:    filepath.Join(baseDir, "client.crt"),
 		ClientKeyPath:     filepath.Join(baseDir, "client.key"),
 		TrustPassword:     trustPassword,
-		LocalSSHPort:      6022,
-		LocalAPIPort:      18443,
-		VsockSSHPort:      10022,
-		VsockAPIPort:      18443,
+		LocalSSHPort:      DefaultLocalSSHPort,
+		LocalAPIPort:      DefaultLocalAPIPort,
+		VsockSSHPort:      DefaultVsockSSHPort,
+		VsockAPIPort:      DefaultVsockAPIPort,
 		NetworkMode:       NetworkModeShared,
 		BridgeInterface:   "en0",
 		GUI:               true,
@@ -165,8 +176,8 @@ func (c *Config) Validate() error {
 	if c.VsockSSHPort == c.VsockAPIPort {
 		return errors.New("guest vsock ssh and api ports must differ")
 	}
-	if c.DiskSizeGiB < 16 {
-		return errors.New("disk size must be at least 16 GiB")
+	if c.DiskSizeGiB < MinDiskSizeGiB {
+		return fmt.Errorf("disk size must be at least %d GiB", MinDiskSizeGiB)
 	}
 	if c.CPUs < 1 {
 		return errors.New("cpus must be >= 1")

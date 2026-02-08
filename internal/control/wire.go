@@ -56,8 +56,8 @@ func (LineFormat) Decode(r io.Reader) (*Message, error) {
 	text := strings.TrimSpace(line)
 
 	// Parse error response
-	if strings.HasPrefix(text, "error: ") {
-		return &Message{Error: strings.TrimPrefix(text, "error: ")}, nil
+	if errMsg, found := strings.CutPrefix(text, "error: "); found {
+		return &Message{Error: errMsg}, nil
 	}
 
 	// Context determines if this is command or response

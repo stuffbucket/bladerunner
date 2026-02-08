@@ -261,37 +261,19 @@ func (r *Runner) loadOrCreateMachineIdentifier() (*vz.GenericMachineIdentifier, 
 }
 
 func clampCPU(requested uint) uint {
-	cpu := requested
-	if cpu < 1 {
-		cpu = 1
-	}
+	cpu := max(requested, 1)
 	maxCPU := vz.VirtualMachineConfigurationMaximumAllowedCPUCount()
 	minCPU := vz.VirtualMachineConfigurationMinimumAllowedCPUCount()
-	if cpu > maxCPU {
-		cpu = maxCPU
-	}
-	if cpu < minCPU {
-		cpu = minCPU
-	}
-	return cpu
+	return max(min(cpu, maxCPU), minCPU)
 }
 
 func clampMemory(bytes uint64) uint64 {
-	mem := bytes
 	maxMem := vz.VirtualMachineConfigurationMaximumAllowedMemorySize()
 	minMem := vz.VirtualMachineConfigurationMinimumAllowedMemorySize()
-	if mem > maxMem {
-		mem = maxMem
-	}
-	if mem < minMem {
-		mem = minMem
-	}
+	mem := max(min(bytes, maxMem), minMem)
 
 	// Must be in MiB increments.
 	const mib = 1024 * 1024
 	mem = (mem / mib) * mib
-	if mem < minMem {
-		mem = minMem
-	}
-	return mem
+	return max(mem, minMem)
 }

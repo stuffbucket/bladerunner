@@ -47,9 +47,11 @@ linters:
     - dupl         # Code duplication detection
     - iface        # Interface pollution detection
 
-    # Style
+    # Style & modernization
     - revive       # Fast, configurable linter
     - dupword      # Duplicate words in comments/strings
+    - mnd          # Magic number detection
+    - modernize    # Modern Go idioms and API usage
 
   settings:
     errcheck:
@@ -119,6 +121,20 @@ linters:
         - identical  # interfaces with identical methods
         - unused     # unused interface methods
 
+    mnd:
+      ignored-numbers:
+        - '0'
+        - '1'
+        - '2'
+        - '10'
+        - '100'
+        - '1000'
+      ignored-functions:
+        - 'time.*'      # time.Sleep(5 * time.Second)
+        - 'make'        # make([]byte, 1024)
+        - 'os.*'        # os.Chmod(path, 0o644)
+        - 'strconv.*'   # strconv.FormatInt(n, 10)
+
     revive:
       rules:
         - name: blank-imports
@@ -161,6 +177,7 @@ linters:
           - containedctx  # Test helpers may store context
           - errchkjson    # Test data often ignores errors
           - noctx         # Test helpers use simplified net calls
+          - modernize     # Test patterns are intentionally simple
 
       # Main and command files often have setup code
       - path: cmd/
@@ -189,6 +206,26 @@ linters:
         linters:
           - revive
         text: "var-naming"
+
+      # Logging config has inline literals (file size, backups, days)
+      - path: 'internal/logging/'
+        linters:
+          - mnd
+
+      # VM config has display dimensions and memory math
+      - path: 'internal/vm/(vmconfig|runner).*\.go'
+        linters:
+          - mnd
+
+      # Provision has YAML indentation literals
+      - path: 'internal/provision/'
+        linters:
+          - mnd
+
+      # Metadata has MAC address manipulation bits
+      - path: 'internal/vm/metadata\.go'
+        linters:
+          - mnd
 
 formatters:
   enable:
