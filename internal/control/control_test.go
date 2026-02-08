@@ -12,17 +12,44 @@ import (
 	"time"
 )
 
+// wireFormats defines the wire formats to test integration against.
+var wireFormats = []struct {
+	name   string
+	format WireFormat
+}{
+	{"LineFormat", LineFormat{}},
+	{"JSONFormat", JSONFormat{}},
+}
+
 func TestServerAndClient(t *testing.T) {
-	tmpDir := t.TempDir()
+	for _, wf := range wireFormats {
+		t.Run(wf.name, func(t *testing.T) {
+			testServerAndClient(t, wf.format)
+		})
+	}
+}
+
+func testServerAndClient(t *testing.T, format WireFormat) {
+	// Use /tmp for shorter socket path (Unix sockets have 108 char limit)
+	tmpDir, err := os.MkdirTemp("/tmp", "ctrl-test-")
+	if err != nil {
+		t.Fatalf("MkdirTemp() error = %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	var stopCalled atomic.Bool
 	stopFunc := func() {
 		stopCalled.Store(true)
 	}
 
-	server, err := NewServer(tmpDir, stopFunc)
+	ctrl := NewLocalController(stopFunc)
+	server, err := NewListenerWithConfig(ListenerConfig{
+		StateDir:   tmpDir,
+		WireFormat: format,
+		Controller: ctrl,
+	})
 	if err != nil {
-		t.Fatalf("NewServer() error = %v", err)
+		t.Fatalf("NewListenerWithConfig() error = %v", err)
 	}
 	defer server.Close()
 
@@ -34,7 +61,10 @@ func TestServerAndClient(t *testing.T) {
 	// Give the server time to start
 	time.Sleep(50 * time.Millisecond)
 
-	client := NewClient(tmpDir)
+	client := NewClientWithConfig(ClientConfig{
+		StateDir:   tmpDir,
+		WireFormat: format,
+	})
 
 	t.Run("ping", func(t *testing.T) {
 		if !client.IsRunning() {
