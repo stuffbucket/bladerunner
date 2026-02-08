@@ -148,8 +148,8 @@ func TestUnknownCommand(t *testing.T) {
 		t.Fatalf("read error = %v", err)
 	}
 	resp := string(buf[:n])
-	if resp != "error: unknown command\n" {
-		t.Errorf("response = %q, want %q", resp, "error: unknown command\n")
+	if resp != "error: unknown command: unknown\n" {
+		t.Errorf("response = %q, want %q", resp, "error: unknown command: unknown\n")
 	}
 }
 
@@ -233,6 +233,93 @@ func TestClientWithMockDialer(t *testing.T) {
 		}
 		if status != "running" {
 			t.Errorf("Status() = %q, want %q", status, "running")
+		}
+	})
+}
+
+func TestNewRequest(t *testing.T) {
+	t.Run("simple command", func(t *testing.T) {
+		req := NewRequest("ping")
+		if req.Command != "ping" {
+			t.Errorf("Command = %q, want %q", req.Command, "ping")
+		}
+		if len(req.Args) != 0 {
+			t.Errorf("Args = %v, want empty", req.Args)
+		}
+	})
+
+	t.Run("command with key=value args", func(t *testing.T) {
+		req := NewRequest("config.set key=value timeout=30")
+		if req.Command != "config.set" {
+			t.Errorf("Command = %q, want %q", req.Command, "config.set")
+		}
+		if req.Args["key"] != "value" {
+			t.Errorf("Args[key] = %q, want %q", req.Args["key"], "value")
+		}
+		if req.Args["timeout"] != "30" {
+			t.Errorf("Args[timeout] = %q, want %q", req.Args["timeout"], "30")
+		}
+	})
+
+	t.Run("command with positional args", func(t *testing.T) {
+		req := NewRequest("echo hello world")
+		if req.Args["0"] != "hello" {
+			t.Errorf("Args[0] = %q, want %q", req.Args["0"], "hello")
+		}
+		if req.Args["1"] != "world" {
+			t.Errorf("Args[1] = %q, want %q", req.Args["1"], "world")
+		}
+	})
+}
+
+func TestRouter(t *testing.T) {
+	t.Run("basic dispatch", func(t *testing.T) {
+		router := NewRouter()
+		router.HandleFunc("echo", func(_ context.Context, req *Request) *Message {
+			return &Message{Response: req.Args["0"]}
+		})
+
+		resp := router.Dispatch(context.Background(), NewRequest("echo hello"))
+		if resp.Response != "hello" {
+			t.Errorf("Response = %q, want %q", resp.Response, "hello")
+		}
+	})
+
+	t.Run("namespaced commands", func(t *testing.T) {
+		configRouter := NewRouter()
+		configRouter.HandleFunc("get", func(_ context.Context, req *Request) *Message {
+			return &Message{Response: "value-for-" + req.Args["key"]}
+		})
+
+		router := NewRouter()
+		router.Mount("config", configRouter)
+
+		resp := router.Dispatch(context.Background(), NewRequest("config.get key=name"))
+		if resp.Response != "value-for-name" {
+			t.Errorf("Response = %q, want %q", resp.Response, "value-for-name")
+		}
+	})
+
+	t.Run("unknown command", func(t *testing.T) {
+		router := NewRouter()
+		resp := router.Dispatch(context.Background(), NewRequest("nonexistent"))
+		if resp.Error == "" {
+			t.Error("expected error for unknown command")
+		}
+	})
+
+	t.Run("list commands", func(t *testing.T) {
+		configRouter := NewRouter()
+		configRouter.HandleFunc("get", func(_ context.Context, _ *Request) *Message { return nil })
+		configRouter.HandleFunc("set", func(_ context.Context, _ *Request) *Message { return nil })
+
+		router := NewRouter()
+		router.HandleFunc("ping", func(_ context.Context, _ *Request) *Message { return nil })
+		router.Mount("config", configRouter)
+
+		cmds := router.Commands()
+		if len(cmds) != 3 {
+			t.Errorf("Commands() len = %d, want 3", len(cmds))
 		}
 	})
 }
