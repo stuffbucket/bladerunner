@@ -69,6 +69,11 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("start control server: %w", err)
 	}
 	defer func() { _ = ctrlServer.Close() }()
+
+	// Mount config handler (captures cfg by reference; sees values set after VM start)
+	cfgHandler := control.NewConfigRouter(cfg)
+	ctrlServer.Router().Mount("config", cfgHandler.Router())
+
 	go ctrlServer.Start(ctx)
 
 	// Apply flags
@@ -95,7 +100,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("ssh keys: %w", err)
 	}
+	cfgHandler.Lock()
 	cfg.SetSSHKeys(keyPair.PublicKey, keyPair.PrivateKeyPath)
+	cfgHandler.Unlock()
 
 	// Create and start VM
 	runner, err := vm.NewRunner(cfg)
@@ -121,7 +128,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		logging.L().Warn("ssh config", "error", err)
 	} else {
+		cfgHandler.Lock()
 		cfg.SSHConfigPath = sshConfigPath
+		cfgHandler.Unlock()
 	}
 
 	fmt.Println()

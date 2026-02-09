@@ -103,13 +103,17 @@ func (c *Client) sendCommand(cmd string, timeout time.Duration) (*Message, error
 		return nil, fmt.Errorf("set deadline: %w", err)
 	}
 
-	if err := c.wireFormat.Encode(conn, &Message{Command: cmd}); err != nil {
+	if err := c.wireFormat.Encode(conn, &Message{Version: ProtocolVersion, Command: cmd}); err != nil {
 		return nil, fmt.Errorf("send command: %w", err)
 	}
 
 	resp, err := c.wireFormat.Decode(conn)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.Version > ProtocolVersion {
+		return nil, fmt.Errorf("server protocol version %d is newer than client version %d; upgrade bladerunner", resp.Version, ProtocolVersion)
 	}
 
 	return resp, nil
@@ -192,6 +196,18 @@ func (c *Client) StopVM() error {
 // GetStatus returns the VM status (convenience method without context).
 func (c *Client) GetStatus() (string, error) {
 	return c.StatusContext(context.Background())
+}
+
+// GetConfig retrieves a config value from the running instance by key.
+func (c *Client) GetConfig(key string) (string, error) {
+	resp, err := c.sendCommand(BuildCommand(CmdConfigGet, key), clientCmdTimeout)
+	if err != nil {
+		return "", fmt.Errorf("get config %s: %w", key, err)
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("config error: %s", resp.Error)
+	}
+	return resp.Response, nil
 }
 
 // Send sends an arbitrary command and returns the response.

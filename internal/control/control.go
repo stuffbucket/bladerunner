@@ -60,6 +60,10 @@ func (f ControllerFunc) Stop(ctx context.Context) error {
 	return nil
 }
 
+// ProtocolVersion is the current control protocol version.
+// Bump this when making breaking changes to the wire format.
+const ProtocolVersion = 1
+
 // Status constants
 const (
 	StatusRunning = "running"
@@ -71,6 +75,37 @@ const (
 	CmdPing   = "ping"
 	CmdStop   = "stop"
 	CmdStatus = "status"
+)
+
+// Config command constants
+const (
+	CmdConfigGet  = "config.get"
+	CmdConfigSet  = "config.set"
+	CmdConfigKeys = "config.keys"
+)
+
+// Config key constants
+const (
+	ConfigKeySSHConfigPath     = "ssh-config-path"
+	ConfigKeySSHUser           = "ssh-user"
+	ConfigKeySSHPrivateKeyPath = "ssh-private-key-path"
+	ConfigKeyLocalSSHPort      = "local-ssh-port"
+	ConfigKeyLocalAPIPort      = "local-api-port"
+	ConfigKeyName              = "name"
+	ConfigKeyVMDir             = "vm-dir"
+	ConfigKeyStateDir          = "state-dir"
+	ConfigKeyCPUs              = "cpus"
+	ConfigKeyMemoryGiB         = "memory-gib"
+	ConfigKeyDiskSizeGiB       = "disk-size-gib"
+	ConfigKeyArch              = "arch"
+	ConfigKeyHostname          = "hostname"
+	ConfigKeyNetworkMode       = "network-mode"
+	ConfigKeyLogPath           = "log-path"
+	ConfigKeyGUI               = "gui"
+	ConfigKeyPID               = "pid"
+	ConfigKeyBaseImageURL      = "base-image-url"
+	ConfigKeyBaseImagePath     = "base-image-path"
+	ConfigKeyCloudInitISO      = "cloud-init-iso"
 )
 
 // Response constants

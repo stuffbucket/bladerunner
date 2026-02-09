@@ -181,8 +181,8 @@ func TestUnknownCommand(t *testing.T) {
 		t.Fatalf("read error = %v", err)
 	}
 	resp := string(buf[:n])
-	if resp != "error: unknown command: unknown\n" {
-		t.Errorf("response = %q, want %q", resp, "error: unknown command: unknown\n")
+	if resp != "v1 error: unknown command: unknown\n" {
+		t.Errorf("response = %q, want %q", resp, "v1 error: unknown command: unknown\n")
 	}
 }
 
@@ -230,33 +230,33 @@ func (m *mockDialer) Dial(_, _ string, _ time.Duration) (net.Conn, error) {
 
 func TestClientWithMockDialer(t *testing.T) {
 	t.Run("IsRunning with mock", func(t *testing.T) {
-		conn := &mockConn{readData: []byte("pong\n")}
+		conn := &mockConn{readData: []byte("v1 pong\n")}
 		dialer := &mockDialer{conn: conn}
 		client := NewClientWithDialer("/tmp/test", dialer)
 
 		if !client.IsRunning() {
 			t.Error("IsRunning() = false, want true")
 		}
-		if string(conn.writeData) != "ping\n" {
-			t.Errorf("sent = %q, want %q", conn.writeData, "ping\n")
+		if string(conn.writeData) != "v1 ping\n" {
+			t.Errorf("sent = %q, want %q", conn.writeData, "v1 ping\n")
 		}
 	})
 
 	t.Run("Stop with mock", func(t *testing.T) {
-		conn := &mockConn{readData: []byte("ok\n")}
+		conn := &mockConn{readData: []byte("v1 ok\n")}
 		dialer := &mockDialer{conn: conn}
 		client := NewClientWithDialer("/tmp/test", dialer)
 
 		if err := client.StopVM(); err != nil {
 			t.Errorf("StopVM() error = %v", err)
 		}
-		if string(conn.writeData) != "stop\n" {
-			t.Errorf("sent = %q, want %q", conn.writeData, "stop\n")
+		if string(conn.writeData) != "v1 stop\n" {
+			t.Errorf("sent = %q, want %q", conn.writeData, "v1 stop\n")
 		}
 	})
 
 	t.Run("Status with mock", func(t *testing.T) {
-		conn := &mockConn{readData: []byte("running\n")}
+		conn := &mockConn{readData: []byte("v1 running\n")}
 		dialer := &mockDialer{conn: conn}
 		client := NewClientWithDialer("/tmp/test", dialer)
 
@@ -266,6 +266,26 @@ func TestClientWithMockDialer(t *testing.T) {
 		}
 		if status != StatusRunning {
 			t.Errorf("GetStatus() = %q, want %q", status, StatusRunning)
+		}
+	})
+
+	t.Run("legacy v0 response accepted", func(t *testing.T) {
+		conn := &mockConn{readData: []byte("pong\n")}
+		dialer := &mockDialer{conn: conn}
+		client := NewClientWithDialer("/tmp/test", dialer)
+
+		if !client.IsRunning() {
+			t.Error("IsRunning() = false, want true for legacy v0 response")
+		}
+	})
+
+	t.Run("future version response rejected", func(t *testing.T) {
+		conn := &mockConn{readData: []byte("v99 pong\n")}
+		dialer := &mockDialer{conn: conn}
+		client := NewClientWithDialer("/tmp/test", dialer)
+
+		if client.IsRunning() {
+			t.Error("IsRunning() = true, want false for future version response")
 		}
 	})
 }
@@ -738,9 +758,83 @@ func TestWireFormatEncodeDecode(t *testing.T) {
 		}
 	})
 
+	t.Run("LineFormat versioned command", func(t *testing.T) {
+		format := LineFormat{}
+		var buf mockBuffer
+		msg := &Message{Version: 1, Command: "ping"}
+
+		if err := format.Encode(&buf, msg); err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+		if buf.String() != "v1 ping\n" {
+			t.Errorf("Encode() = %q, want %q", buf.String(), "v1 ping\n")
+		}
+	})
+
+	t.Run("LineFormat versioned error", func(t *testing.T) {
+		format := LineFormat{}
+		var buf mockBuffer
+		msg := &Message{Version: 1, Error: "bad request"}
+
+		if err := format.Encode(&buf, msg); err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+		if buf.String() != "v1 error: bad request\n" {
+			t.Errorf("Encode() = %q, want %q", buf.String(), "v1 error: bad request\n")
+		}
+	})
+
+	t.Run("LineFormat decode versioned", func(t *testing.T) {
+		format := LineFormat{}
+		buf := &mockBuffer{data: []byte("v1 pong\n")}
+
+		msg, err := format.Decode(buf)
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if msg.Version != 1 {
+			t.Errorf("Version = %d, want 1", msg.Version)
+		}
+		if msg.Response != "pong" {
+			t.Errorf("Response = %q, want %q", msg.Response, "pong")
+		}
+	})
+
+	t.Run("LineFormat decode versioned error", func(t *testing.T) {
+		format := LineFormat{}
+		buf := &mockBuffer{data: []byte("v1 error: failed\n")}
+
+		msg, err := format.Decode(buf)
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if msg.Version != 1 {
+			t.Errorf("Version = %d, want 1", msg.Version)
+		}
+		if msg.Error != "failed" {
+			t.Errorf("Error = %q, want %q", msg.Error, "failed")
+		}
+	})
+
+	t.Run("LineFormat decode legacy no version", func(t *testing.T) {
+		format := LineFormat{}
+		buf := &mockBuffer{data: []byte("pong\n")}
+
+		msg, err := format.Decode(buf)
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if msg.Version != 0 {
+			t.Errorf("Version = %d, want 0", msg.Version)
+		}
+		if msg.Response != "pong" {
+			t.Errorf("Response = %q, want %q", msg.Response, "pong")
+		}
+	})
+
 	t.Run("JSONFormat roundtrip", func(t *testing.T) {
 		format := JSONFormat{}
-		original := &Message{Command: "test", Response: "value"}
+		original := &Message{Version: 1, Command: "test", Response: "value"}
 
 		var buf mockBuffer
 		if err := format.Encode(&buf, original); err != nil {
@@ -752,11 +846,30 @@ func TestWireFormatEncodeDecode(t *testing.T) {
 			t.Fatalf("Decode() error = %v", err)
 		}
 
+		if decoded.Version != original.Version {
+			t.Errorf("Version = %d, want %d", decoded.Version, original.Version)
+		}
 		if decoded.Command != original.Command {
 			t.Errorf("Command = %q, want %q", decoded.Command, original.Command)
 		}
 		if decoded.Response != original.Response {
 			t.Errorf("Response = %q, want %q", decoded.Response, original.Response)
+		}
+	})
+
+	t.Run("JSONFormat legacy no version", func(t *testing.T) {
+		format := JSONFormat{}
+		buf := &mockBuffer{data: []byte(`{"command":"ping"}` + "\n")}
+
+		msg, err := format.Decode(buf)
+		if err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if msg.Version != 0 {
+			t.Errorf("Version = %d, want 0 for legacy JSON", msg.Version)
+		}
+		if msg.Command != "ping" {
+			t.Errorf("Command = %q, want %q", msg.Command, "ping")
 		}
 	})
 }

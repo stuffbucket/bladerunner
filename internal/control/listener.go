@@ -140,8 +140,19 @@ func (l *Listener) handleConnection(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// Reject unsupported future protocol versions
+	if msg.Version > ProtocolVersion {
+		resp := &Message{
+			Version: ProtocolVersion,
+			Error:   fmt.Sprintf("unsupported protocol version %d (server supports up to %d)", msg.Version, ProtocolVersion),
+		}
+		_ = l.wireFormat.Encode(conn, resp)
+		return
+	}
+
 	req := NewRequest(msg.Command)
 	resp := l.router.Dispatch(ctx, req)
+	resp.Version = ProtocolVersion
 	_ = l.wireFormat.Encode(conn, resp)
 }
 

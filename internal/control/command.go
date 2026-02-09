@@ -50,3 +50,11 @@ type HandlerFunc func(ctx context.Context, req *Request) *Message
 func (f HandlerFunc) Handle(ctx context.Context, req *Request) *Message {
 	return f(ctx, req)
 }
+
+// BuildCommand constructs a command string from a command name and positional arguments.
+func BuildCommand(cmd string, args ...string) string {
+	parts := make([]string, 0, 1+len(args))
+	parts = append(parts, cmd)
+	parts = append(parts, args...)
+	return strings.Join(parts, " ")
+}

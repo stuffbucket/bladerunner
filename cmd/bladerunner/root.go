@@ -23,7 +23,9 @@ func init() {
 	rootCmd.SetVersionTemplate(fmt.Sprintf("br version %s\n", version))
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(shellCmd)
+	rootCmd.AddCommand(incusCmd)
 	rootCmd.AddCommand(resetCmd)
 }
