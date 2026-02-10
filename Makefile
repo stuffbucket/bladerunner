@@ -21,7 +21,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help setup cache deps tidy fmt fmt-check vet test build build-release run sign check clean distclean lint
+.PHONY: help setup cache deps tidy fmt fmt-check vet test build build-release run sign check clean distclean lint vulncheck trivy security
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -32,6 +32,8 @@ setup: ## First-time setup for contributors
 	@chmod +x .githooks/commit-msg .githooks/pre-push 2>/dev/null || true
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "Installing golangci-lint..."; brew install golangci-lint; }
 	@command -v goreleaser >/dev/null 2>&1 || { echo "Installing goreleaser..."; brew install goreleaser; }
+	@command -v govulncheck >/dev/null 2>&1 || { echo "Installing govulncheck..."; go install golang.org/x/vuln/cmd/govulncheck@latest; }
+	@command -v trivy >/dev/null 2>&1 || { echo "Installing trivy..."; brew install trivy; }
 	@echo "✓ Setup complete"
 
 cache:
@@ -85,11 +87,20 @@ sign: build ## Codesign binary with virtualization entitlements
 	@codesign --entitlements "$(ENTITLEMENTS)" -s "$(CODESIGN_IDENTITY)" "$(BIN_PATH)"
 	@echo "Signed $(BIN_PATH) with $(ENTITLEMENTS)"
 
-check: fmt-check vet lint test ## Run formatting check, vet, lint, and tests
+check: fmt-check vet lint test ## Run fast checks (format, vet, lint, test)
 
 lint: ## Run golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "Install: brew install golangci-lint"; exit 1; }
 	@golangci-lint run
+
+vulncheck: ## Run govulncheck with suppression list
+	@./scripts/govulncheck.sh
+
+trivy: ## Run Trivy filesystem vulnerability scan
+	@command -v trivy >/dev/null 2>&1 || { echo "Install: brew install trivy"; exit 1; }
+	@trivy fs --severity HIGH,CRITICAL --exit-code 1 --skip-dirs .cache,.git .
+
+security: vulncheck trivy ## Run all security scans (govulncheck + Trivy)
 
 clean: ## Remove build outputs (preserves dependency cache)
 	@rm -rf "$(BIN_DIR)"

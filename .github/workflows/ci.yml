@@ -51,7 +51,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
+          go-version: '1.24'
           cache: true
 
       - name: golangci-lint
@@ -69,11 +69,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
+          go-version: '1.24'
           cache: true
 
       - name: Run govulncheck
         run: ./scripts/govulncheck.sh
+        with:
+          go-version: '1.24'
+          cache: true        
 
       - name: Run Trivy vulnerability scanner
         if: ${{ !env.ACT }}
