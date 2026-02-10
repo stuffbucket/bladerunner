@@ -1,17 +1,22 @@
 #!/bin/sh
 # Wrapper around govulncheck that suppresses known upstream vulnerabilities.
+# Reads suppressed IDs from .govulncheckignore at the repo root.
 # Uses JSON output for reliable parsing. The human-readable scan is printed
 # first so findings remain visible in logs — only the exit code is masked
 # for suppressed IDs.
-#
-# Whenever an entry is added here, include the date and a short rationale.
 set -e
 
-# Suppressed vulnerability IDs (one per line, comments allowed).
-SUPPRESS="
-GO-2026-4357  # 2026-02-09 upstream dep, no fix available
-GO-2026-4359  # 2026-02-09 upstream dep, no fix available
-"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+IGNORE_FILE="$REPO_ROOT/.govulncheckignore"
+
+if [ ! -f "$IGNORE_FILE" ]; then
+    echo "No .govulncheckignore file found; running govulncheck without suppressions."
+    exec govulncheck ./...
+fi
+
+# Load suppressed IDs (strip comments and blanks).
+suppress=$(grep -v '^#' "$IGNORE_FILE" | grep -v '^$' | awk '{print $1}')
 
 command -v govulncheck >/dev/null 2>&1 || {
     echo "govulncheck not found; installing..."
@@ -40,7 +45,7 @@ fi
 # Check each found ID against the suppress list.
 unsuppressed=""
 for id in $found_ids; do
-    if echo "$SUPPRESS" | grep -qw "$id"; then
+    if echo "$suppress" | grep -qw "$id"; then
         echo "SUPPRESSED: $id"
     else
         unsuppressed="$unsuppressed $id"

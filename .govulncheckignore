@@ -1,0 +1,9 @@
+# Known upstream vulnerabilities with no available fix.
+# govulncheck.sh reads this file to suppress exit codes for listed IDs.
+# Format: one vulnerability ID per line. Comments and blank lines ignored.
+#
+# Review periodically — remove entries once upstream fixes are available.
+
+# 2026-02-09: transitive dependency, no patch available
+GO-2026-4357
+GO-2026-4359
