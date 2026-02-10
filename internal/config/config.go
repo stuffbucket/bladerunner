@@ -32,6 +32,24 @@ const (
 	MinDiskSizeGiB     = 16
 	TrustPasswordLen   = 16
 	DefaultStopTimeout = 30 // seconds
+
+	// XDG directory structure
+	xdgLocalDir    = ".local"
+	xdgStateSubdir = "state"
+	appName        = "bladerunner"
+
+	// File names
+	diskFileName         = "disk.raw"
+	machineIDFileName    = "machine-id.bin"
+	efiVarsFileName      = "efi-vars.bin"
+	cloudInitISOFileName = "cloud-init.iso"
+	cloudInitDirName     = "cloud-init"
+	consoleLogFileName   = "console.log"
+	logFileName          = "bladerunner.log"
+	reportFileName       = "startup-report.json"
+	metadataFileName     = "runtime-metadata.json"
+	clientCertFileName   = "client.crt"
+	clientKeyFileName    = "client.key"
 )
 
 type Config struct {
@@ -75,9 +93,9 @@ type Config struct {
 func DefaultBaseImageURL(goarch string) (string, error) {
 	switch goarch {
 	case "arm64":
-		return "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img", nil
+		return "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img", nil
 	case "amd64":
-		return "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img", nil
+		return "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img", nil
 	default:
 		return "", fmt.Errorf("unsupported architecture: %s", goarch)
 	}
@@ -99,28 +117,28 @@ func Default(baseDir string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Name:              "bladerunner",
-		Hostname:          "bladerunner",
+		Name:              appName,
+		Hostname:          appName,
 		StateDir:          baseDir,
 		VMDir:             baseDir,
-		DiskPath:          filepath.Join(baseDir, "disk.raw"),
+		DiskPath:          filepath.Join(baseDir, diskFileName),
 		DiskSizeGiB:       DefaultDiskSizeGiB,
 		BaseImageURL:      imageURL,
 		BaseImagePath:     "",
-		MachineIDPath:     filepath.Join(baseDir, "machine-id.bin"),
-		EFIVarsPath:       filepath.Join(baseDir, "efi-vars.bin"),
-		CloudInitISO:      filepath.Join(baseDir, "cloud-init.iso"),
-		CloudInitDir:      filepath.Join(baseDir, "cloud-init"),
-		ConsoleLogPath:    filepath.Join(baseDir, "console.log"),
-		LogPath:           filepath.Join(baseDir, "bladerunner.log"),
-		ReportPath:        filepath.Join(baseDir, "startup-report.json"),
-		MetadataPath:      filepath.Join(baseDir, "runtime-metadata.json"),
+		MachineIDPath:     filepath.Join(baseDir, machineIDFileName),
+		EFIVarsPath:       filepath.Join(baseDir, efiVarsFileName),
+		CloudInitISO:      filepath.Join(baseDir, cloudInitISOFileName),
+		CloudInitDir:      filepath.Join(baseDir, cloudInitDirName),
+		ConsoleLogPath:    filepath.Join(baseDir, consoleLogFileName),
+		LogPath:           filepath.Join(baseDir, logFileName),
+		ReportPath:        filepath.Join(baseDir, reportFileName),
+		MetadataPath:      filepath.Join(baseDir, metadataFileName),
 		SSHUser:           "incus",
 		SSHPublicKey:      "", // Set by EnsureSSHKeys
 		SSHPrivateKeyPath: "", // Set by EnsureSSHKeys
 		SSHConfigPath:     "", // Set after VM starts
-		ClientCertPath:    filepath.Join(baseDir, "client.crt"),
-		ClientKeyPath:     filepath.Join(baseDir, "client.key"),
+		ClientCertPath:    filepath.Join(baseDir, clientCertFileName),
+		ClientKeyPath:     filepath.Join(baseDir, clientKeyFileName),
 		TrustPassword:     trustPassword,
 		LocalSSHPort:      DefaultLocalSSHPort,
 		LocalAPIPort:      DefaultLocalAPIPort,
@@ -219,13 +237,13 @@ func DefaultStateDir() string {
 		return d
 	}
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bladerunner")
+		return filepath.Join(xdg, appName)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".", ".local", "state", "bladerunner")
+		return filepath.Join(".", xdgLocalDir, xdgStateSubdir, appName)
 	}
-	return filepath.Join(home, ".local", "state", "bladerunner")
+	return filepath.Join(home, xdgLocalDir, xdgStateSubdir, appName)
 }
 
 // DefaultAptMirrorURI returns a fast Ubuntu apt mirror URI appropriate for the

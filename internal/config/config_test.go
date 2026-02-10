@@ -17,15 +17,15 @@ func TestDefaultBaseImageURL(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "arm64 returns Ubuntu 24.04 ARM64 image",
+			name:    "arm64 returns linuxcontainers ARM64 image",
 			arch:    "arm64",
-			wantURL: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img",
+			wantURL: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
 			wantErr: false,
 		},
 		{
-			name:    "amd64 returns Ubuntu 24.04 AMD64 image",
+			name:    "amd64 returns linuxcontainers AMD64 image",
 			arch:    "amd64",
-			wantURL: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img",
+			wantURL: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img",
 			wantErr: false,
 		},
 		{

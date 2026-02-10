@@ -6,7 +6,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "dev"
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
 
 var rootCmd = &cobra.Command{
 	Use:   "br",
@@ -20,12 +24,13 @@ It provides a full Incus container environment inside the VM.`,
 }
 
 func init() {
-	rootCmd.SetVersionTemplate(fmt.Sprintf("br version %s\n", version))
+	rootCmd.SetVersionTemplate(fmt.Sprintf("br version %s (commit: %s, built: %s)\n", version, commit, date))
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(shellCmd)
 	rootCmd.AddCommand(incusCmd)
+	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(resetCmd)
 }

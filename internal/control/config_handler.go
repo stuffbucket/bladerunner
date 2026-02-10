@@ -12,10 +12,11 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
-// configEntry defines a config key with its getter and whether it is deferred
+// configEntry defines a config key with its getter, optional setter, and whether it is deferred
 // (i.e., empty string means "not yet available" rather than a valid value).
 type configEntry struct {
 	getter   func() string
+	setter   func(string) error // nil means read-only or unsupported
 	deferred bool
 }
 
@@ -49,9 +50,15 @@ func NewConfigRouter(cfg *config.Config) *ConfigRouter {
 			ConfigKeyLogPath:           {getter: func() string { return cfg.LogPath }},
 			ConfigKeyGUI:               {getter: func() string { return strconv.FormatBool(cfg.GUI) }},
 			ConfigKeyPID:               {getter: func() string { return strconv.Itoa(os.Getpid()) }},
-			ConfigKeyBaseImageURL:      {getter: func() string { return cfg.BaseImageURL }},
-			ConfigKeyBaseImagePath:     {getter: func() string { return cfg.BaseImagePath }, deferred: true},
-			ConfigKeyCloudInitISO:      {getter: func() string { return cfg.CloudInitISO }},
+			ConfigKeyBaseImageURL: {
+				getter: func() string { return cfg.BaseImageURL },
+				setter: func(val string) error {
+					cfg.BaseImageURL = val
+					return nil
+				},
+			},
+			ConfigKeyBaseImagePath: {getter: func() string { return cfg.BaseImagePath }, deferred: true},
+			ConfigKeyCloudInitISO:  {getter: func() string { return cfg.CloudInitISO }},
 		},
 		router: NewRouter(),
 	}
@@ -93,8 +100,31 @@ func (cr *ConfigRouter) handleGet(_ context.Context, req *Request) *Message {
 	return &Message{Response: val}
 }
 
-func (cr *ConfigRouter) handleSet(_ context.Context, _ *Request) *Message {
-	return &Message{Error: "config.set is not yet supported"}
+func (cr *ConfigRouter) handleSet(_ context.Context, req *Request) *Message {
+	key := req.Args["0"]
+	value := req.Args["1"]
+	if key == "" || value == "" {
+		return &Message{Error: "usage: config.set <key> <value>"}
+	}
+
+	entry, ok := cr.entries[key]
+	if !ok {
+		return &Message{Error: fmt.Sprintf("unknown config key: %s", key)}
+	}
+
+	if entry.setter == nil {
+		return &Message{Error: fmt.Sprintf("config key %s is read-only or not supported for remote modification", key)}
+	}
+
+	cr.mu.Lock()
+	err := entry.setter(value)
+	cr.mu.Unlock()
+
+	if err != nil {
+		return &Message{Error: fmt.Sprintf("failed to set %s: %v", key, err)}
+	}
+
+	return &Message{Response: RespOK}
 }
 
 func (cr *ConfigRouter) handleKeys(_ context.Context, _ *Request) *Message {

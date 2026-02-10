@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -208,6 +209,31 @@ func (c *Client) GetConfig(key string) (string, error) {
 		return "", fmt.Errorf("config error: %s", resp.Error)
 	}
 	return resp.Response, nil
+}
+
+// SetConfig sets a config value on the running instance by key.
+func (c *Client) SetConfig(key, value string) error {
+	resp, err := c.sendCommand(BuildCommand(CmdConfigSet, key, value), clientCmdTimeout)
+	if err != nil {
+		return fmt.Errorf("set config %s: %w", key, err)
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("config error: %s", resp.Error)
+	}
+	return nil
+}
+
+// GetConfigKeys retrieves a list of all available config keys.
+func (c *Client) GetConfigKeys() ([]string, error) {
+	resp, err := c.sendCommand(CmdConfigKeys, clientCmdTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("get config keys: %w", err)
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("config error: %s", resp.Error)
+	}
+	keys := strings.Fields(resp.Response)
+	return keys, nil
 }
 
 // Send sends an arbitrary command and returns the response.
