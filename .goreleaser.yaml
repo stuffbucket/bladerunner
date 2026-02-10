@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+project_name: bladerunner
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  # macOS Apple Silicon only (VZ framework requires macOS + CGO)
+  # Linux/Windows builds not supported (Virtualization.framework)
+  # Intel Macs not supported (Apple Silicon recommended for VZ performance)
+  - id: macos
+    main: ./cmd/bladerunner
+    binary: br
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_aarch64
+    files:
+      - README.md
+      - vz.entitlements
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Performance Improvements
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: stuffbucket
+    name: bladerunner
+  draft: false
+  prerelease: auto
+  name_template: "{{.ProjectName}} v{{.Version}}"
+  header: |
+    ## bladerunner v{{.Version}}
+    
+    Standalone Incus VM runner for macOS using Apple Virtualization.framework.
+    
+    **Apple Silicon only**: Requires macOS 13+ on Apple Silicon (M1/M2/M3/M4).
+    Intel Macs are not supported.
+    
+    ### Installation
+    
+    **Homebrew (Recommended):**
+    ```bash
+    brew install stuffbucket/tap/bladerunner
+    ```
+    
+    **Manual download:** 
+    Download the appropriate archive for your Mac architecture below.
+    
+    ### Post-Install (Manual Downloads)
+    
+    If installing manually, sign the binary after extraction:
+    ```bash
+    codesign --entitlements vz.entitlements -s - ./br
+    ```
+
+# Note: This tool is macOS-only due to Apple Virtualization.framework (VZ) dependency
+# VZ uses CGO and is not available on Linux/Windows
+# GoReleaser builds both macOS architectures on macOS runner with signing

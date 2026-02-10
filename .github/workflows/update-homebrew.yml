@@ -1,59 +1,75 @@
-name: Release
+name: Update Homebrew Formula
 
+# Manually triggered after macOS binaries are uploaded to a release
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  # Binary is built and signed locally (requires Apple Silicon Mac).
-  # This workflow updates the Homebrew formula after a release is published.
-  homebrew:
-    name: Update Homebrew Tap
+  update-formula:
+    name: Generate and Push Formula
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Get version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Verify release assets
+      - name: Verify release exists and has macOS binary
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          echo "Checking release ${VERSION}..."
-          ASSETS=$(gh release view "$VERSION" --json assets -q '.assets[].name')
-          if ! echo "$ASSETS" | grep -q "darwin_aarch64.tar.gz"; then
-            echo "Error: Missing darwin_aarch64 binary in release"
+          VERSION="${{ inputs.version }}"
+          VERSION_CLEAN="${VERSION#v}"
+          
+          echo "Checking for release $VERSION..."
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Error: Release $VERSION not found"
             exit 1
           fi
+          
+          echo "Checking for macOS arm64 binary..."
+          ASSETS=$(gh release view "$VERSION" --json assets -q '.assets[].name')
+          
+          if ! echo "$ASSETS" | grep -q "darwin_aarch64.tar.gz"; then
+            echo "Error: Missing darwin_aarch64 binary"
+            exit 1
+          fi
+          
           echo "✓ Required binary present"
 
       - name: Generate Homebrew formula
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ inputs.version }}"
           chmod +x scripts/generate-formula.sh
           ./scripts/generate-formula.sh "$VERSION" > bladerunner.rb
+          echo "Generated formula:"
           cat bladerunner.rb
 
       - name: Update Homebrew tap
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ inputs.version }}"
+          
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/stuffbucket/homebrew-tap.git" tap
           cp bladerunner.rb tap/Formula/bladerunner.rb
+          
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/bladerunner.rb
+          
           if git diff --staged --quiet; then
             echo "No changes to formula"
             exit 0
           fi
+          
           git commit -m "Update bladerunner to $VERSION"
           git push
+          
+          echo "✓ Formula updated successfully"
