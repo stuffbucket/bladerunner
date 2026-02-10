@@ -1,56 +1,119 @@
-name: Release
+name: Update Homebrew Tap
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: Build Release
-    runs-on: macos-latest
+  homebrew:
+    name: Update Homebrew Formula
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
-      - name: Get version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Build release binary
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          LDFLAGS="-s -w -X main.version=${VERSION}"
-          go build -trimpath -ldflags="${LDFLAGS}" -o bin/br ./cmd/bladerunner
-          
-      - name: Sign binary with entitlements
-        run: |
-          codesign --entitlements vz.entitlements -s - bin/br
-          
-      - name: Create release archive
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          cd bin
-          tar -czf "../bladerunner_${VERSION}_darwin_arm64.tar.gz" br
-          cd ..
-          shasum -a 256 "bladerunner_${VERSION}_darwin_arm64.tar.gz" > checksums.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            bladerunner_*.tar.gz
-            checksums.txt
-          generate_release_notes: true
+      - name: Get release info
+        id: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Download the checksum file from the release
+          gh release download "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --pattern "checksums.txt" \
+            --dir /tmp
+
+          ARCHIVE="bladerunner_${VERSION}_darwin_aarch64.tar.gz"
+          SHA256=$(grep "${ARCHIVE}" /tmp/checksums.txt | awk '{print $1}')
+
+          if [ -z "${SHA256}" ]; then
+            echo "Error: could not find SHA256 for ${ARCHIVE} in checksums.txt"
+            cat /tmp/checksums.txt
+            exit 1
+          fi
+
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate formula
+        id: formula
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          SHA256="${{ steps.release.outputs.sha256 }}"
+          TAG="${{ steps.release.outputs.tag }}"
+          ARCHIVE="${{ steps.release.outputs.archive }}"
+
+          cat > /tmp/bladerunner.rb <<FORMULA
+          # typed: false
+          # frozen_string_literal: true
+
+          class Bladerunner < Formula
+            desc "Standalone Incus VM runner for macOS using Apple Virtualization.framework"
+            homepage "https://github.com/stuffbucket/bladerunner"
+            url "https://github.com/stuffbucket/bladerunner/releases/download/${TAG}/${ARCHIVE}"
+            sha256 "${SHA256}"
+            license "MIT"
+            version "${VERSION}"
+
+            depends_on :macos
+            depends_on arch: :arm64
+
+            def install
+              bin.install "br"
+            end
+
+            def post_install
+              # Codesign with Virtualization.framework entitlements
+              entitlements = prefix/"vz.entitlements"
+              if entitlements.exist?
+                system "codesign", "--force", "--entitlements", entitlements, "-s", "-", bin/"br"
+              end
+            end
+
+            def caveats
+              <<~EOS
+                bladerunner requires Apple Silicon (M1/M2/M3/M4) and macOS 13+.
+
+                The binary has been codesigned with Virtualization.framework entitlements.
+                If you need to re-sign manually:
+                  codesign --entitlements #{prefix}/vz.entitlements -s - #{bin}/br
+              EOS
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/br --version")
+            end
+          end
+          FORMULA
+
+      - name: Push formula to tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "Error: HOMEBREW_TAP_TOKEN secret not set"
+            exit 1
+          fi
+
+          cd /tmp
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/stuffbucket/homebrew-tap.git"
+          cd homebrew-tap
+
+          cp /tmp/bladerunner.rb Formula/bladerunner.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add Formula/bladerunner.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged, nothing to commit."
+          else
+            git commit -m "bladerunner ${{ steps.release.outputs.tag }}"
+            git push
+            echo "Formula updated for ${{ steps.release.outputs.tag }}"
+          fi

@@ -16,91 +16,99 @@ It is designed to provide the core behavior of a `colima --runtime incus` setup 
 
 ## Requirements
 
-- macOS 13+ recommended.
-- Xcode command line tools.
-- Binary must be code-signed with Virtualization entitlement.
-- If you want bridged networking, add the VM networking entitlement too.
+- **Apple Silicon Mac** (M1/M2/M3/M4) - Intel Macs not supported
+- macOS 13+ (Ventura or later)
+- Xcode Command Line Tools (includes codesign utility)
 
-## Build
+  ```bash
+  xcode-select --install
+  ```
 
-```bash
-go mod tidy
-go build -o bladerunner ./cmd/bladerunner
-```
+- Binary must be code-signed with Virtualization entitlement (automatic with Homebrew)
+- For bridged networking, additional VM networking entitlement required
 
-## Entitlements
+## Installation
 
-Create `vz.entitlements`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>com.apple.security.virtualization</key>
-  <true/>
-  <key>com.apple.vm.networking</key>
-  <true/>
-</dict>
-</plist>
-```
-
-Sign the binary:
+### Homebrew (Recommended)
 
 ```bash
-codesign --entitlements vz.entitlements -s - ./bladerunner
+brew install stuffbucket/tap/bladerunner
+```
+
+The binary is automatically signed with required entitlements during installation.
+
+### Build from Source
+
+Requires Xcode Command Line Tools:
+
+```bash
+xcode-select --install
+```
+
+Build and sign:
+
+```bash
+make build
+make sign
+```
+
+Or manually:
+
+```bash
+go build -o bin/br ./cmd/bladerunner
+codesign --entitlements vz.entitlements -s - bin/br
 ```
 
 ## Run
 
-Default (shared network + localhost forwarding + GUI):
+Default (shared network + localhost forwarding):
 
 ```bash
-./bladerunner
+br start
+```
+
+With GUI console window:
+
+```bash
+br start --gui
 ```
 
 Bridged network on `en0`:
 
 ```bash
-./bladerunner --network-mode bridged --bridge-interface en0
-```
-
-Headless:
-
-```bash
-./bladerunner --gui=false
+br start --network-mode bridged --bridge-interface en0
 ```
 
 Custom image path (raw disk image):
 
 ```bash
-./bladerunner --image-path /path/to/base.raw
+br start --image-path /path/to/base.raw
 ```
 
 Custom log file path:
 
 ```bash
-./bladerunner --log-path /tmp/bladerunner.log
+br start --log-path /tmp/bladerunner.log
 ```
 
 Optional log level:
 
 ```bash
-BLADERUNNER_LOG_LEVEL=debug ./bladerunner
+BLADERUNNER_LOG_LEVEL=debug br start
 ```
 
 ## Access
 
 After startup, the tool prints a report and writes JSON report data to:
 
-- `~/.bladerunner/<name>/startup-report.json`
+- `~/.local/state/bladerunner/startup-report.json`
 
 Key defaults:
 
 - Incus API/UI endpoint: `https://127.0.0.1:18443`
 - SSH endpoint: `127.0.0.1:6022`
 - Dashboard URL: `https://127.0.0.1:18443/ui/`
-- Log file: `~/.bladerunner/<name>/bladerunner.log` (rotated with compression)
+- Log file: `~/.local/state/bladerunner/bladerunner.log` (rotated with compression)
 
 Example SSH:
 
@@ -111,12 +119,12 @@ ssh -p 6022 incus@127.0.0.1
 Example REST call:
 
 ```bash
-curl --cert ~/.bladerunner/incus-vm/client.crt --key ~/.bladerunner/incus-vm/client.key -k https://127.0.0.1:18443/1.0
+curl --cert ~/.local/state/bladerunner/client.crt --key ~/.local/state/bladerunner/client.key -k https://127.0.0.1:18443/1.0
 ```
 
 ## Notes
 
-- The base image must be a **raw** disk image. qcow2 images are rejected.
+- The base image can be raw or qcow2 format. qcow2 images are automatically converted to raw via `qemu-img`.
 - First boot can take several minutes while cloud-init installs and configures Incus.
 - GUI output is handled by VZ graphics window; serial console is logged at `console.log`.
 - Extended operations (download, VM readiness, Incus readiness) show live progress indicators in terminal.
