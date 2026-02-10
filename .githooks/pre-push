@@ -19,4 +19,10 @@ go build ./...
 echo "→ Testing (short)..."
 go test -short ./...
 
+# Vulnerability scan (if govulncheck available)
+if command -v govulncheck >/dev/null 2>&1; then
+  echo "→ Vulnerability scan..."
+  ./scripts/govulncheck.sh
+fi
+
 echo "✓ All pre-push checks passed"
