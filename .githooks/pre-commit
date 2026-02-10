@@ -26,7 +26,7 @@ go vet ./...
 # Quick lint check (if available)
 if command -v golangci-lint >/dev/null 2>&1; then
   echo "→ Linting..."
-  golangci-lint run --fast-only
+  golangci-lint run
 fi
 
 echo "✓ Pre-commit checks passed"
