@@ -8,8 +8,8 @@ require (
 	github.com/charmbracelet/log v0.4.2
 	github.com/lxc/incus/v6 v6.21.0
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/crypto v0.47.0
-	golang.org/x/term v0.39.0
+	golang.org/x/crypto v0.48.0
+	golang.org/x/term v0.40.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
@@ -73,8 +73,8 @@ require (
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/text v0.33.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
