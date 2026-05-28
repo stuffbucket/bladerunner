@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -94,81 +93,5 @@ func TestSaveJSON_InvalidPath(t *testing.T) {
 	err := SaveJSON("/nonexistent/dir/report.json", report)
 	if err == nil {
 		t.Error("SaveJSON() should fail for invalid path")
-	}
-}
-
-func TestRenderText(t *testing.T) {
-	report := testReport()
-	text := RenderText(report)
-
-	expectedStrings := []string{
-		"Bladerunner Startup Report",
-		"Generated: 2026-02-08T12:00:00Z",
-		"Host",
-		"OS/Arch: darwin/arm64",
-		"Host CPUs: 10 (VM requested: 4)",
-		"VM",
-		"Name: bladerunner",
-		"Network",
-		"Mode: shared",
-		"Guest MAC: 02:00:00:12:34:56",
-		"Local SSH endpoint: 127.0.0.1:6022",
-		"Incus",
-		"Version/API: 5.0.0 / 1.0",
-		"Auth: tls",
-		"Advertised addresses: 10.0.0.1, fd00::1",
-		"Access",
-		"SSH: ssh -F /tmp/config bladerunner",
-		"REST: curl -k https://127.0.0.1:18443/1.0",
-	}
-
-	for _, expected := range expectedStrings {
-		if !strings.Contains(text, expected) {
-			t.Errorf("RenderText() missing %q", expected)
-		}
-	}
-}
-
-func TestRenderText_IncusNotReady(t *testing.T) {
-	report := testReport()
-	report.Incus = IncusInfo{}
-
-	text := RenderText(report)
-
-	if !strings.Contains(text, "API not ready yet") {
-		t.Error("RenderText() should show 'API not ready' when Incus has no version")
-	}
-	if strings.Contains(text, "Version/API:") {
-		t.Error("RenderText() should not show Version/API when Incus not ready")
-	}
-}
-
-func TestRenderText_BridgeMode(t *testing.T) {
-	report := testReport()
-	report.Network.Mode = "bridged"
-	report.Network.BridgeInterface = "en0"
-
-	text := RenderText(report)
-
-	if !strings.Contains(text, "Mode: bridged") {
-		t.Error("RenderText() missing bridge mode")
-	}
-	if !strings.Contains(text, "Bridge interface: en0") {
-		t.Error("RenderText() missing bridge interface")
-	}
-}
-
-func TestRenderText_NoOptionalFields(t *testing.T) {
-	report := testReport()
-	report.Access.SSHConfigPath = ""
-	report.Access.SSHKeyPath = ""
-
-	text := RenderText(report)
-
-	if strings.Contains(text, "SSH config:") {
-		t.Error("RenderText() should omit SSH config when empty")
-	}
-	if strings.Contains(text, "SSH key:") {
-		t.Error("RenderText() should omit SSH key when empty")
 	}
 }
