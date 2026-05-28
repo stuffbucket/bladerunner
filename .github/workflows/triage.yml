@@ -17,3 +17,4 @@ jobs:
     uses: stuffbucket/repoman/.github/workflows/triage-reusable.yml@v1
     with:
       issue_number: ${{ github.event.issue.number }}
+    secrets: inherit
