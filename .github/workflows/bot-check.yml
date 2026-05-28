@@ -1,0 +1,31 @@
+name: bot-check
+
+# Caller stub for repoman's reusable bot-check workflow.
+# Repoman's poll cron dispatches this via `actions.createWorkflowDispatch`
+# with `{kind, number}` whenever an issue/PR carries the `needs-bot` label.
+# All logic lives in the reusable workflow — pin moves with @v1.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        required: true
+        type: string
+        description: "pr or issue"
+      number:
+        required: true
+        type: string
+        description: "PR or issue number"
+      agent:
+        required: false
+        type: string
+        default: 'none'
+        description: "Agent to invoke: none | copilot | claude | custom"
+
+jobs:
+  call:
+    uses: stuffbucket/repoman/.github/workflows/bot-check-reusable.yml@v1
+    with:
+      kind: ${{ inputs.kind }}
+      number: ${{ inputs.number }}
+      agent: ${{ inputs.agent }}
