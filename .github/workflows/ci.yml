@@ -94,8 +94,14 @@ jobs:
 
   check:
     name: check
+    # Aggregator job: this is the single named status branch protection
+    # (and repoman's REQUIRED_CHECK_NAME) gates on. Depends on the checks
+    # that gate code correctness (build, lint). Security findings are
+    # visible via the Security tab and the `security` job's status, but
+    # don't gate routine PRs — upstream CVE drops shouldn't block
+    # unrelated work, and govulncheck/trivy already upload SARIF.
     runs-on: ubuntu-latest
-    needs: [build, lint, security]
+    needs: [build, lint]
     if: always()
     steps:
       - name: Aggregate result
