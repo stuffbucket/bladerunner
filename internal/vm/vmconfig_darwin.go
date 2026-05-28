@@ -11,6 +11,7 @@ import (
 
 	"github.com/Code-Hex/vz/v3"
 	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
@@ -178,9 +179,23 @@ func (r *Runner) configureSerial(cfg *vz.VirtualMachineConfiguration) error {
 	if err := os.MkdirAll(filepath.Dir(r.cfg.ConsoleLogPath), 0o755); err != nil {
 		return fmt.Errorf("create console log parent: %w", err)
 	}
-	serialAttachment, err := vz.NewFileSerialPortAttachment(r.cfg.ConsoleLogPath, true)
+	consoleLog, err := logging.NewRotatingFile(r.cfg.ConsoleLogPath, logging.RotateOptions{
+		MaxSize:    50, // MB
+		MaxBackups: 3,
+		MaxAge:     7, // days
+		Compress:   true,
+	})
 	if err != nil {
-		return fmt.Errorf("create serial file attachment: %w", err)
+		return fmt.Errorf("open rotating console log: %w", err)
+	}
+	// Stash on Runner so Stop() can close it after VM shutdown.
+	r.consoleLog = consoleLog
+
+	serialAttachment, err := vz.NewFileHandleSerialPortAttachment(consoleLog.File(), consoleLog.File())
+	if err != nil {
+		_ = consoleLog.Close()
+		r.consoleLog = nil
+		return fmt.Errorf("create serial file-handle attachment: %w", err)
 	}
 	serialConfig, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialAttachment)
 	if err != nil {

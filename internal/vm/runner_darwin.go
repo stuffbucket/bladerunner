@@ -33,6 +33,7 @@ type Runner struct {
 	baseImagePath string
 
 	forwarders []*portForwarder
+	consoleLog *logging.RotatingFile
 	stopOnce   sync.Once
 	stopErr    error
 }
@@ -210,36 +211,64 @@ func (r *Runner) Stop() error {
 	r.stopOnce.Do(func() {
 		log := logging.L()
 		log.Info("stopping vm and forwarders")
-		for _, f := range r.forwarders {
-			if err := f.Close(); err != nil && r.stopErr == nil {
-				r.stopErr = err
-			}
+		r.closeForwarders()
+
+		if r.consoleLog != nil {
+			// Defer until after VM is stopped so we don't kill the
+			// serial sink while the guest is still writing.
+			defer func() {
+				if err := r.consoleLog.Close(); err != nil && r.stopErr == nil {
+					r.stopErr = err
+				}
+			}()
 		}
 
 		if r.vm == nil {
 			return
 		}
 
-		for i := 0; i < 3 && r.vm.CanRequestStop(); i++ {
-			ok, err := r.vm.RequestStop()
-			log.Info("sent stop request", "attempt", i+1, "accepted", ok, "err", err)
-			if err != nil && r.stopErr == nil {
-				r.stopErr = err
-			}
-			time.Sleep(2 * time.Second)
-		}
-
-		if r.vm.CanStop() {
-			if err := r.vm.Stop(); err != nil {
-				log.Warn("forced stop failed", "err", err)
-				if r.stopErr == nil {
-					r.stopErr = err
-				}
-			}
-		}
+		r.requestStopVM(log)
+		r.forceStopVMIfNeeded(log)
 	})
 
 	return r.stopErr
+}
+
+func (r *Runner) closeForwarders() {
+	for _, f := range r.forwarders {
+		if err := f.Close(); err != nil && r.stopErr == nil {
+			r.stopErr = err
+		}
+	}
+}
+
+func (r *Runner) requestStopVM(log loggerLike) {
+	for i := 0; i < 3 && r.vm.CanRequestStop(); i++ {
+		ok, err := r.vm.RequestStop()
+		log.Info("sent stop request", "attempt", i+1, "accepted", ok, "err", err)
+		if err != nil && r.stopErr == nil {
+			r.stopErr = err
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func (r *Runner) forceStopVMIfNeeded(log loggerLike) {
+	if !r.vm.CanStop() {
+		return
+	}
+	if err := r.vm.Stop(); err != nil {
+		log.Warn("forced stop failed", "err", err)
+		if r.stopErr == nil {
+			r.stopErr = err
+		}
+	}
+}
+
+// loggerLike is the subset of charmlog.Logger used by stop helpers.
+type loggerLike interface {
+	Info(msg any, keyvals ...any)
+	Warn(msg any, keyvals ...any)
 }
 
 func (r *Runner) waitForRunning(ctx context.Context, timeout time.Duration, onState func(vz.VirtualMachineState)) error {
