@@ -10,6 +10,8 @@ import (
 	"github.com/lxc/incus/v6/shared/api"
 	sharedtls "github.com/lxc/incus/v6/shared/tls"
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/zitadel/oidc/v3/pkg/oidc"
+	"golang.org/x/oauth2"
 )
 
 type ServerInfo struct {
@@ -101,6 +103,50 @@ func connectAndGet(endpoint string, certPEM, keyPEM []byte) (*ServerInfo, error)
 	}
 
 	return toServerInfo(server), nil
+}
+
+// ConnectArgs describes how to authenticate to an Incus server.
+// Exactly one of (CertPEM+KeyPEM) or BearerToken should be set.
+type ConnectArgs struct {
+	Endpoint           string
+	CertPEM            []byte
+	KeyPEM             []byte
+	BearerToken        string
+	InsecureSkipVerify bool
+}
+
+// ConnectServer establishes a connection to an Incus API endpoint, transparently
+// supporting either mTLS (Cert/Key) or OIDC bearer-token authentication.
+// When BearerToken is non-empty it takes precedence; the cert/key are then optional.
+//
+// This is the entry point new code should use; the legacy WaitForServer/connectAndGet
+// path is kept for backwards compatibility with the existing readiness loop.
+func ConnectServer(args ConnectArgs) (incusclient.InstanceServer, error) {
+	connArgs := &incusclient.ConnectionArgs{
+		InsecureSkipVerify: true, // self-signed Incus cert on loopback
+		SkipGetEvents:      true,
+	}
+	if len(args.CertPEM) > 0 {
+		connArgs.TLSClientCert = string(args.CertPEM)
+	}
+	if len(args.KeyPEM) > 0 {
+		connArgs.TLSClientKey = string(args.KeyPEM)
+	}
+	if args.BearerToken != "" {
+		connArgs.AuthType = api.AuthenticationMethodOIDC
+		connArgs.OIDCTokens = &oidc.Tokens[*oidc.IDTokenClaims]{
+			Token: &oauth2.Token{
+				AccessToken: args.BearerToken,
+				TokenType:   "Bearer",
+			},
+			IDToken: args.BearerToken,
+		}
+	}
+	client, err := incusclient.ConnectIncus(args.Endpoint, connArgs)
+	if err != nil {
+		return nil, fmt.Errorf("connect incus: %w", err)
+	}
+	return client, nil
 }
 
 func toServerInfo(server *api.Server) *ServerInfo {

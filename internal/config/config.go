@@ -23,10 +23,20 @@ const (
 	DefaultTimeout     = 5 * time.Minute
 
 	// Port assignments (avoid conflicts with common services)
-	DefaultLocalSSHPort = 6022
-	DefaultLocalAPIPort = 18443
-	DefaultVsockSSHPort = 10022
-	DefaultVsockAPIPort = 18443
+	DefaultLocalSSHPort  = 6022
+	DefaultLocalAPIPort  = 18443
+	DefaultLocalOIDCPort = 15556
+	DefaultVsockSSHPort  = 10022
+	DefaultVsockAPIPort  = 18443
+	DefaultVsockOIDCPort = 18556
+
+	// Default OIDC client ID and audience baked into Incus config.
+	DefaultOIDCClientID = "bladerunner"
+	DefaultOIDCAudience = "bladerunner"
+
+	// AuthMode values
+	AuthModeOIDC = "oidc"
+	AuthModeCert = "cert"
 
 	// Validation constraints
 	MinDiskSizeGiB     = 16
@@ -78,16 +88,31 @@ type Config struct {
 	TrustPassword     string
 	LocalSSHPort      int
 	LocalAPIPort      int
+	LocalOIDCPort     int
 	VsockSSHPort      uint32
 	VsockAPIPort      uint32
-	NetworkMode       string
-	BridgeInterface   string
-	GUI               bool
-	CPUs              uint
-	MemoryGiB         uint64
-	Arch              string
-	WaitForIncus      time.Duration
-	DashboardPath     string
+	VsockOIDCPort     uint32
+	// OIDCIssuerURL is the issuer URL Incus sees from inside the VM.
+	// Defaults to http://127.0.0.1:<VsockOIDCPort>.
+	OIDCIssuerURL string
+	// OIDCClientID is the OAuth2 client_id Incus uses (and that this provider expects).
+	OIDCClientID string
+	// OIDCAudience is the `aud` claim Incus verifies on issued tokens.
+	OIDCAudience string
+	// OIDCStateDir is where the signing key and runtime state live.
+	OIDCStateDir string
+	// IdentityDir is the directory of registered SSH-pubkey identity files.
+	IdentityDir string
+	// AuthMode selects how `br` talks to Incus: "oidc" (default) or "cert" (legacy mTLS).
+	AuthMode        string
+	NetworkMode     string
+	BridgeInterface string
+	GUI             bool
+	CPUs            uint
+	MemoryGiB       uint64
+	Arch            string
+	WaitForIncus    time.Duration
+	DashboardPath   string
 }
 
 func DefaultBaseImageURL(goarch string) (string, error) {
@@ -142,8 +167,16 @@ func Default(baseDir string) (*Config, error) {
 		TrustPassword:     trustPassword,
 		LocalSSHPort:      DefaultLocalSSHPort,
 		LocalAPIPort:      DefaultLocalAPIPort,
+		LocalOIDCPort:     DefaultLocalOIDCPort,
 		VsockSSHPort:      DefaultVsockSSHPort,
 		VsockAPIPort:      DefaultVsockAPIPort,
+		VsockOIDCPort:     DefaultVsockOIDCPort,
+		OIDCIssuerURL:     fmt.Sprintf("http://127.0.0.1:%d", DefaultVsockOIDCPort),
+		OIDCClientID:      DefaultOIDCClientID,
+		OIDCAudience:      DefaultOIDCAudience,
+		OIDCStateDir:      filepath.Join(baseDir, "oidc"),
+		IdentityDir:       defaultIdentityDir(),
+		AuthMode:          AuthModeOIDC,
 		NetworkMode:       NetworkModeShared,
 		BridgeInterface:   "en0",
 		GUI:               true,
@@ -158,41 +191,14 @@ func Default(baseDir string) (*Config, error) {
 }
 
 func (c *Config) Validate() error {
-	if c.Name == "" {
-		return errors.New("name is required")
+	if err := c.validateRequiredFields(); err != nil {
+		return err
 	}
-	if c.Hostname == "" {
-		return errors.New("hostname is required")
+	if err := c.validateModes(); err != nil {
+		return err
 	}
-	if c.VMDir == "" {
-		return errors.New("vm directory is required")
-	}
-	if c.LogPath == "" {
-		return errors.New("log path is required")
-	}
-	if c.NetworkMode != NetworkModeShared && c.NetworkMode != NetworkModeBridged {
-		return fmt.Errorf("invalid network mode: %s", c.NetworkMode)
-	}
-	if c.SSHUser == "" {
-		return errors.New("ssh user is required")
-	}
-	if c.SSHPublicKey == "" {
-		return errors.New("ssh public key is required")
-	}
-	if !strings.Contains(c.SSHPublicKey, "ssh-") {
-		return errors.New("ssh public key does not look valid")
-	}
-	if c.LocalSSHPort < 1 || c.LocalSSHPort > 65535 {
-		return errors.New("local ssh port must be in range 1-65535")
-	}
-	if c.LocalAPIPort < 1 || c.LocalAPIPort > 65535 {
-		return errors.New("local api port must be in range 1-65535")
-	}
-	if c.LocalSSHPort == c.LocalAPIPort {
-		return errors.New("local ssh and api ports must differ")
-	}
-	if c.VsockSSHPort == c.VsockAPIPort {
-		return errors.New("guest vsock ssh and api ports must differ")
+	if err := c.validatePorts(); err != nil {
+		return err
 	}
 	if c.DiskSizeGiB < MinDiskSizeGiB {
 		return fmt.Errorf("disk size must be at least %d GiB", MinDiskSizeGiB)
@@ -208,6 +214,61 @@ func (c *Config) Validate() error {
 	}
 	if c.WaitForIncus < time.Second {
 		return errors.New("wait-for-incus must be at least 1s")
+	}
+	return nil
+}
+
+func (c *Config) validateRequiredFields() error {
+	if c.Name == "" {
+		return errors.New("name is required")
+	}
+	if c.Hostname == "" {
+		return errors.New("hostname is required")
+	}
+	if c.VMDir == "" {
+		return errors.New("vm directory is required")
+	}
+	if c.LogPath == "" {
+		return errors.New("log path is required")
+	}
+	if c.SSHUser == "" {
+		return errors.New("ssh user is required")
+	}
+	if c.SSHPublicKey == "" {
+		return errors.New("ssh public key is required")
+	}
+	if !strings.Contains(c.SSHPublicKey, "ssh-") {
+		return errors.New("ssh public key does not look valid")
+	}
+	return nil
+}
+
+func (c *Config) validateModes() error {
+	if c.NetworkMode != NetworkModeShared && c.NetworkMode != NetworkModeBridged {
+		return fmt.Errorf("invalid network mode: %s", c.NetworkMode)
+	}
+	if c.AuthMode != "" && c.AuthMode != AuthModeOIDC && c.AuthMode != AuthModeCert {
+		return fmt.Errorf("invalid auth mode: %s", c.AuthMode)
+	}
+	return nil
+}
+
+func (c *Config) validatePorts() error {
+	const minPort, maxPort = 1, 65535
+	if c.LocalSSHPort < minPort || c.LocalSSHPort > maxPort {
+		return errors.New("local ssh port must be in range 1-65535")
+	}
+	if c.LocalAPIPort < minPort || c.LocalAPIPort > maxPort {
+		return errors.New("local api port must be in range 1-65535")
+	}
+	if c.LocalOIDCPort != 0 && (c.LocalOIDCPort < minPort || c.LocalOIDCPort > maxPort) {
+		return errors.New("local oidc port must be in range 1-65535")
+	}
+	if c.LocalSSHPort == c.LocalAPIPort {
+		return errors.New("local ssh and api ports must differ")
+	}
+	if c.VsockSSHPort == c.VsockAPIPort {
+		return errors.New("guest vsock ssh and api ports must differ")
 	}
 	return nil
 }
@@ -244,6 +305,20 @@ func DefaultStateDir() string {
 		return filepath.Join(".", xdgLocalDir, xdgStateSubdir, appName)
 	}
 	return filepath.Join(home, xdgLocalDir, xdgStateSubdir, appName)
+}
+
+// defaultIdentityDir returns the XDG-compliant directory of registered identity .pub files.
+// This mirrors internal/oidc.DefaultIdentityDir but is duplicated here to avoid an import
+// cycle (config is imported by oidc).
+func defaultIdentityDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, appName, "identities")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".config", appName, "identities")
+	}
+	return filepath.Join(home, ".config", appName, "identities")
 }
 
 // DefaultAptMirrorURI returns the apt mirror URI used by the default base image.

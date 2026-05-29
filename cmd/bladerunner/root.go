@@ -40,4 +40,5 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(noticeCmd)
+	rootCmd.AddCommand(userCmd)
 }

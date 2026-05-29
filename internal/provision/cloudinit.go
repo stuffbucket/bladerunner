@@ -226,7 +226,15 @@ done
 incus admin init --auto || true
 incus config set core.https_address "[::]:8443" || true
 
-# Add the host client certificate to trust store (try multiple command variants)
+# Configure Incus to trust the bladerunner local OIDC provider.
+# The issuer URL is the loopback address inside the guest, which is forwarded
+# over vsock to the bladerunner OIDC server on the host. See internal/oidc.
+incus config set core.oidc.issuer    "%s" || true
+incus config set core.oidc.client.id "%s" || true
+incus config set core.oidc.audience  "%s" || true
+
+# Add the host client certificate to trust store (kept for the --auth=cert
+# fallback path; safe to leave even when OIDC is the primary auth method).
 incus config trust add-certificate /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
   incus config trust add /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
   echo "Note: Could not add host certificate to trust store (may already exist)"
@@ -269,9 +277,27 @@ RestartSec=1
 WantedBy=multi-user.target
 UNIT
 
+cat >/etc/systemd/system/bladerunner-vsock-oidc.service <<'UNIT'
+[Unit]
+Description=Bladerunner vsock OIDC forward (guest TCP -> host vsock)
+After=network.target
+ConditionPathExists=/usr/bin/socat
+ConditionPathExists=/dev/vsock
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:%d,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 systemctl daemon-reload
 systemctl enable --now bladerunner-vsock-ssh.service
 systemctl enable --now bladerunner-vsock-incus.service
+systemctl enable --now bladerunner-vsock-oidc.service
 
 # Wait a moment for services to start
 sleep 2
@@ -290,7 +316,12 @@ systemctl status bladerunner-vsock-incus.service --no-pager 2>&1 | tee -a /var/l
 ip -4 -br addr show scope global > /var/lib/bladerunner/ipv4.txt || true
 incus info > /var/lib/bladerunner/incus-info.txt || true
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
-`, cfg.SSHUser, cfg.VsockSSHPort, cfg.VsockAPIPort)
+`,
+		cfg.SSHUser,
+		cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCAudience,
+		cfg.VsockSSHPort, cfg.VsockAPIPort,
+		cfg.VsockOIDCPort, cfg.VsockOIDCPort,
+	)
 }
 
 func indent(s string, spaces int) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/signal"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/oidc"
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
@@ -104,6 +106,19 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cfg.SetSSHKeys(keyPair.PublicKey, keyPair.PrivateKeyPath)
 	cfgHandler.Unlock()
 
+	// Start the local OIDC provider before the VM so the vsock-reverse forwarder
+	// can dial it as soon as the guest comes up. Failure to start OIDC is logged
+	// but does not abort start; the mTLS fallback path remains available.
+	oidcProvider, err := startOIDCProvider(ctx, cfg, keyPair.PublicKey)
+	switch {
+	case errors.Is(err, errOIDCDisabled):
+		logging.L().Info("oidc provider disabled by config")
+	case err != nil:
+		logging.L().Warn("oidc provider not started", "err", err)
+	default:
+		defer func() { _ = oidcProvider.Stop() }()
+	}
+
 	// Create and start VM
 	runner, err := vm.NewRunner(cfg)
 	if err != nil {
@@ -161,4 +176,50 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	fmt.Println(subtle("\nShutting down..."))
 	return nil
+}
+
+// errOIDCDisabled signals that the OIDC provider was intentionally skipped
+// (e.g. LocalOIDCPort=0). Callers should treat it as a benign no-op.
+var errOIDCDisabled = fmt.Errorf("oidc disabled (LocalOIDCPort=0)")
+
+// startOIDCProvider boots the local OIDC server, registers the host's own SSH
+// public key as the bootstrap admin identity, and returns the running provider.
+// Returns errOIDCDisabled (with a nil provider) when OIDC is disabled by config;
+// other errors mean startup failed and the caller should log and continue.
+func startOIDCProvider(ctx context.Context, cfg *config.Config, hostPublicKey string) (*oidc.Provider, error) {
+	if cfg.LocalOIDCPort == 0 {
+		return nil, errOIDCDisabled
+	}
+
+	signingKey, err := oidc.LoadOrCreateSigningKey(cfg.OIDCStateDir)
+	if err != nil {
+		return nil, fmt.Errorf("signing key: %w", err)
+	}
+
+	store := oidc.NewStore(cfg.IdentityDir)
+	if err := store.Load(); err != nil {
+		return nil, fmt.Errorf("load identities: %w", err)
+	}
+
+	// Bootstrap: auto-import the host's SSH public key on first start.
+	if hostPublicKey != "" && store.Count() == 0 {
+		if _, err := store.Add(hostPublicKey); err != nil {
+			logging.L().Warn("auto-import host key failed", "err", err)
+		}
+	}
+
+	provider, err := oidc.NewProvider(oidc.Config{
+		ListenAddr: fmt.Sprintf("127.0.0.1:%d", cfg.LocalOIDCPort),
+		IssuerURL:  cfg.OIDCIssuerURL,
+		Audience:   cfg.OIDCAudience,
+		SigningKey: signingKey,
+		Store:      store,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := provider.Start(ctx); err != nil {
+		return nil, err
+	}
+	return provider, nil
 }
