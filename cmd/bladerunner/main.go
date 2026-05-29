@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"runtime"
 )
@@ -12,6 +13,10 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		os.Exit(1)
 	}
 }
