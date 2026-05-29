@@ -128,5 +128,8 @@ curl --cert ~/.local/state/bladerunner/client.crt --key ~/.local/state/bladerunn
 - The default base image is the Debian 13 (trixie) genericcloud qcow2 (`incus` and `incus-client` ship in trixie main, so no third-party apt repos are needed). Override with `--image-url` or `BLADERUNNER_BASE_IMAGE_URL` to use Ubuntu 24.04 or another distribution.
 - The base image can be raw or qcow2 format. qcow2 images are automatically converted to raw via `qemu-img`.
 - First boot can take several minutes while cloud-init installs and configures Incus.
+- A pre-baked bladerunner guest image (Debian Trixie + Incus + `br-agent`, built by `scripts/build-guest-image.sh` and published via the `build-guest-image` workflow) is the future default. While that release pipeline is bootstrapping it is opt-in: set `UseHostedGuestImage` (or pass `--image-url` with the GitHub Release URL) to use it. Once `guest-image-latest` is published the default will flip.
+- Downloaded base images are SHA-256 verified against a sidecar `.sha256` file. The check is strict for upstream Debian URLs and tolerant of a missing sidecar for GitHub Release URLs during the bootstrap window.
+- `br status` surfaces the pre-baked image build date from `/etc/bladerunner-image-version` when present.
 - GUI output is handled by VZ graphics window; serial console is logged at `console.log`.
 - Extended operations (download, VM readiness, Incus readiness) show live progress indicators in terminal.

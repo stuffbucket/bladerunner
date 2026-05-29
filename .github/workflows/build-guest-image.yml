@@ -1,0 +1,161 @@
+name: Build Guest Image
+
+# Builds the pre-baked bladerunner guest image (PRD #45). Runs on every push
+# to main that touches the build script or the (future) br-agent sources,
+# and on manual dispatch. Publishes artifacts to a GitHub Release tagged
+# `guest-image-vYYYY.MM.DD`; same-day re-runs collapse onto the same tag.
+#
+# Notes on runners:
+#  - amd64 builds run on `ubuntu-24.04`.
+#  - arm64 builds run on `ubuntu-24.04-arm` (GitHub-hosted arm64). If that
+#    image becomes unavailable, replace the matrix entry's `runs-on` with
+#    `ubuntu-24.04` and let qemu-user emulation handle the foreign-arch
+#    customisation; the build script already uses cross-arch-clean
+#    Debian images and virt-customize so this is feasible.
+#  - The `cmd/br-agent` source tree may not exist yet (#44 PR pending).
+#    The build conditionally skips the agent install and tags the artifact
+#    with a `-no-agent` suffix.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/build-guest-image.sh
+      - scripts/br-agent.service
+      - cmd/br-agent/**
+      - .github/workflows/build-guest-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-24.04
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    outputs:
+      build_date: ${{ steps.meta.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install host tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-utils libguestfs-tools curl coreutils
+
+      - name: Resolve build metadata
+        id: meta
+        run: |
+          BUILD_DATE="$(date -u +%Y.%m.%d)"
+          echo "build_date=${BUILD_DATE}" >> "${GITHUB_OUTPUT}"
+          echo "tag=guest-image-v${BUILD_DATE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build br-agent (if present)
+        id: agent
+        run: |
+          if [ -d cmd/br-agent ]; then
+            echo "building br-agent for ${{ matrix.arch }}"
+            sudo apt-get install -y --no-install-recommends golang
+            mkdir -p bin
+            GOOS=linux GOARCH=${{ matrix.arch }} CGO_ENABLED=0 \
+              go build -trimpath -ldflags='-s -w' \
+              -o "bin/br-agent-${{ matrix.arch }}" ./cmd/br-agent
+            echo "binary=bin/br-agent-${{ matrix.arch }}" >> "${GITHUB_OUTPUT}"
+            echo "suffix=" >> "${GITHUB_OUTPUT}"
+          else
+            echo "cmd/br-agent not present; building image without agent"
+            echo "binary=" >> "${GITHUB_OUTPUT}"
+            echo "suffix=-no-agent" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Build image
+        id: build
+        run: |
+          mkdir -p out
+          OUT="out/bladerunner-guest-${{ matrix.arch }}${{ steps.agent.outputs.suffix }}.qcow2"
+          if [ -n "${{ steps.agent.outputs.binary }}" ]; then
+            sudo bash scripts/build-guest-image.sh \
+              --arch ${{ matrix.arch }} \
+              --output "${OUT}" \
+              --br-agent-binary "${{ steps.agent.outputs.binary }}"
+          else
+            sudo bash scripts/build-guest-image.sh \
+              --arch ${{ matrix.arch }} \
+              --output "${OUT}"
+          fi
+          echo "out=${OUT}" >> "${GITHUB_OUTPUT}"
+          sudo chown "$(id -u):$(id -g)" "${OUT}" "${OUT}.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bladerunner-guest-${{ matrix.arch }}${{ steps.agent.outputs.suffix }}
+          path: |
+            ${{ steps.build.outputs.out }}
+            ${{ steps.build.outputs.out }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish Release
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact layout
+        run: |
+          mkdir -p out
+          find dist -type f \( -name '*.qcow2' -o -name '*.sha256' \) -exec cp -v {} out/ \;
+          ls -la out/
+
+      - name: Publish dated release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BUILD_DATE="${{ needs.build.outputs.build_date }}"
+          TAG="guest-image-v${BUILD_DATE}"
+          TITLE="Guest image ${BUILD_DATE}"
+
+          # Collapse same-day rebuilds onto the same tag: delete + recreate.
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release ${TAG} exists; updating assets"
+            gh release upload "${TAG}" out/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" out/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TITLE}" \
+              --notes "Pre-baked bladerunner guest image (Debian Trixie + Incus). Built ${BUILD_DATE}."
+          fi
+
+      - name: Update `guest-image-latest` pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="guest-image-latest"
+          TITLE="Guest image (latest)"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" out/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" out/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TITLE}" \
+              --notes "Moving pointer to the most recent guest image build (${{ needs.build.outputs.build_date }})."
+          fi

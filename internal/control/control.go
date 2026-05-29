@@ -106,6 +106,15 @@ const (
 	ConfigKeyBaseImageURL      = "base-image-url"
 	ConfigKeyBaseImagePath     = "base-image-path"
 	ConfigKeyCloudInitISO      = "cloud-init-iso"
+	// ConfigKeyGuestImageVersion is the YYYY.MM.DD build date baked into the
+	// guest image at /etc/bladerunner-image-version. Read via SSH; empty when
+	// the running image was not built by scripts/build-guest-image.sh
+	// (e.g. raw Debian genericcloud).
+	ConfigKeyGuestImageVersion = "guest-image-version"
+	// ConfigKeyUseHostedGuestImage reports whether the pre-baked bladerunner
+	// guest image is the chosen base. Defaults to "false" while
+	// guest-image-latest is not yet published.
+	ConfigKeyUseHostedGuestImage = "use-hosted-guest-image"
 )
 
 // ConfigKeyMeta describes a config key's properties for CLI display and access control.
@@ -131,6 +140,7 @@ func ConfigKeyRegistry() []ConfigKeyMeta {
 		{Key: ConfigKeyCloudInitISO, Description: "Cloud-init ISO path"},
 		{Key: ConfigKeyCPUs, RequiresReset: true, Description: "Number of CPUs"},
 		{Key: ConfigKeyDiskSizeGiB, RequiresReset: true, Description: "Disk size in GiB"},
+		{Key: ConfigKeyGuestImageVersion, RequiresVM: true, Description: "Pre-baked guest image build date (YYYY.MM.DD)"},
 		{Key: ConfigKeyGUI, RequiresReset: true, Description: "GUI console enabled"},
 		{Key: ConfigKeyHostname, RequiresReset: true, Description: "VM hostname"},
 		{Key: ConfigKeyLocalAPIPort, RequiresReset: true, Description: "Local API port"},
@@ -144,6 +154,7 @@ func ConfigKeyRegistry() []ConfigKeyMeta {
 		{Key: ConfigKeySSHPrivateKeyPath, RequiresVM: true, Description: "SSH private key path"},
 		{Key: ConfigKeySSHUser, Description: "SSH user"},
 		{Key: ConfigKeyStateDir, Description: "State directory"},
+		{Key: ConfigKeyUseHostedGuestImage, Description: "Use pre-baked hosted guest image"},
 		{Key: ConfigKeyVMDir, Description: "VM directory"},
 	}
 }
