@@ -70,6 +70,9 @@ func renderInstanceTable(out *os.File, instances []api.InstanceFull) error {
 // fingerprintShortLen is the number of hex characters to display from an image fingerprint.
 const fingerprintShortLen = 12
 
+// addrFamilyIPv4 is the Incus address family value for IPv4.
+const addrFamilyIPv4 = "inet"
+
 // primaryIPv4 picks the first non-loopback inet address from the instance state.
 func primaryIPv4(inst *api.InstanceFull) string {
 	if inst.State == nil {
@@ -80,7 +83,7 @@ func primaryIPv4(inst *api.InstanceFull) string {
 			continue
 		}
 		for _, addr := range n.Addresses {
-			if addr.Family != "inet" {
+			if addr.Family != addrFamilyIPv4 {
 				continue
 			}
 			if addr.Scope == "local" {

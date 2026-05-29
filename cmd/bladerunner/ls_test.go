@@ -24,13 +24,13 @@ func TestPrimaryIPv4(t *testing.T) {
 					Network: map[string]api.InstanceStateNetwork{
 						"lo": {
 							Addresses: []api.InstanceStateNetworkAddress{
-								{Family: "inet", Address: "127.0.0.1", Scope: "local"},
+								{Family: addrFamilyIPv4,Address: "127.0.0.1", Scope: "local"},
 							},
 						},
 						"eth0": {
 							Addresses: []api.InstanceStateNetworkAddress{
 								{Family: "inet6", Address: "fe80::1", Scope: "link"},
-								{Family: "inet", Address: "10.0.0.5", Scope: "global"},
+								{Family: addrFamilyIPv4,Address: "10.0.0.5", Scope: "global"},
 							},
 						},
 					},
