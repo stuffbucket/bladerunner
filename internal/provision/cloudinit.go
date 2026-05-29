@@ -57,12 +57,27 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	b.WriteString("    permissions: '0755'\n")
 	b.WriteString("    content: |\n")
 	b.WriteString(indent(bootstrapScript, 6))
+	// Drop-in grub override: ensures /dev/console routes to hvc0 (the VZ-captured
+	// serial device) on every subsequent boot. cloud-init applies write_files
+	// before bootcmd/runcmd, so the file is in place when update-grub runs below.
+	// This file APPENDS to GRUB_CMDLINE_LINUX rather than replacing it, so any
+	// existing distro defaults are preserved.
+	b.WriteString("  - path: /etc/default/grub.d/99_bladerunner.cfg\n")
+	b.WriteString("    permissions: '0644'\n")
+	b.WriteString("    content: |\n")
+	b.WriteString("      GRUB_CMDLINE_LINUX=\"$GRUB_CMDLINE_LINUX console=hvc0 console=tty0\"\n")
 	b.WriteString("bootcmd:\n")
-	b.WriteString("  # Enable serial console for boot messages\n")
+	b.WriteString("  # Regenerate grub config so the 99_bladerunner.cfg drop-in (written by\n")
+	b.WriteString("  # write_files above, which cloud-init applies before bootcmd) lands in\n")
+	b.WriteString("  # /boot/grub/grub.cfg. Then, on first boot only, reboot immediately so\n")
+	b.WriteString("  # runcmd (the bootstrap script) executes with console=hvc0 active and\n")
+	b.WriteString("  # its STAGE breadcrumbs reach the host-captured console.log.\n")
+	b.WriteString("  - [sh, -c, 'update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true']\n")
 	b.WriteString("  - |\n")
-	b.WriteString("    if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub && ! grep -q 'console=' /etc/default/grub; then\n")
-	b.WriteString("      sed -i 's/^GRUB_CMDLINE_LINUX=\"\\(.*\\)\"/GRUB_CMDLINE_LINUX=\"\\1 console=hvc0 console=tty0\"/' /etc/default/grub\n")
-	b.WriteString("      update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true\n")
+	b.WriteString("    mkdir -p /var/lib/bladerunner\n")
+	b.WriteString("    if [ ! -f /var/lib/bladerunner/.boot1-rebooted ]; then\n")
+	b.WriteString("      touch /var/lib/bladerunner/.boot1-rebooted\n")
+	b.WriteString("      systemctl reboot || reboot || shutdown -r now\n")
 	b.WriteString("    fi\n")
 	b.WriteString("growpart:\n")
 	b.WriteString("  mode: auto\n")
