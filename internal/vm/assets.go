@@ -2,18 +2,123 @@ package vm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
+
+// isGitHubReleaseURL reports whether url points at a github.com release
+// download. Used to relax sidecar-checksum strictness during the period
+// before the first guest-image release ships a .sha256 sidecar.
+func isGitHubReleaseURL(url string) bool {
+	return strings.Contains(url, "github.com/") && strings.Contains(url, "/releases/")
+}
+
+// fetchSidecarSHA256 fetches a "<url>.sha256" sidecar and returns the
+// lowercased hex digest. The sidecar may be either bare hex or the
+// `sha256sum` format ("<hex>  <filename>"); only the first whitespace-
+// separated token is used. Returns "" with no error if the sidecar
+// 404s (caller decides whether that's acceptable).
+func fetchSidecarSHA256(ctx context.Context, imageURL string) (string, error) {
+	sidecarURL := imageURL + ".sha256"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sidecarURL, http.NoBody)
+	if err != nil {
+		return "", fmt.Errorf("create sidecar request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch sidecar checksum: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("fetch sidecar checksum: %s", resp.Status)
+	}
+
+	const maxSidecarBytes = 4096
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxSidecarBytes))
+	if err != nil {
+		return "", fmt.Errorf("read sidecar checksum: %w", err)
+	}
+	first := strings.Fields(strings.TrimSpace(string(b)))
+	if len(first) == 0 {
+		return "", fmt.Errorf("sidecar checksum is empty")
+	}
+	digest := strings.ToLower(first[0])
+	if len(digest) != sha256.Size*2 {
+		return "", fmt.Errorf("sidecar checksum has unexpected length: %d", len(digest))
+	}
+	for _, r := range digest {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", fmt.Errorf("sidecar checksum is not hex: %q", digest)
+		}
+	}
+	return digest, nil
+}
+
+// fileSHA256 returns the hex-encoded SHA-256 digest of the file at path.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open for sha256: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash file: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// verifyImageChecksum compares the downloaded image at path against the
+// sidecar checksum hosted at imageURL+".sha256". For GitHub Release URLs,
+// a missing sidecar is logged at WARN and treated as acceptable to avoid
+// blocking the first guest-image release. For non-Release URLs the
+// upstream is expected to ship a sidecar (Debian does), so missing or
+// mismatched sidecars are fatal.
+func verifyImageChecksum(ctx context.Context, imageURL, path string) error {
+	want, err := fetchSidecarSHA256(ctx, imageURL)
+	if err != nil {
+		if isGitHubReleaseURL(imageURL) {
+			logging.L().Warn("sidecar SHA-256 fetch failed, continuing without verification",
+				"url", imageURL+".sha256", "err", err)
+			return nil
+		}
+		return err
+	}
+	if want == "" {
+		if isGitHubReleaseURL(imageURL) {
+			logging.L().Warn("sidecar SHA-256 missing for GitHub Release artifact, skipping verification",
+				"url", imageURL+".sha256")
+			return nil
+		}
+		return fmt.Errorf("sidecar checksum not found at %s", imageURL+".sha256")
+	}
+	got, err := fileSHA256(path)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("base image SHA-256 mismatch: got %s, want %s", got, want)
+	}
+	logging.L().Info("base image SHA-256 verified", "sha256", got)
+	return nil
+}
 
 func ensureVMDir(cfg *config.Config) error {
 	start := time.Now()
@@ -51,6 +156,12 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 
 	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", path)
 	if err := downloadFile(ctx, cfg.BaseImageURL, path); err != nil {
+		return "", err
+	}
+
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, path); err != nil {
+		// Remove the corrupt download so subsequent runs don't reuse it.
+		_ = os.Remove(path)
 		return "", err
 	}
 

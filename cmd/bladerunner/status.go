@@ -9,6 +9,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/ui"
+	"github.com/stuffbucket/bladerunner/internal/vm"
 )
 
 const (
@@ -79,6 +80,8 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.sep()
 	right.rowIf("Image", getConfig(control.ConfigKeyBaseImageURL))
 	right.rowIf("Path", getConfig(control.ConfigKeyBaseImagePath))
+	right.rowIf("Img Ver", guestImageVersionForStatus(getConfig))
+	right.rowIf("Hosted", getConfig(control.ConfigKeyUseHostedGuestImage))
 	right.rowIf("Cloud-init", getConfig(control.ConfigKeyCloudInitISO))
 	right.rowIf("Log", getConfig(control.ConfigKeyLogPath))
 
@@ -90,6 +93,24 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	fmt.Println()
 
 	return nil
+}
+
+// guestImageVersionForStatus reads /etc/bladerunner-image-version via SSH
+// when the SSH config path is available. Returns an empty string if the
+// VM doesn't expose SSH yet or the file is missing (typical when the
+// running base image is the plain Debian genericcloud, not the pre-baked
+// bladerunner guest image).
+func guestImageVersionForStatus(getConfig func(string) string) string {
+	sshConfig := getConfig(control.ConfigKeySSHConfigPath)
+	if sshConfig == "" {
+		return ""
+	}
+	cfg := &config.Config{SSHConfigPath: sshConfig}
+	v, err := vm.ReadGuestImageVersion(cfg)
+	if err != nil {
+		return ""
+	}
+	return v
 }
 
 // panel accumulates rows of formatted text for a single column.

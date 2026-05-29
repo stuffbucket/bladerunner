@@ -50,6 +50,92 @@ func TestDefaultBaseImageURL(t *testing.T) {
 	}
 }
 
+func TestDebianTrixieGenericCloudURL(t *testing.T) {
+	tests := []struct {
+		arch    string
+		wantURL string
+		wantErr bool
+	}{
+		{"arm64", "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2", false},
+		{"amd64", "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2", false},
+		{"riscv64", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.arch, func(t *testing.T) {
+			got, err := DebianTrixieGenericCloudURL(tt.arch)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("DebianTrixieGenericCloudURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.wantURL {
+				t.Errorf("DebianTrixieGenericCloudURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestHostedGuestImageURL(t *testing.T) {
+	tests := []struct {
+		arch    string
+		wantURL string
+		wantErr bool
+	}{
+		{"arm64", "https://github.com/stuffbucket/bladerunner/releases/download/guest-image-latest/bladerunner-guest-arm64.qcow2", false},
+		{"amd64", "https://github.com/stuffbucket/bladerunner/releases/download/guest-image-latest/bladerunner-guest-amd64.qcow2", false},
+		{"riscv64", "", true},
+		{"", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.arch, func(t *testing.T) {
+			got, err := HostedGuestImageURL(tt.arch)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("HostedGuestImageURL() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.wantURL {
+				t.Errorf("HostedGuestImageURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestResolveBaseImageURL(t *testing.T) {
+	// useHosted=false should match the Debian genericcloud URL.
+	got, err := ResolveBaseImageURL("arm64", false)
+	if err != nil {
+		t.Fatalf("ResolveBaseImageURL(arm64, false) error = %v", err)
+	}
+	want, _ := DebianTrixieGenericCloudURL("arm64")
+	if got != want {
+		t.Errorf("ResolveBaseImageURL(arm64, false) = %q, want %q", got, want)
+	}
+
+	// useHosted=true should match the GitHub Release URL.
+	got, err = ResolveBaseImageURL("amd64", true)
+	if err != nil {
+		t.Fatalf("ResolveBaseImageURL(amd64, true) error = %v", err)
+	}
+	want, _ = HostedGuestImageURL("amd64")
+	if got != want {
+		t.Errorf("ResolveBaseImageURL(amd64, true) = %q, want %q", got, want)
+	}
+
+	if _, err := ResolveBaseImageURL("riscv64", false); err == nil {
+		t.Error("ResolveBaseImageURL(riscv64, false) expected error, got nil")
+	}
+	if _, err := ResolveBaseImageURL("riscv64", true); err == nil {
+		t.Error("ResolveBaseImageURL(riscv64, true) expected error, got nil")
+	}
+}
+
+func TestDefaultConfigUseHostedGuestImage(t *testing.T) {
+	cfg, err := Default(t.TempDir())
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	if cfg.UseHostedGuestImage {
+		t.Error("Default config should have UseHostedGuestImage=false (opt-in)")
+	}
+}
+
 func TestDefaultAptMirrorURI(t *testing.T) {
 	const want = "http://deb.debian.org/debian"
 	for _, arch := range []string{"arm64", "amd64", "riscv64", ""} {

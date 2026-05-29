@@ -34,6 +34,15 @@ const (
 	DefaultOIDCClientID = "bladerunner"
 	DefaultOIDCAudience = "bladerunner"
 
+	// HostedGuestImageTag is the GitHub Release tag bladerunner pulls pre-baked
+	// guest images from when UseHostedGuestImage is enabled. The "latest" tag is
+	// maintained as a moving pointer by the build-guest-image workflow.
+	HostedGuestImageTag = "guest-image-latest"
+
+	// GuestImageVersionPath is the in-guest file written by the build pipeline
+	// containing the YYYY.MM.DD build date of the running image.
+	GuestImageVersionPath = "/etc/bladerunner-image-version"
+
 	// AuthMode values
 	AuthModeOIDC = "oidc"
 	AuthModeCert = "cert"
@@ -108,14 +117,29 @@ type Config struct {
 	NetworkMode     string
 	BridgeInterface string
 	GUI             bool
-	CPUs            uint
-	MemoryGiB       uint64
-	Arch            string
-	WaitForIncus    time.Duration
-	DashboardPath   string
+	// UseHostedGuestImage opts in to the pre-baked bladerunner guest image
+	// hosted on GitHub Releases. Defaults to false until a guest-image-latest
+	// release exists. When false, BaseImageURL points at the Debian Trixie
+	// genericcloud image and cloud-init bootstraps Incus on first boot.
+	UseHostedGuestImage bool
+	CPUs                uint
+	MemoryGiB           uint64
+	Arch                string
+	WaitForIncus        time.Duration
+	DashboardPath       string
 }
 
+// DefaultBaseImageURL returns the default base image URL for the given GOARCH.
+// It defers to DebianTrixieGenericCloudURL — the pre-baked hosted image is
+// opt-in via Config.UseHostedGuestImage and resolved through HostedGuestImageURL.
 func DefaultBaseImageURL(goarch string) (string, error) {
+	return DebianTrixieGenericCloudURL(goarch)
+}
+
+// DebianTrixieGenericCloudURL returns the upstream Debian Trixie genericcloud
+// qcow2 URL for the given GOARCH. This is the fallback base image used when
+// the pre-baked bladerunner guest image is unavailable or not opted into.
+func DebianTrixieGenericCloudURL(goarch string) (string, error) {
 	switch goarch {
 	case "arm64":
 		return "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2", nil
@@ -126,12 +150,39 @@ func DefaultBaseImageURL(goarch string) (string, error) {
 	}
 }
 
+// HostedGuestImageURL returns the GitHub Release URL for the pre-baked
+// bladerunner guest image for the given GOARCH. The artifact is published by
+// the build-guest-image GitHub Actions workflow under the HostedGuestImageTag
+// release.
+func HostedGuestImageURL(goarch string) (string, error) {
+	switch goarch {
+	case "arm64", "amd64":
+		return fmt.Sprintf(
+			"https://github.com/stuffbucket/bladerunner/releases/download/%s/bladerunner-guest-%s.qcow2",
+			HostedGuestImageTag, goarch), nil
+	default:
+		return "", fmt.Errorf("unsupported architecture: %s", goarch)
+	}
+}
+
+// ResolveBaseImageURL picks between the pre-baked hosted image and the Debian
+// genericcloud fallback based on the useHosted flag. This is the single
+// source of truth for which URL bladerunner uses for a fresh download.
+func ResolveBaseImageURL(goarch string, useHosted bool) (string, error) {
+	if useHosted {
+		return HostedGuestImageURL(goarch)
+	}
+	return DebianTrixieGenericCloudURL(goarch)
+}
+
 func Default(baseDir string) (*Config, error) {
 	if baseDir == "" {
 		baseDir = DefaultStateDir()
 	}
 
-	imageURL, err := DefaultBaseImageURL(runtime.GOARCH)
+	// Hosted (pre-baked) image is opt-in until guest-image-latest exists.
+	useHosted := false
+	imageURL, err := ResolveBaseImageURL(runtime.GOARCH, useHosted)
 	if err != nil {
 		return nil, err
 	}
@@ -142,49 +193,50 @@ func Default(baseDir string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Name:              appName,
-		Hostname:          appName,
-		StateDir:          baseDir,
-		VMDir:             baseDir,
-		DiskPath:          filepath.Join(baseDir, diskFileName),
-		DiskSizeGiB:       DefaultDiskSizeGiB,
-		BaseImageURL:      imageURL,
-		BaseImagePath:     "",
-		MachineIDPath:     filepath.Join(baseDir, machineIDFileName),
-		EFIVarsPath:       filepath.Join(baseDir, efiVarsFileName),
-		CloudInitISO:      filepath.Join(baseDir, cloudInitISOFileName),
-		CloudInitDir:      filepath.Join(baseDir, cloudInitDirName),
-		ConsoleLogPath:    filepath.Join(baseDir, consoleLogFileName),
-		LogPath:           filepath.Join(baseDir, logFileName),
-		ReportPath:        filepath.Join(baseDir, reportFileName),
-		MetadataPath:      filepath.Join(baseDir, metadataFileName),
-		SSHUser:           "incus",
-		SSHPublicKey:      "", // Set by EnsureSSHKeys
-		SSHPrivateKeyPath: "", // Set by EnsureSSHKeys
-		SSHConfigPath:     "", // Set after VM starts
-		ClientCertPath:    filepath.Join(baseDir, clientCertFileName),
-		ClientKeyPath:     filepath.Join(baseDir, clientKeyFileName),
-		TrustPassword:     trustPassword,
-		LocalSSHPort:      DefaultLocalSSHPort,
-		LocalAPIPort:      DefaultLocalAPIPort,
-		LocalOIDCPort:     DefaultLocalOIDCPort,
-		VsockSSHPort:      DefaultVsockSSHPort,
-		VsockAPIPort:      DefaultVsockAPIPort,
-		VsockOIDCPort:     DefaultVsockOIDCPort,
-		OIDCIssuerURL:     fmt.Sprintf("http://127.0.0.1:%d", DefaultVsockOIDCPort),
-		OIDCClientID:      DefaultOIDCClientID,
-		OIDCAudience:      DefaultOIDCAudience,
-		OIDCStateDir:      filepath.Join(baseDir, "oidc"),
-		IdentityDir:       defaultIdentityDir(),
-		AuthMode:          AuthModeOIDC,
-		NetworkMode:       NetworkModeShared,
-		BridgeInterface:   "en0",
-		GUI:               true,
-		CPUs:              DefaultCPUs,
-		MemoryGiB:         DefaultMemoryGiB,
-		Arch:              runtime.GOARCH,
-		WaitForIncus:      DefaultTimeout,
-		DashboardPath:     "/ui/",
+		Name:                appName,
+		Hostname:            appName,
+		StateDir:            baseDir,
+		VMDir:               baseDir,
+		DiskPath:            filepath.Join(baseDir, diskFileName),
+		DiskSizeGiB:         DefaultDiskSizeGiB,
+		BaseImageURL:        imageURL,
+		BaseImagePath:       "",
+		MachineIDPath:       filepath.Join(baseDir, machineIDFileName),
+		EFIVarsPath:         filepath.Join(baseDir, efiVarsFileName),
+		CloudInitISO:        filepath.Join(baseDir, cloudInitISOFileName),
+		CloudInitDir:        filepath.Join(baseDir, cloudInitDirName),
+		ConsoleLogPath:      filepath.Join(baseDir, consoleLogFileName),
+		LogPath:             filepath.Join(baseDir, logFileName),
+		ReportPath:          filepath.Join(baseDir, reportFileName),
+		MetadataPath:        filepath.Join(baseDir, metadataFileName),
+		SSHUser:             "incus",
+		SSHPublicKey:        "", // Set by EnsureSSHKeys
+		SSHPrivateKeyPath:   "", // Set by EnsureSSHKeys
+		SSHConfigPath:       "", // Set after VM starts
+		ClientCertPath:      filepath.Join(baseDir, clientCertFileName),
+		ClientKeyPath:       filepath.Join(baseDir, clientKeyFileName),
+		TrustPassword:       trustPassword,
+		LocalSSHPort:        DefaultLocalSSHPort,
+		LocalAPIPort:        DefaultLocalAPIPort,
+		LocalOIDCPort:       DefaultLocalOIDCPort,
+		VsockSSHPort:        DefaultVsockSSHPort,
+		VsockAPIPort:        DefaultVsockAPIPort,
+		VsockOIDCPort:       DefaultVsockOIDCPort,
+		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultVsockOIDCPort),
+		OIDCClientID:        DefaultOIDCClientID,
+		OIDCAudience:        DefaultOIDCAudience,
+		OIDCStateDir:        filepath.Join(baseDir, "oidc"),
+		IdentityDir:         defaultIdentityDir(),
+		AuthMode:            AuthModeOIDC,
+		NetworkMode:         NetworkModeShared,
+		BridgeInterface:     "en0",
+		GUI:                 true,
+		UseHostedGuestImage: useHosted,
+		CPUs:                DefaultCPUs,
+		MemoryGiB:           DefaultMemoryGiB,
+		Arch:                runtime.GOARCH,
+		WaitForIncus:        DefaultTimeout,
+		DashboardPath:       "/ui/",
 	}
 
 	return cfg, nil
