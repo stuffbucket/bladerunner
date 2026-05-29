@@ -18,7 +18,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/agent"
 )
 
-// Paths and well-known names used by the handlers. Centralised so tests can
+// Paths and well-known names used by the handlers. Centralized so tests can
 // override them and so goconst stays happy.
 const (
 	configDir         = "/etc/bladerunner"
@@ -154,7 +154,7 @@ func waitForIncus(ctx context.Context, s *handlerState) (*agent.ReadyWaitRespons
 	defer cancel()
 	if err := s.runner.Run(waitCtx, "incus", "admin", "waitready", "--timeout=60"); err != nil {
 		// `incus admin init --auto` is safe to run repeatedly; it
-		// no-ops if storage and network are already initialised.
+		// no-ops if storage and network are already initialized.
 		if initErr := s.runner.Run(ctx, "incus", "admin", "init", "--auto"); initErr != nil {
 			return nil, fmt.Errorf("incus init: %w", initErr)
 		}

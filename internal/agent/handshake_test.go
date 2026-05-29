@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const testIssuer = "http://issuer"
+
 // fakeAgent simulates an in-guest br-agent that replies to commands over a
 // net.Pipe connection. It records the args it received so the test can
 // assert on them.
@@ -62,7 +64,7 @@ func TestRunHandshakeFullSequence(t *testing.T) {
 	defer cancel()
 	res, err := RunHandshake(ctx, hostConn, HandshakeConfig{
 		ConfigPush: ConfigPushArgs{
-			OIDCIssuer:   "http://issuer",
+			OIDCIssuer:   testIssuer,
 			OIDCClientID: "bladerunner",
 			OIDCAudience: "bladerunner",
 		},
@@ -83,7 +85,7 @@ func TestRunHandshakeFullSequence(t *testing.T) {
 	if !fa.configReceived || !fa.userReceived {
 		t.Fatalf("agent did not receive both commands: config=%v user=%v", fa.configReceived, fa.userReceived)
 	}
-	if fa.gotConfigPush.OIDCIssuer != "http://issuer" {
+	if fa.gotConfigPush.OIDCIssuer != testIssuer {
 		t.Fatalf("config.OIDCIssuer = %q", fa.gotConfigPush.OIDCIssuer)
 	}
 	if fa.gotUserSync.AuthorizedKeys != "ssh-ed25519 AAAA test" {
@@ -99,7 +101,7 @@ func TestRunHandshakeSkipsUserSyncWhenKeysEmpty(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	res, err := RunHandshake(ctx, hostConn, HandshakeConfig{
-		ConfigPush: ConfigPushArgs{OIDCIssuer: "http://issuer"},
+		ConfigPush: ConfigPushArgs{OIDCIssuer: testIssuer},
 	})
 	if err != nil {
 		t.Fatalf("handshake: %v", err)

@@ -12,6 +12,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// localGuestCID is the well-known AF_VSOCK CID assigned to a guest VM
+// (VMADDR_CID_GUEST). Used purely for cosmetic LocalAddr reporting; the
+// kernel selects the actual local CID on connect.
+const localGuestCID = 3
+
 // vsockConn wraps a vsock file descriptor as a net.Conn so it can be used
 // with the generic agent protocol code.
 type vsockConn struct {
@@ -46,7 +51,7 @@ func dialVsock(cid, port uint32) (net.Conn, error) {
 	f := os.NewFile(uintptr(fd), fmt.Sprintf("vsock:%d:%d", cid, port))
 	return &vsockConn{
 		File:       f,
-		localAddr:  vsockAddr{CID: 3, Port: 0},
+		localAddr:  vsockAddr{CID: localGuestCID, Port: 0},
 		remoteAddr: vsockAddr{CID: cid, Port: port},
 	}, nil
 }

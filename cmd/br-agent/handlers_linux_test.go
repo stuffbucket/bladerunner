@@ -15,6 +15,11 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/agent"
 )
 
+const (
+	testIssuer       = "http://issuer"
+	testIncusAPIAddr = "[::]:8443"
+)
+
 // fakeRunner records every command it was asked to run and returns canned
 // stdout/error for each. It is safe for concurrent use.
 type fakeRunner struct {
@@ -73,10 +78,10 @@ func TestApplyConfigPushWritesConfigAndSetsIncusKeys(t *testing.T) {
 	fr := newFakeRunner()
 	s := &handlerState{runner: fr, rootDir: tmp}
 	args := &agent.ConfigPushArgs{
-		OIDCIssuer:       "http://issuer",
+		OIDCIssuer:       testIssuer,
 		OIDCClientID:     "bladerunner",
 		OIDCAudience:     "bladerunner",
-		CoreHTTPSAddress: "[::]:8443",
+		CoreHTTPSAddress: testIncusAPIAddr,
 	}
 	if err := applyConfigPush(context.Background(), s, args); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -91,15 +96,15 @@ func TestApplyConfigPushWritesConfigAndSetsIncusKeys(t *testing.T) {
 	if err := json.Unmarshal(data, &roundTrip); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if roundTrip.OIDCIssuer != "http://issuer" {
+	if roundTrip.OIDCIssuer != testIssuer {
 		t.Fatalf("OIDCIssuer = %q", roundTrip.OIDCIssuer)
 	}
 
 	wantCalls := []string{
-		"incus config set core.oidc.issuer http://issuer",
+		"incus config set core.oidc.issuer " + testIssuer,
 		"incus config set core.oidc.client.id bladerunner",
 		"incus config set core.oidc.audience bladerunner",
-		"incus config set core.https_address [::]:8443",
+		"incus config set core.https_address " + testIncusAPIAddr,
 		"systemctl daemon-reload",
 	}
 	for _, w := range wantCalls {
@@ -112,9 +117,9 @@ func TestApplyConfigPushWritesConfigAndSetsIncusKeys(t *testing.T) {
 func TestApplyConfigPushIncusFailureIsLoggedNotFatal(t *testing.T) {
 	tmp := t.TempDir()
 	fr := newFakeRunner()
-	fr.errs["incus config set core.oidc.issuer http://issuer"] = errors.New("boom")
+	fr.errs["incus config set core.oidc.issuer "+testIssuer] = errors.New("boom")
 	s := &handlerState{runner: fr, rootDir: tmp}
-	args := &agent.ConfigPushArgs{OIDCIssuer: "http://issuer"}
+	args := &agent.ConfigPushArgs{OIDCIssuer: testIssuer}
 	if err := applyConfigPush(context.Background(), s, args); err != nil {
 		t.Fatalf("apply returned error despite tolerating incus failures: %v", err)
 	}
@@ -140,7 +145,7 @@ func TestWaitForIncusInitsOnFailedWait(t *testing.T) {
 		return nil
 	}
 	fr.stdout["incus version"] = "Client version: 6.0\nServer version: 6.0"
-	fr.stdout["incus config get core.https_address"] = "[::]:8443"
+	fr.stdout["incus config get core.https_address"] = testIncusAPIAddr
 
 	s := &handlerState{runner: fr}
 	resp, err := waitForIncus(context.Background(), s)
@@ -153,7 +158,7 @@ func TestWaitForIncusInitsOnFailedWait(t *testing.T) {
 	if !strings.Contains(resp.IncusVersion, "6.0") {
 		t.Errorf("incus version = %q", resp.IncusVersion)
 	}
-	if resp.APIAddress != "[::]:8443" {
+	if resp.APIAddress != testIncusAPIAddr {
 		t.Errorf("api address = %q", resp.APIAddress)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -21,9 +22,10 @@ import (
 // CLI defaults. Kept as constants to satisfy goconst (host=2 appears more
 // than once as a vsock CID).
 const (
-	defaultHostCID  uint32 = 2 // VMADDR_CID_HOST: dial the hypervisor host
-	defaultPort     uint32 = 19001
-	defaultLogLevel        = "info"
+	defaultHostCID        uint32 = 2 // VMADDR_CID_HOST: dial the hypervisor host
+	defaultPort           uint32 = 19001
+	defaultLogLevel              = "info"
+	defaultDialTimeoutSec        = 60
 )
 
 // version is overridden at build time via -ldflags="-X main.version=...".
@@ -32,7 +34,7 @@ var version = "dev"
 func main() {
 	cid := flag.Uint("host-cid", uint(defaultHostCID), "vsock CID of the host (default 2)")
 	port := flag.Uint("port", uint(defaultPort), "vsock port the host listens on")
-	dialTimeout := flag.Duration("dial-timeout", 60*time.Second, "max time to wait for host vsock listener")
+	dialTimeout := flag.Duration("dial-timeout", defaultDialTimeoutSec*time.Second, "max time to wait for host vsock listener")
 	retryInterval := flag.Duration("retry-interval", 2*time.Second, "interval between vsock dial retries")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	logLevel := flag.String("log-level", defaultLogLevel, "log level (debug|info|warn|error)")
@@ -48,7 +50,9 @@ func main() {
 	defer stop()
 
 	if err := run(ctx, uint32(*cid), uint32(*port), *dialTimeout, *retryInterval); err != nil {
-		log.Fatalf("br-agent: %v", err)
+		log.Printf("br-agent: %v", err)
+		stop()
+		os.Exit(1)
 	}
 }
 
