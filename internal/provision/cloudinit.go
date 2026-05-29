@@ -148,6 +148,9 @@ if [ ! -e /dev/vsock ]; then
   echo "WARNING: /dev/vsock not found, vsock forwarding may not work" >&2
 fi
 
+# Zabbly fallback: dormant for the default Debian 13 (trixie) image, which ships
+# incus and incus-client in main. Retained for Ubuntu and other distros reached
+# via --image-url where the native package is not available.
 install_zabbly_repo() {
   if [ ! -e /etc/apt/keyrings/zabbly.asc ]; then
     mkdir -p /etc/apt/keyrings
@@ -175,10 +178,27 @@ Signed-By: /etc/apt/keyrings/zabbly.asc
 SRC
 }
 
+# Detect Debian trixie (or any distro shipping incus in its native repos) so we
+# can skip the Zabbly fallback entirely.
+native_incus_distro() {
+  if [ ! -r /etc/os-release ]; then
+    return 1
+  fi
+  . /etc/os-release
+  case "${ID:-}:${VERSION_CODENAME:-}" in
+    debian:trixie|debian:forky|debian:sid)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
   apt-get install -y -qq ca-certificates curl gpg openssh-server socat jq
-  if ! apt-get install -y -qq incus incus-client; then
+  if native_incus_distro; then
+    apt-get install -y -qq incus incus-client
+  elif ! apt-get install -y -qq incus incus-client; then
     install_zabbly_repo
     apt-get update -qq
     apt-get install -y -qq incus incus-client

@@ -17,15 +17,15 @@ func TestDefaultBaseImageURL(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "arm64 returns linuxcontainers ARM64 image",
+			name:    "arm64 returns Debian 13 trixie ARM64 image",
 			arch:    "arm64",
-			wantURL: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
+			wantURL: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2",
 			wantErr: false,
 		},
 		{
-			name:    "amd64 returns linuxcontainers AMD64 image",
+			name:    "amd64 returns Debian 13 trixie AMD64 image",
 			arch:    "amd64",
-			wantURL: "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img",
+			wantURL: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
 			wantErr: false,
 		},
 		{
@@ -45,6 +45,17 @@ func TestDefaultBaseImageURL(t *testing.T) {
 			}
 			if got != tt.wantURL {
 				t.Errorf("DefaultBaseImageURL() = %v, want %v", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestDefaultAptMirrorURI(t *testing.T) {
+	const want = "http://deb.debian.org/debian"
+	for _, arch := range []string{"arm64", "amd64", "riscv64", ""} {
+		t.Run("arch="+arch, func(t *testing.T) {
+			if got := DefaultAptMirrorURI(arch); got != want {
+				t.Errorf("DefaultAptMirrorURI(%q) = %q, want %q", arch, got, want)
 			}
 		})
 	}

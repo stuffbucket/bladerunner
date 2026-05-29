@@ -93,9 +93,9 @@ type Config struct {
 func DefaultBaseImageURL(goarch string) (string, error) {
 	switch goarch {
 	case "arm64":
-		return "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img", nil
+		return "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2", nil
 	case "amd64":
-		return "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img", nil
+		return "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2", nil
 	default:
 		return "", fmt.Errorf("unsupported architecture: %s", goarch)
 	}
@@ -246,13 +246,9 @@ func DefaultStateDir() string {
 	return filepath.Join(home, xdgLocalDir, xdgStateSubdir, appName)
 }
 
-// DefaultAptMirrorURI returns a fast Ubuntu apt mirror URI appropriate for the
-// given architecture. arm64 packages live under ubuntu-ports, not ubuntu.
-func DefaultAptMirrorURI(goarch string) string {
-	switch goarch {
-	case "arm64":
-		return "http://mirrors.ocf.berkeley.edu/ubuntu-ports/"
-	default:
-		return "http://mirrors.ocf.berkeley.edu/ubuntu/"
-	}
+// DefaultAptMirrorURI returns the apt mirror URI used by the default base image.
+// Debian serves all architectures from a single mirror URL, so the arch argument
+// is accepted for API stability but does not vary the result.
+func DefaultAptMirrorURI(_ string) string {
+	return "http://deb.debian.org/debian"
 }
