@@ -155,6 +155,14 @@ export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /var/lib/bladerunner
 
+# Emit a host-visible breadcrumb to /dev/console (captured into the host-side
+# console.log) so first-boot progress is visible even when SSH/Incus aren't up
+# yet. Best-effort: console may not exist on some virt setups.
+br_stage() {
+  echo "bladerunner-bootstrap: stage=$1 t=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" >/dev/console 2>/dev/null || true
+}
+br_stage start
+
 # Load vsock kernel modules early (required for socat VSOCK-LISTEN)
 # These may be built-in on some kernels, so ignore errors.
 modprobe vsock 2>/dev/null || true
@@ -212,8 +220,11 @@ native_incus_distro() {
 }
 
 if command -v apt-get >/dev/null 2>&1; then
+  br_stage apt-update
   apt-get update -qq
+  br_stage apt-install-base
   apt-get install -y -qq ca-certificates curl gpg openssh-server socat jq
+  br_stage apt-install-incus
   if native_incus_distro; then
     apt-get install -y -qq incus incus-client
   elif ! apt-get install -y -qq incus incus-client; then
@@ -222,6 +233,7 @@ if command -v apt-get >/dev/null 2>&1; then
     apt-get install -y -qq incus incus-client
   fi
 elif command -v dnf >/dev/null 2>&1; then
+  br_stage dnf-install-incus
   dnf install -y -q openssh-server socat incus incus-client || true
 fi
 
@@ -231,8 +243,10 @@ fi
 
 systemctl enable --now ssh || true
 systemctl enable --now sshd || true
+br_stage ssh-up
 systemctl enable --now incus || true
 systemctl enable --now incus.socket || true
+br_stage incus-socket-up
 
 for i in $(seq 1 60); do
   if incus admin waitready --timeout=1 >/dev/null 2>&1; then
@@ -240,9 +254,11 @@ for i in $(seq 1 60); do
   fi
   sleep 1
 done
+br_stage incus-ready
 
 incus admin init --auto || true
 incus config set core.https_address "[::]:8443" || true
+br_stage incus-init-done
 
 # Configure Incus to trust the bladerunner local OIDC provider.
 # The issuer URL is the loopback address inside the guest, which is forwarded
@@ -316,6 +332,7 @@ systemctl daemon-reload
 systemctl enable --now bladerunner-vsock-ssh.service
 systemctl enable --now bladerunner-vsock-incus.service
 systemctl enable --now bladerunner-vsock-oidc.service
+br_stage vsock-services-up
 
 # Wait a moment for services to start
 sleep 2
@@ -334,6 +351,7 @@ systemctl status bladerunner-vsock-incus.service --no-pager 2>&1 | tee -a /var/l
 ip -4 -br addr show scope global > /var/lib/bladerunner/ipv4.txt || true
 incus info > /var/lib/bladerunner/incus-info.txt || true
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
+br_stage bootstrap-done
 `,
 		cfg.SSHUser,
 		cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCAudience,
