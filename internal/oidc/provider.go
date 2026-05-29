@@ -27,6 +27,13 @@ const (
 	// Default grant type for the local CLI flow.
 	grantTypeSSHKey = "urn:bladerunner:params:oauth:grant-type:ssh-key"
 
+	// oidcClientID is the default OIDC client_id / audience for bladerunner-issued
+	// tokens. Used both as the default Config.Audience and in tests.
+	oidcClientID = "bladerunner"
+
+	// formFieldGrantType is the OAuth2 form-field name for the grant type.
+	formFieldGrantType = "grant_type"
+
 	// shutdownTimeout caps how long Stop will wait for active requests to drain.
 	shutdownTimeout = 5 * time.Second
 	// readTimeout caps how long the server waits for a request to arrive.
@@ -89,7 +96,7 @@ func NewProvider(cfg Config) (*Provider, error) {
 		return nil, errors.New("oidc: issuer URL required")
 	}
 	if cfg.Audience == "" {
-		cfg.Audience = "bladerunner"
+		cfg.Audience = oidcClientID
 	}
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:15556"
@@ -252,7 +259,7 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grantType := r.PostForm.Get("grant_type")
+	grantType := r.PostForm.Get(formFieldGrantType)
 	if grantType != grantTypeSSHKey {
 		writeError(w, http.StatusBadRequest, "unsupported_grant_type", "only "+grantTypeSSHKey+" is implemented")
 		return

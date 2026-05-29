@@ -197,7 +197,7 @@ linters:
           - noctx
 
       # Internal VM operations are sync and don't need cancellation
-      - path: 'internal/vm/(assets|forwarder)\.go'
+      - path: 'internal/vm/(assets|forwarder(_darwin)?)\.go'
         linters:
           - noctx
 

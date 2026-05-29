@@ -12,7 +12,7 @@ func newTestIssuer(t *testing.T) *Issuer {
 	if err != nil {
 		t.Fatalf("LoadOrCreateSigningKey: %v", err)
 	}
-	iss, err := NewIssuer(key, "http://127.0.0.1:18556", "bladerunner", time.Hour)
+	iss, err := NewIssuer(key, "http://127.0.0.1:18556", oidcClientID, time.Hour)
 	if err != nil {
 		t.Fatalf("NewIssuer: %v", err)
 	}
@@ -22,7 +22,7 @@ func newTestIssuer(t *testing.T) *Issuer {
 func TestIssueAndVerifyRoundTrip(t *testing.T) {
 	iss := newTestIssuer(t)
 	ident := Identity{Fingerprint: "SHA256:abc", Comment: "user@host"}
-	tok, claims, err := iss.Issue(ident, "bladerunner")
+	tok, claims, err := iss.Issue(ident, oidcClientID)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestIssueAndVerifyRoundTrip(t *testing.T) {
 	if got.Subject != ident.Fingerprint {
 		t.Fatalf("verified sub=%s", got.Subject)
 	}
-	if got.Audience != "bladerunner" {
+	if got.Audience != oidcClientID {
 		t.Fatalf("aud=%s", got.Audience)
 	}
 	if got.Comment != "user@host" {
@@ -57,7 +57,7 @@ func TestVerifyRejectsWrongIssuer(t *testing.T) {
 	}
 
 	// Build a verifier with a different issuer URL but the same signing key.
-	other, err := NewIssuer(iss.key, "http://elsewhere:9999", "bladerunner", time.Hour)
+	other, err := NewIssuer(iss.key, "http://elsewhere:9999", oidcClientID, time.Hour)
 	if err != nil {
 		t.Fatalf("NewIssuer: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestVerifyRejectsExpired(t *testing.T) {
 		t.Fatalf("key: %v", err)
 	}
 	// Negative TTL would be coerced to default; use 1 nanosecond instead.
-	iss, err := NewIssuer(key, "http://127.0.0.1:18556", "bladerunner", time.Nanosecond)
+	iss, err := NewIssuer(key, "http://127.0.0.1:18556", oidcClientID, time.Nanosecond)
 	if err != nil {
 		t.Fatalf("NewIssuer: %v", err)
 	}

@@ -21,7 +21,7 @@ func newTestProvider(t *testing.T) *Provider {
 	p, err := NewProvider(Config{
 		ListenAddr: "127.0.0.1:0",
 		IssuerURL:  "http://127.0.0.1:18556",
-		Audience:   "bladerunner",
+		Audience:   oidcClientID,
 		SigningKey: key,
 		Store:      store,
 		TokenTTL:   time.Hour,
@@ -101,17 +101,17 @@ func TestTokenEndpoint(t *testing.T) {
 		{
 			name: "success",
 			form: url.Values{
-				"grant_type":  {grantTypeSSHKey},
-				"fingerprint": {ident.Fingerprint},
-				"client_id":   {"bladerunner"},
+				formFieldGrantType: {grantTypeSSHKey},
+				"fingerprint":      {ident.Fingerprint},
+				"client_id":        {oidcClientID},
 			},
 			wantStatus: http.StatusOK,
 		},
 		{
 			name: "unknown fingerprint",
 			form: url.Values{
-				"grant_type":  {grantTypeSSHKey},
-				"fingerprint": {"SHA256:notreal"},
+				formFieldGrantType: {grantTypeSSHKey},
+				"fingerprint":      {"SHA256:notreal"},
 			},
 			wantStatus: http.StatusUnauthorized,
 			wantError:  "invalid_grant",
@@ -119,7 +119,7 @@ func TestTokenEndpoint(t *testing.T) {
 		{
 			name: "missing fingerprint",
 			form: url.Values{
-				"grant_type": {grantTypeSSHKey},
+				formFieldGrantType: {grantTypeSSHKey},
 			},
 			wantStatus: http.StatusBadRequest,
 			wantError:  "invalid_request",
@@ -127,7 +127,7 @@ func TestTokenEndpoint(t *testing.T) {
 		{
 			name: "unsupported grant type",
 			form: url.Values{
-				"grant_type": {"authorization_code"},
+				formFieldGrantType: {"authorization_code"},
 			},
 			wantStatus: http.StatusBadRequest,
 			wantError:  "unsupported_grant_type",
