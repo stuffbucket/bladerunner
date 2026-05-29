@@ -86,28 +86,23 @@ func fileSHA256(path string) (string, error) {
 }
 
 // verifyImageChecksum compares the downloaded image at path against the
-// sidecar checksum hosted at imageURL+".sha256". For GitHub Release URLs,
-// a missing sidecar is logged at WARN and treated as acceptable to avoid
-// blocking the first guest-image release. For non-Release URLs the
-// upstream is expected to ship a sidecar (Debian does), so missing or
-// mismatched sidecars are fatal.
+// sidecar checksum hosted at imageURL+".sha256". A missing or unreachable
+// sidecar is logged at WARN and skipped — many upstream image hosts
+// (Debian's cloud.debian.org, GitHub Releases pre-first-publish) don't
+// publish per-image .sha256 sidecars, and blocking boot on their absence
+// regresses the default user experience. Mismatched sidecars remain fatal.
+// See issue: SHA256SUMS-style combined manifests are not yet parsed.
 func verifyImageChecksum(ctx context.Context, imageURL, path string) error {
 	want, err := fetchSidecarSHA256(ctx, imageURL)
 	if err != nil {
-		if isGitHubReleaseURL(imageURL) {
-			logging.L().Warn("sidecar SHA-256 fetch failed, continuing without verification",
-				"url", imageURL+".sha256", "err", err)
-			return nil
-		}
-		return err
+		logging.L().Warn("sidecar SHA-256 fetch failed, continuing without verification",
+			"url", imageURL+".sha256", "err", err)
+		return nil
 	}
 	if want == "" {
-		if isGitHubReleaseURL(imageURL) {
-			logging.L().Warn("sidecar SHA-256 missing for GitHub Release artifact, skipping verification",
-				"url", imageURL+".sha256")
-			return nil
-		}
-		return fmt.Errorf("sidecar checksum not found at %s", imageURL+".sha256")
+		logging.L().Warn("sidecar SHA-256 not present, skipping verification",
+			"url", imageURL+".sha256")
+		return nil
 	}
 	got, err := fileSHA256(path)
 	if err != nil {

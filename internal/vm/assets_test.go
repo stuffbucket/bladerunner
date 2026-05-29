@@ -155,15 +155,18 @@ func TestVerifyImageChecksum_MismatchedSidecar(t *testing.T) {
 	}
 }
 
-func TestVerifyImageChecksum_MissingSidecar_NonGitHub_Fatal(t *testing.T) {
+func TestVerifyImageChecksum_MissingSidecar_NonGitHub_Tolerant(t *testing.T) {
+	// Upstream image hosts that don't publish per-image .sha256 sidecars
+	// (e.g. cloud.debian.org publishes SHA256SUMS instead) must not block
+	// boot. Missing sidecars warn and continue universally; only mismatched
+	// sidecars are fatal.
 	data := []byte("trixie genericcloud")
 	srv := fakeServer(t, data, "404")
 	defer srv.Close()
 
 	path := writeTempFile(t, data)
-	err := verifyImageChecksum(context.Background(), srv.URL+"/image", path)
-	if err == nil {
-		t.Fatal("expected error for missing sidecar on non-GitHub URL")
+	if err := verifyImageChecksum(context.Background(), srv.URL+"/image", path); err != nil {
+		t.Fatalf("missing sidecar on non-GitHub URL should warn and pass; got: %v", err)
 	}
 }
 
