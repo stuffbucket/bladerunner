@@ -32,10 +32,11 @@ type Runner struct {
 	clientKey     []byte
 	baseImagePath string
 
-	forwarders []*portForwarder
-	consoleLog *logging.RotatingFile
-	stopOnce   sync.Once
-	stopErr    error
+	forwarders        []*portForwarder
+	reverseForwarders []*reversePortForwarder
+	consoleLog        *logging.RotatingFile
+	stopOnce          sync.Once
+	stopErr           error
 }
 
 // StartVMResult contains the initial state after VM starts running.
@@ -240,6 +241,11 @@ func (r *Runner) closeForwarders() {
 			r.stopErr = err
 		}
 	}
+	for _, f := range r.reverseForwarders {
+		if err := f.Close(); err != nil && r.stopErr == nil {
+			r.stopErr = err
+		}
+	}
 }
 
 func (r *Runner) requestStopVM(log loggerLike) {
@@ -337,7 +343,35 @@ func (r *Runner) startForwarders() error {
 
 	r.forwarders = []*portForwarder{sshForward, apiForward}
 	logging.L().Info("forwarders active", "ssh", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalSSHPort), "api", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalAPIPort))
+
+	r.startOIDCReverseForwarder(device)
+
 	return nil
+}
+
+// startOIDCReverseForwarder wires the host-side OIDC provider so it is reachable
+// from inside the guest via vsock. Failure is logged and ignored: the mTLS
+// fallback path keeps Incus access working without OIDC.
+func (r *Runner) startOIDCReverseForwarder(device *vz.VirtioSocketDevice) {
+	if r.cfg.LocalOIDCPort == 0 || r.cfg.VsockOIDCPort == 0 {
+		return
+	}
+	vsockLn, err := device.Listen(r.cfg.VsockOIDCPort)
+	if err != nil {
+		logging.L().Warn("could not start oidc vsock listener", "err", err)
+		return
+	}
+	oidcReverse := newReversePortForwarder(
+		"oidc",
+		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalOIDCPort),
+		vsockLn,
+	)
+	if err := oidcReverse.Start(); err != nil {
+		_ = vsockLn.Close()
+		logging.L().Warn("could not start oidc reverse forwarder", "err", err)
+		return
+	}
+	r.reverseForwarders = append(r.reverseForwarders, oidcReverse)
 }
 
 func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.ServerInfo) *report.StartupReport {
