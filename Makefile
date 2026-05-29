@@ -21,7 +21,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help setup cache deps tidy fmt fmt-check vet test build build-release run sign check clean distclean lint vulncheck trivy security release snapshot
+.PHONY: help setup cache deps tidy fmt fmt-check vet test build build-agent build-release run sign check clean distclean lint vulncheck trivy security release snapshot
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -74,6 +74,13 @@ build: cache ## Build bladerunner binary
 	@echo "Building $(APP_NAME)..."
 	@$(GO_ENV) $(GO) build -ldflags="$(LDFLAGS)" -o "$(BIN_PATH)" "$(CMD_PKG)"
 	@echo "Built $(BIN_PATH)"
+
+build-agent: cache ## Cross-compile br-agent for linux/amd64 and linux/arm64
+	@echo "Building br-agent for linux/arm64..."
+	@CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO_ENV) $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o "$(BIN_DIR)/br-agent-linux-arm64" ./cmd/br-agent
+	@echo "Building br-agent for linux/amd64..."
+	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO_ENV) $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o "$(BIN_DIR)/br-agent-linux-amd64" ./cmd/br-agent
+	@echo "Built br-agent: $(BIN_DIR)/br-agent-linux-{arm64,amd64}"
 
 build-release: cache ## Build optimized release binary
 	@echo "Building $(APP_NAME) (release)..."

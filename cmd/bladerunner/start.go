@@ -27,6 +27,8 @@ var startFlags struct {
 	imageURL  string
 	imagePath string
 	timeout   time.Duration
+	useAgent  bool
+	noAgent   bool
 }
 
 var startCmd = &cobra.Command{
@@ -47,6 +49,8 @@ func init() {
 	f.StringVar(&startFlags.imageURL, "image-url", "", "Base image URL")
 	f.StringVar(&startFlags.imagePath, "image-path", "", "Local base image path")
 	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
+	f.BoolVar(&startFlags.useAgent, "use-guest-agent", false, "Use the in-guest br-agent for boot config (requires pre-baked image or user-side install)")
+	f.BoolVar(&startFlags.noAgent, "no-agent", false, "Force the legacy cloud-init/HTTP-polling path even if use-guest-agent is enabled")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -84,6 +88,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cfg.DiskSizeGiB = startFlags.disk
 	cfg.GUI = startFlags.gui
 	cfg.WaitForIncus = startFlags.timeout
+	cfg.UseGuestAgent = startFlags.useAgent && !startFlags.noAgent
 
 	if startFlags.imageURL != "" {
 		cfg.BaseImageURL = startFlags.imageURL
@@ -155,8 +160,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  %s %s\n", key("API:"), value(result.Endpoint))
 	fmt.Println()
 
-	// Wait for Incus in background
+	// Wait for Incus in background. When the guest agent is enabled, run
+	// the vsock handshake which replaces HTTP polling and pushes config
+	// over the same channel; otherwise fall back to the HTTP path.
 	go func() {
+		if cfg.UseGuestAgent {
+			if _, err := runner.RunAgentHandshake(ctx); err != nil {
+				logging.L().Warn("agent handshake failed, falling back to http wait", "error", err)
+			}
+		}
 		if _, err := runner.WaitForIncus(ctx); err != nil {
 			logging.L().Error("wait for incus", "error", err)
 		}

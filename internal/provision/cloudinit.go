@@ -16,6 +16,9 @@ import (
 )
 
 func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
+	if cfg.UseGuestAgent {
+		return buildMinimalCloudInit(cfg)
+	}
 	bootstrapScript := renderBootstrapScript(cfg)
 
 	var b strings.Builder
@@ -322,6 +325,32 @@ date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 		cfg.VsockSSHPort, cfg.VsockAPIPort,
 		cfg.VsockOIDCPort, cfg.VsockOIDCPort,
 	)
+}
+
+// buildMinimalCloudInit produces the five-line user-data used when the
+// in-guest br-agent will take over configuration once the VM is up. The
+// agent must already be present in the guest image (#45) or installed by
+// the user via image bake; cloud-init merely seeds the SSH key and starts
+// the agent.
+func buildMinimalCloudInit(cfg *config.Config) (string, string) {
+	var b strings.Builder
+	b.WriteString("#cloud-config\n")
+	fmt.Fprintf(&b, "hostname: %s\n", cfg.Hostname)
+	b.WriteString("manage_etc_hosts: true\n")
+	b.WriteString("users:\n")
+	b.WriteString("  - default\n")
+	fmt.Fprintf(&b, "  - name: %s\n", cfg.SSHUser)
+	b.WriteString("    shell: /bin/bash\n")
+	b.WriteString("    sudo: ALL=(ALL) NOPASSWD:ALL\n")
+	b.WriteString("    groups: [sudo]\n")
+	b.WriteString("    lock_passwd: true\n")
+	b.WriteString("    ssh_authorized_keys:\n")
+	fmt.Fprintf(&b, "      - %s\n", cfg.SSHPublicKey)
+	b.WriteString("runcmd:\n")
+	b.WriteString("  - [systemctl, enable, --now, br-agent.service]\n")
+
+	metaData := fmt.Sprintf("instance-id: bladerunner-%s\nlocal-hostname: %s\n", cfg.Name, cfg.Hostname)
+	return b.String(), metaData
 }
 
 func indent(s string, spaces int) string {
