@@ -1,0 +1,20 @@
+name: triage
+
+# Caller stub for repoman's reusable triage workflow.
+# Runs under this repo's GITHUB_TOKEN on every new/edited issue and
+# delegates to the canonical triage logic. Pin moves with @v1.
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  call:
+    uses: stuffbucket/repoman/.github/workflows/triage-reusable.yml@v1
+    with:
+      issue_number: ${{ github.event.issue.number }}
+    secrets: inherit

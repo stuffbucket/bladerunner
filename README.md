@@ -91,7 +91,8 @@ Custom log file path:
 br start --log-path /tmp/bladerunner.log
 ```
 
-Optional log level:
+Optional log level. Accepts `debug`, `info`, `warn` (alias `warning`), or
+`error` (case-insensitive). Unknown or unset values default to `info`:
 
 ```bash
 BLADERUNNER_LOG_LEVEL=debug br start
