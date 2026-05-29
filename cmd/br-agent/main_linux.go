@@ -32,6 +32,10 @@ const (
 var version = "dev"
 
 func main() {
+	os.Exit(mainExit())
+}
+
+func mainExit() int {
 	cid := flag.Uint("host-cid", uint(defaultHostCID), "vsock CID of the host (default 2)")
 	port := flag.Uint("port", uint(defaultPort), "vsock port the host listens on")
 	dialTimeout := flag.Duration("dial-timeout", defaultDialTimeoutSec*time.Second, "max time to wait for host vsock listener")
@@ -42,7 +46,7 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("br-agent %s\n", version)
-		return
+		return 0
 	}
 	_ = logLevel // reserved for future structured logging
 
@@ -51,9 +55,9 @@ func main() {
 
 	if err := run(ctx, uint32(*cid), uint32(*port), *dialTimeout, *retryInterval); err != nil {
 		log.Printf("br-agent: %v", err)
-		stop()
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // run dials the host vsock, then reads commands in a loop until EOF.
