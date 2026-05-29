@@ -4,7 +4,7 @@
 
 It is designed to provide the core behavior of a `colima --runtime incus` setup without Lima/Colima orchestration overhead:
 
-- Architecture-aware defaults (`arm64` and `amd64`) using Ubuntu 24.04 cloud images.
+- Architecture-aware defaults (`arm64` and `amd64`) using Debian 13 (trixie) genericcloud images. Ubuntu and other cloud images remain reachable via `--image-url` or `BLADERUNNER_BASE_IMAGE_URL`.
 - Incus daemon bootstrapped inside the guest via cloud-init.
 - Localhost-accessible SSH and Incus HTTPS endpoints via virtio-vsock port forwarding.
 - Incus web dashboard availability through the forwarded API endpoint.
@@ -125,6 +125,7 @@ curl --cert ~/.local/state/bladerunner/client.crt --key ~/.local/state/bladerunn
 
 ## Notes
 
+- The default base image is the Debian 13 (trixie) genericcloud qcow2 (`incus` and `incus-client` ship in trixie main, so no third-party apt repos are needed). Override with `--image-url` or `BLADERUNNER_BASE_IMAGE_URL` to use Ubuntu 24.04 or another distribution.
 - The base image can be raw or qcow2 format. qcow2 images are automatically converted to raw via `qemu-img`.
 - First boot can take several minutes while cloud-init installs and configures Incus.
 - GUI output is handled by VZ graphics window; serial console is logged at `console.log`.
