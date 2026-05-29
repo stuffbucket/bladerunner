@@ -20,7 +20,7 @@ const (
 	DefaultCPUs        = 4
 	DefaultMemoryGiB   = 8
 	DefaultDiskSizeGiB = 64
-	DefaultTimeout     = 5 * time.Minute
+	DefaultTimeout     = 10 * time.Minute
 
 	// Port assignments (avoid conflicts with common services)
 	DefaultLocalSSHPort  = 6022
