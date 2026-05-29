@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Code-Hex/vz/v3"
+	"github.com/stuffbucket/bladerunner/internal/agent"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	incusctl "github.com/stuffbucket/bladerunner/internal/incus"
 	"github.com/stuffbucket/bladerunner/internal/logging"
@@ -34,6 +35,7 @@ type Runner struct {
 
 	forwarders        []*portForwarder
 	reverseForwarders []*reversePortForwarder
+	agentListener     *agent.Listener
 	consoleLog        *logging.RotatingFile
 	stopOnce          sync.Once
 	stopErr           error
@@ -132,8 +134,54 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 		return nil, err
 	}
 
+	if r.cfg.UseGuestAgent {
+		if err := r.startAgentListener(); err != nil {
+			log.Warn("agent listener could not start, continuing without it", "err", err)
+		}
+	}
+
 	endpoint := fmt.Sprintf("https://127.0.0.1:%d", r.cfg.LocalAPIPort)
 	return &StartVMResult{Endpoint: endpoint}, nil
+}
+
+// startAgentListener binds the host-side vsock listener that br-agent dials.
+// Called after the VM is in the running state. Failures are non-fatal: the
+// HTTP fallback path remains available.
+func (r *Runner) startAgentListener() error {
+	socketDevices := r.vm.SocketDevices()
+	if len(socketDevices) == 0 {
+		return errors.New("vm has no virtio socket device for agent listener")
+	}
+	ln, err := agent.NewListener(socketDevices[0], r.cfg.AgentVsockPort)
+	if err != nil {
+		return err
+	}
+	r.agentListener = ln
+	return nil
+}
+
+// RunAgentHandshake waits for the in-guest br-agent to connect on the vsock
+// listener bound in startAgentListener, then drives the config/ready/user
+// sync handshake. Returns the agent's reported state. Safe to call only
+// when UseGuestAgent is enabled and StartVM has completed.
+func (r *Runner) RunAgentHandshake(ctx context.Context) (*agent.HandshakeResult, error) {
+	if r.agentListener == nil {
+		return nil, errors.New("agent listener not started")
+	}
+	conn, err := r.agentListener.Accept(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	return agent.RunHandshake(ctx, conn, agent.HandshakeConfig{
+		ConfigPush: agent.ConfigPushArgs{
+			OIDCIssuer:       r.cfg.OIDCIssuerURL,
+			OIDCClientID:     r.cfg.OIDCClientID,
+			OIDCAudience:     r.cfg.OIDCAudience,
+			CoreHTTPSAddress: "[::]:8443",
+		},
+		AuthorizedKeys: r.cfg.SSHPublicKey,
+	})
 }
 
 // WaitForIncus waits for the Incus API to become ready and returns a startup report.
@@ -243,6 +291,11 @@ func (r *Runner) closeForwarders() {
 	}
 	for _, f := range r.reverseForwarders {
 		if err := f.Close(); err != nil && r.stopErr == nil {
+			r.stopErr = err
+		}
+	}
+	if r.agentListener != nil {
+		if err := r.agentListener.Close(); err != nil && r.stopErr == nil {
 			r.stopErr = err
 		}
 	}

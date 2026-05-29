@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/stuffbucket/bladerunner/internal/agent"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/report"
 )
@@ -35,3 +36,7 @@ func (r *Runner) WaitForIncus(context.Context) (*report.StartupReport, error) {
 func (r *Runner) StartGUI() error            { return errors.New("unsupported platform") }
 func (r *Runner) Wait(context.Context) error { return errors.New("unsupported platform") }
 func (r *Runner) Stop() error                { return nil }
+
+func (r *Runner) RunAgentHandshake(context.Context) (*agent.HandshakeResult, error) {
+	return nil, errors.New("unsupported platform")
+}
