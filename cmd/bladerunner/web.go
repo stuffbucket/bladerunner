@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -61,8 +63,107 @@ the waiting browser then completes sign-in as that account.`,
 	RunE: runWebApprove,
 }
 
+var webTrustFlags struct {
+	system bool
+}
+
+var webTrustCmd = &cobra.Command{
+	Use:   "trust",
+	Short: "Trust the Incus server's TLS certificate so the browser stops warning",
+	Long: `Add the running VM's Incus server certificate to the macOS keychain as a
+trusted SSL certificate, so https://127.0.0.1:<api-port>/ui/ loads without the
+"your connection is not private" warning.
+
+The cert is self-signed by Incus but already carries 127.0.0.1 in its SANs, so
+trusting it is sufficient — nothing is regenerated. macOS will prompt you to
+authorize the keychain change. By default the cert goes in your login keychain;
+pass --system to install it system-wide (requires sudo). Undo with 'br web untrust'.`,
+	RunE: runWebTrust,
+}
+
+var webUntrustCmd = &cobra.Command{
+	Use:   "untrust",
+	Short: "Remove the Incus server certificate previously added by 'br web trust'",
+	RunE:  runWebUntrust,
+}
+
 func init() {
 	webCmd.AddCommand(webApproveCmd)
+	webTrustCmd.Flags().BoolVar(&webTrustFlags.system, "system", false, "Install into the system keychain (trusts for all users; requires sudo)")
+	webCmd.AddCommand(webTrustCmd, webUntrustCmd)
+}
+
+// incusAPIHostPort returns "127.0.0.1:<api-port>" for the running VM's Incus API.
+func incusAPIHostPort() (string, error) {
+	client, err := requireRunningVM()
+	if err != nil {
+		return "", err
+	}
+	port, err := client.GetConfig(control.ConfigKeyLocalAPIPort)
+	if err != nil || port == "" {
+		logging.L().Debug("get local-api-port failed", "err", err)
+		return "", errVMNotRunning
+	}
+	return "127.0.0.1:" + port, nil
+}
+
+// fetchIncusServerCertPEM connects to the Incus API and returns its leaf server
+// certificate as PEM. The connection deliberately skips verification — the whole
+// point is to read the as-yet-untrusted self-signed cert so we can trust it.
+func fetchIncusServerCertPEM(hostPort string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), webHTTPTimeout)
+	defer cancel()
+	dialer := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // reading the cert in order to trust it
+	conn, err := dialer.DialContext(ctx, "tcp", hostPort)
+	if err != nil {
+		return nil, fmt.Errorf("connect %s: %w", hostPort, err)
+	}
+	defer func() { _ = conn.Close() }()
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok {
+		return nil, errors.New("not a TLS connection")
+	}
+	certs := tlsConn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil, errors.New("server presented no certificate")
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certs[0].Raw}), nil
+}
+
+func runWebTrust(_ *cobra.Command, _ []string) error {
+	hostPort, err := incusAPIHostPort()
+	if err != nil {
+		return err
+	}
+	pemBytes, err := fetchIncusServerCertPEM(hostPort)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp("", "incus-server-*.crt")
+	if err != nil {
+		return fmt.Errorf("create temp cert: %w", err)
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	if _, err := f.Write(pemBytes); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write temp cert: %w", err)
+	}
+	_ = f.Close()
+
+	fmt.Printf("%s Trusting the Incus server certificate from %s…\n", subtle("›"), value(hostPort))
+	if err := installTrustedCert(f.Name(), webTrustFlags.system); err != nil {
+		return err
+	}
+	fmt.Printf("%s Done. Reopen your browser and https://%s/ui/ will load without a warning.\n", success("✓"), hostPort)
+	return nil
+}
+
+func runWebUntrust(_ *cobra.Command, _ []string) error {
+	if err := removeTrustedCert(webTrustFlags.system); err != nil {
+		return err
+	}
+	fmt.Printf("%s Removed the bladerunner Incus certificate from the keychain.\n", success("✓"))
+	return nil
 }
 
 // webEndpoints resolves the running VM's provider URL, Incus UI URLs and SSH key
