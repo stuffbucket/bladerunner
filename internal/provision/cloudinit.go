@@ -247,6 +247,34 @@ fi
 systemctl enable --now ssh || true
 systemctl enable --now sshd || true
 
+# --- Break-glass SSH access, provisioned HERE in the bootstrap (runcmd) rather
+#     than via cloud-init's users/ssh_authorized_keys/chpasswd modules. Those are
+#     per-instance modules that the first-boot reboot (bootcmd, #56) runs BEFORE,
+#     so on this image they never apply; runcmd always runs (it installs incus
+#     below), making this the reliable place to guarantee a way in even when the
+#     incus provisioning that follows fails.
+SSH_USER='%s'
+SSH_PUBKEY='%s'
+if ! id -u "$SSH_USER" >/dev/null 2>&1; then
+  useradd -m -s /bin/bash "$SSH_USER" || true
+fi
+usermod -s /bin/bash "$SSH_USER" 2>/dev/null || true
+[ -d "/home/$SSH_USER" ] || mkdir -p "/home/$SSH_USER"
+mkdir -p "/home/$SSH_USER/.ssh"
+printf '%%s\n' "$SSH_PUBKEY" > "/home/$SSH_USER/.ssh/authorized_keys"
+chmod 700 "/home/$SSH_USER/.ssh"
+chmod 600 "/home/$SSH_USER/.ssh/authorized_keys"
+chown -R "$SSH_USER:$SSH_USER" "/home/$SSH_USER" 2>/dev/null || true
+usermod -aG sudo "$SSH_USER" 2>/dev/null || true
+echo "$SSH_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-bladerunner
+chmod 440 /etc/sudoers.d/90-bladerunner
+echo "$SSH_USER:bladerunner" | chpasswd 2>/dev/null || true
+# SSH password auth as a fallback escape hatch (loopback-only vsock bridge).
+if [ -d /etc/ssh/sshd_config.d ]; then
+  echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/90-bladerunner.conf
+fi
+systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+
 # --- vsock bridge units: create + enable BEFORE incus provisioning, so a
 #     failure installing/configuring incus (or any later command) can never
 #     strand host<->guest SSH. ConditionPathExists guards mean a unit simply
@@ -358,6 +386,26 @@ incus config trust add-certificate /var/lib/bladerunner/host-client.crt --name b
   incus config trust add /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
   echo "Note: Could not add host certificate to trust store (may already exist)"
 
+# --- Install the Incus web UI (incus-ui-canonical, from Zabbly) as static files
+#     only. We extract the .deb instead of 'apt install'-ing it so apt never
+#     swaps Debian's incus for Zabbly's to satisfy its "Depends: incus". Debian
+#     trixie ships no UI package. incusd serves these at /ui/ once pointed at the
+#     directory via the INCUS_UI environment variable. Best-effort, non-fatal.
+install_zabbly_repo || true
+apt_update_retry
+( cd /tmp && apt-get download incus-ui-canonical ) >/dev/null 2>&1 || true
+UI_DEB=$(ls -1 /tmp/incus-ui-canonical_*.deb 2>/dev/null | head -1)
+if [ -n "$UI_DEB" ]; then
+  dpkg-deb -x "$UI_DEB" / || true
+  mkdir -p /etc/systemd/system/incus.service.d
+  printf '[Service]\nEnvironment=INCUS_UI=/opt/incus/ui\n' >/etc/systemd/system/incus.service.d/10-bladerunner-ui.conf
+  systemctl daemon-reload || true
+  systemctl restart incus || true
+  echo "bladerunner: installed Incus web UI to /opt/incus/ui (served at /ui/)"
+else
+  echo "bladerunner: incus-ui-canonical download failed; web UI not installed (non-fatal)" >&2
+fi
+
 # incus should be listening now; nudge the API bridge so it picks up :8443
 # without waiting for its restart timer.
 systemctl restart bladerunner-vsock-incus.service || true
@@ -380,6 +428,9 @@ ip -4 -br addr show scope global > /var/lib/bladerunner/ipv4.txt || true
 incus info > /var/lib/bladerunner/incus-info.txt || true
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 `,
+		// Break-glass SSH block (SSH_USER, SSH_PUBKEY), placed first because it
+		// appears early in the bootstrap, before the vsock units.
+		cfg.SSHUser, cfg.SSHPublicKey,
 		cfg.VsockSSHPort, cfg.VsockAPIPort,
 		// The guest OIDC TCP listener binds LocalOIDCPort (the issuer's port) so the
 		// issuer URL resolves the same inside the guest as on the host; it then
