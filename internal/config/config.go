@@ -82,16 +82,16 @@ const (
 )
 
 type Config struct {
-	Name         string
-	Hostname     string
-	StateDir     string
-	VMDir        string
-	DiskPath     string
+	Name     string
+	Hostname string
+	StateDir string
+	VMDir    string
+	DiskPath string
 	// SavedStatePath is where `br save` / `br upgrade` write the VZ saved
 	// machine state. Defaults to <stateDir>/saved-state.bin.
 	SavedStatePath string
-	DiskSizeGiB  int
-	BaseImageURL string
+	DiskSizeGiB    int
+	BaseImageURL   string
 	// BaseImageSHA512 is the expected SHA-512 of the downloaded base image. Set
 	// for the pinned Debian default; empty for a custom --image-url (which falls
 	// back to sidecar verification) or a local --image-path.
