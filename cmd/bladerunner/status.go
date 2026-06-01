@@ -14,8 +14,18 @@ import (
 
 const (
 	labelWidth = 12 // key column width within a panel
-	panelWidth = 34 // each panel's inner width
+	panelWidth = 34 // left panel inner width (its content is short and uniform)
 	gapWidth   = 4  // space between panels
+
+	// The right (Build) panel hugs its content between these bounds, capped to
+	// fit the terminal with a margin on each edge (see responsiveRightWidth).
+	rightPanelMin = panelWidth // never narrower than the left panel
+	rightPanelMax = 80         // cap so very long URLs don't stretch absurdly
+	edgeMargin    = 2          // columns kept clear at each terminal edge
+
+	// sepMarker is a placeholder line that render() expands to a full-width
+	// divider once the panel's final width is known.
+	sepMarker = "\x00sep\x00"
 )
 
 var statusCmd = &cobra.Command{
@@ -163,27 +173,68 @@ func (p *panel) rowGiB(label, val string) {
 }
 
 func (p *panel) sep() {
-	p.lines = append(p.lines, subtle(strings.Repeat("─", panelWidth)))
+	p.lines = append(p.lines, sepMarker)
 }
 
-func (p *panel) render() string {
-	header := key(p.title)
-	divider := subtle(strings.Repeat("─", panelWidth))
-	body := strings.Join(p.lines, "\n")
-	return fmt.Sprintf("%s\n%s\n%s", header, divider, body)
+// contentWidth is the visible width of the widest line (title or row), used to
+// let a panel hug its content. ANSI styling is excluded via lipgloss.Width.
+func (p *panel) contentWidth() int {
+	w := lipgloss.Width(key(p.title))
+	for _, ln := range p.lines {
+		if ln == sepMarker {
+			continue
+		}
+		if lw := lipgloss.Width(ln); lw > w {
+			w = lw
+		}
+	}
+	return w
 }
 
-// renderPanels places two panels side by side with a gap.
+// render lays the panel out at the given inner width, expanding sep markers to
+// full-width dividers.
+func (p *panel) render(width int) string {
+	divider := subtle(strings.Repeat("─", width))
+	out := make([]string, 0, len(p.lines)+2)
+	out = append(out, key(p.title), divider)
+	for _, ln := range p.lines {
+		if ln == sepMarker {
+			out = append(out, divider)
+			continue
+		}
+		out = append(out, ln)
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderPanels places the two panels side by side with a gap. The left panel
+// is fixed; the right (Build) panel hugs its content responsively.
 func renderPanels(left, right *panel) string {
-	style := lipgloss.NewStyle().Width(panelWidth)
-	gap := strings.Repeat(" ", gapWidth)
+	leftWidth := panelWidth
+	rightWidth := responsiveRightWidth(right, leftWidth)
 
-	l := style.Render(left.render())
-	r := style.Render(right.render())
+	l := lipgloss.NewStyle().Width(leftWidth).Render(left.render(leftWidth))
+	r := lipgloss.NewStyle().Width(rightWidth).Render(right.render(rightWidth))
 
 	if !ui.IsTTY() {
 		return l + "\n\n" + r
 	}
 
+	gap := strings.Repeat(" ", gapWidth)
 	return lipgloss.JoinHorizontal(lipgloss.Top, "  ", l, gap, r)
+}
+
+// responsiveRightWidth sizes the right panel to hug its content within
+// [rightPanelMin, rightPanelMax], capped to fit the terminal with edgeMargin
+// columns clear on each side. With unknown terminal width it just honors the
+// content/min/max bounds.
+func responsiveRightWidth(right *panel, leftWidth int) int {
+	w := right.contentWidth()
+	w = min(max(w, rightPanelMin), rightPanelMax)
+	if term := ui.TerminalWidth(); term > 0 {
+		// edgeMargin + leftWidth + gap + right + edgeMargin <= term
+		avail := term - edgeMargin - leftWidth - gapWidth - edgeMargin
+		w = min(w, avail)
+	}
+	return max(w, rightPanelMin) // narrow terminal: prefer min over collapsing
 }

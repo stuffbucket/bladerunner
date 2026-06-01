@@ -153,6 +153,17 @@ func IsTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
+// TerminalWidth returns the current stdout terminal width in columns, or 0 if
+// stdout is not a terminal or the size can't be determined. Callers should
+// treat 0 as "unknown" and fall back to a fixed layout.
+func TerminalWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 0
+	}
+	return w
+}
+
 // styled applies a style only if output is a TTY.
 func styled(style lipgloss.Style, s string) string {
 	if !IsTTY() {
