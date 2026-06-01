@@ -28,17 +28,149 @@ type Runner struct {
 	cfg *config.Config
 
 	vm            *vz.VirtualMachine
+	vmConfig      *vz.VirtualMachineConfiguration
 	metadata      *runtimeMetadata
 	clientCrt     []byte
 	clientKey     []byte
 	baseImagePath string
+	// restoreFrom, when set before StartVM, makes StartVM restore the guest
+	// from a saved-state file (and resume it) instead of cold-booting.
+	restoreFrom string
+	// savedState records that the guest's RAM state has been saved to disk and
+	// the VM is paused; Stop then skips the graceful ACPI request and tears the
+	// VM down directly (the guest must not resume after a save).
+	savedState bool
 
 	forwarders        []*portForwarder
 	reverseForwarders []*reversePortForwarder
 	agentListener     *agent.Listener
 	consoleLog        *logging.RotatingFile
+	progress          Progress
+	nestedVirt        string // resolved nested-virt state: enabled|unsupported|disabled
 	stopOnce          sync.Once
 	stopErr           error
+}
+
+// NestedVirtualizationSupported reports whether the host can run nested VMs
+// (Apple Silicon M3+ on macOS 15+). When true, bladerunner enables it so the
+// guest's Incus can launch VMs (`incus launch --vm`), not just containers.
+func NestedVirtualizationSupported() bool {
+	return vz.IsNestedVirtualizationSupported()
+}
+
+// NestedVirtState returns the resolved nested-virtualization state for this VM:
+// "enabled", "unsupported" (host can't), or "disabled" (opted out via config).
+// Empty until the platform has been configured (StartVM).
+func (r *Runner) NestedVirtState() string {
+	return r.nestedVirt
+}
+
+// SetRestoreFrom configures StartVM to restore the guest from a saved-state
+// file (produced by SaveState) and resume it, instead of cold-booting. Must be
+// called before StartVM.
+func (r *Runner) SetRestoreFrom(path string) { r.restoreFrom = path }
+
+// SupportsSaveRestore reports whether the configured VM supports VZ
+// save/restore, returning an error explaining why not when it doesn't.
+func (r *Runner) SupportsSaveRestore() error {
+	if r.vmConfig == nil {
+		return errors.New("vm not configured")
+	}
+	ok, err := r.vmConfig.ValidateSaveRestoreSupport()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("this VM configuration does not support save/restore")
+	}
+	return nil
+}
+
+// SaveState pauses the guest and writes its machine state to path. On success
+// the VM is left paused: callers either ResumeVM for a live snapshot, or Stop
+// for an upgrade handoff. The guest must not resume between save and a
+// subsequent Stop, or the on-disk image diverges from the saved RAM.
+func (r *Runner) SaveState(path string) error {
+	if r.vm == nil {
+		return errors.New("vm not started")
+	}
+	if err := r.SupportsSaveRestore(); err != nil {
+		return err
+	}
+	if !r.vm.CanPause() {
+		return errors.New("vm is not in a pausable state")
+	}
+	if err := r.vm.Pause(); err != nil {
+		return fmt.Errorf("pause vm: %w", err)
+	}
+	// VZ refuses to overwrite an existing save file, so clear any stale one.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		_ = r.vm.Resume()
+		return fmt.Errorf("remove stale saved state %s: %w", path, err)
+	}
+	if err := r.vm.SaveMachineStateToPath(path); err != nil {
+		_ = r.vm.Resume() // best effort: don't strand a paused VM on failure
+		return fmt.Errorf("save vm state: %w", err)
+	}
+	r.savedState = true
+
+	// Record the snapshot's hardware config + disk stamp alongside the file so
+	// restore can rebuild a matching configuration and detect a changed disk.
+	// Written while paused (disk frozen). Non-fatal: the save itself succeeded.
+	if err := writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.DiskPath); err != nil {
+		logging.L().Warn("could not write saved-state metadata sidecar", "err", err)
+	}
+	return nil
+}
+
+// prepareRestore loads the saved-state sidecar (when present), applies the
+// snapshot's hardware configuration so the VZ config matches, and refuses the
+// restore if the disk has changed since the snapshot. A missing sidecar (an
+// older save) degrades to the current config with no disk check.
+func (r *Runner) prepareRestore() error {
+	meta, err := LoadSaveMetadata(r.restoreFrom)
+	if err != nil {
+		if os.IsNotExist(err) {
+			logging.L().Warn("no saved-state metadata sidecar; using current config and skipping disk-stamp check", "save", r.restoreFrom)
+			return nil
+		}
+		return fmt.Errorf("read saved-state metadata: %w", err)
+	}
+	if meta.CPUs > 0 {
+		r.cfg.CPUs = meta.CPUs
+	}
+	if meta.MemoryGiB > 0 {
+		r.cfg.MemoryGiB = meta.MemoryGiB
+	}
+	if meta.DiskSizeGiB > 0 {
+		r.cfg.DiskSizeGiB = meta.DiskSizeGiB
+	}
+	if err := meta.VerifyDisk(); err != nil {
+		return fmt.Errorf("refusing restore: %w", err)
+	}
+	return nil
+}
+
+// ResumeVM resumes a paused guest (e.g. after a live snapshot save).
+func (r *Runner) ResumeVM() error {
+	if r.vm == nil {
+		return errors.New("vm not started")
+	}
+	r.savedState = false
+	if !r.vm.CanResume() {
+		return nil
+	}
+	return r.vm.Resume()
+}
+
+// SetProgress attaches a Progress reporter. Must be called before Start /
+// StartVM. Passing nil clears any previous reporter.
+func (r *Runner) SetProgress(p Progress) {
+	if p == nil {
+		r.progress = noopProgress{}
+		return
+	}
+	r.progress = p
 }
 
 // StartVMResult contains the initial state after VM starts running.
@@ -53,13 +185,22 @@ func NewRunner(cfg *config.Config) (*Runner, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &Runner{cfg: cfg}, nil
+	return &Runner{cfg: cfg, progress: NewTimedProgress()}, nil
 }
 
 // StartVM provisions and starts the VM, returning as soon as it's running.
 // Call WaitForIncus() separately to wait for cloud-init and Incus API readiness.
 func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	log := logging.L()
+
+	// On restore, adopt the snapshot's hardware config and verify the disk
+	// hasn't changed before touching anything.
+	if r.restoreFrom != "" {
+		if err := r.prepareRestore(); err != nil {
+			return nil, err
+		}
+	}
+
 	log.Info("starting VM provisioning", "name", r.cfg.Name, "vm_dir", r.cfg.VMDir, "cpus", r.cfg.CPUs, "memory_gib", r.cfg.MemoryGiB)
 
 	if err := ensureVMDir(r.cfg); err != nil {
@@ -74,13 +215,19 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	r.clientCrt = certPEM
 	r.clientKey = keyPEM
 
-	log.Info("building cloud-init payload")
-	userData, metaData := provision.BuildCloudInit(r.cfg, string(certPEM))
-	if err := provision.WriteSeedFiles(r.cfg, userData, metaData); err != nil {
-		return nil, err
-	}
-	if err := provision.BuildCloudInitISO(ctx, r.cfg); err != nil {
-		return nil, err
+	// On restore the guest is already configured and frozen in the saved
+	// state; regenerating cloud-init would needlessly rewrite the seed ISO. The
+	// existing ISO file is still attached so the device topology matches the
+	// saved configuration.
+	if r.restoreFrom == "" {
+		log.Info("building cloud-init payload")
+		userData, metaData := provision.BuildCloudInit(r.cfg, string(certPEM))
+		if err := provision.WriteSeedFiles(r.cfg, userData, metaData); err != nil {
+			return nil, err
+		}
+		if err := provision.BuildCloudInitISO(ctx, r.cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	log.Info("resolving base image and main disk")
@@ -104,6 +251,7 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.vmConfig = vmCfg
 
 	log.Info("creating virtual machine instance")
 	vm, err := vz.NewVirtualMachine(vmCfg)
@@ -112,22 +260,31 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	}
 	r.vm = vm
 
-	log.Info("starting virtual machine")
-	if err := vm.Start(); err != nil {
-		return nil, fmt.Errorf("start vm: %w", err)
+	if r.restoreFrom != "" {
+		log.Info("restoring saved VM state", "path", r.restoreFrom)
+		if err := vm.RestoreMachineStateFromURL(r.restoreFrom); err != nil {
+			return nil, fmt.Errorf("restore vm state: %w", err)
+		}
+		if err := vm.Resume(); err != nil {
+			return nil, fmt.Errorf("resume restored vm: %w", err)
+		}
+	} else {
+		log.Info("starting virtual machine")
+		if err := vm.Start(); err != nil {
+			return nil, fmt.Errorf("start vm: %w", err)
+		}
 	}
 
-	vmWait := logging.NewTimedProgress("Waiting for VM to reach running state", 2*time.Minute)
+	r.progress.Begin(StageVMBoot, "Waiting for VM to reach running state", 2*time.Minute)
 	if err := r.waitForRunning(ctx, 2*time.Minute, func(st vz.VirtualMachineState) {
 		msg := fmt.Sprintf("state=%s", st.String())
-		vmWait.SetStatus(msg)
+		r.progress.Substatus(StageVMBoot, msg)
 		log.Info("vm state changed", "state", st.String())
 	}); err != nil {
-		vmWait.Fail(err)
+		r.progress.Fail(StageVMBoot, err)
 		return nil, err
 	}
-	vmWait.SetStatus("running")
-	vmWait.Finish()
+	r.progress.Done(StageVMBoot)
 
 	log.Info("starting localhost forwarders")
 	if err := r.startForwarders(); err != nil {
@@ -192,17 +349,16 @@ func (r *Runner) WaitForIncus(ctx context.Context) (*report.StartupReport, error
 	incusCtx, cancel := context.WithTimeout(ctx, r.cfg.WaitForIncus)
 	defer cancel()
 
-	incusWait := logging.NewTimedProgress("Waiting for Incus API readiness", r.cfg.WaitForIncus)
+	r.progress.Begin(StageIncusWait, "Waiting for Incus API readiness", r.cfg.WaitForIncus)
 	serverInfo, err := incusctl.WaitForServer(incusCtx, endpoint, r.clientCrt, r.clientKey, 4*time.Second, func(p incusctl.WaitProgress) {
-		incusWait.SetStatus(fmt.Sprintf("attempt=%d %s", p.Attempt, summarizeErr(p.LastError)))
+		r.progress.Substatus(StageIncusWait, fmt.Sprintf("attempt=%d %s", p.Attempt, summarizeErr(p.LastError)))
 	})
 	if err != nil {
-		incusWait.Fail(err)
+		r.progress.Fail(StageIncusWait, err)
 		log.Warn("incus api was not ready before timeout; continuing with partial report", "endpoint", endpoint, "err", err)
 		serverInfo = nil
 	} else {
-		incusWait.SetStatus("ready")
-		incusWait.Finish()
+		r.progress.Done(StageIncusWait)
 	}
 
 	log.Info("assembling startup report")
@@ -302,6 +458,11 @@ func (r *Runner) closeForwarders() {
 }
 
 func (r *Runner) requestStopVM(log loggerLike) {
+	if r.savedState {
+		// State already saved and the guest is paused; a graceful ACPI request
+		// would only stall. forceStopVMIfNeeded tears it down directly.
+		return
+	}
 	for i := 0; i < 3 && r.vm.CanRequestStop(); i++ {
 		ok, err := r.vm.RequestStop()
 		log.Info("sent stop request", "attempt", i+1, "accepted", ok, "err", err)
@@ -359,6 +520,45 @@ func (r *Runner) waitForRunning(ctx context.Context, timeout time.Duration, onSt
 				// Other states (Starting, Pausing, etc.): continue waiting
 			}
 		}
+	}
+}
+
+// ProbeGuest checks guest liveness by opening a vsock connection to the
+// in-guest SSH bridge port and immediately closing it. A successful connect
+// means the guest kernel is alive and the vsock SSH forwarder is listening;
+// an error (typically ECONNRESET) means the guest is unreachable — kernel
+// panic, not yet booted, or the bridge is down. It returns an error when the
+// VM or its socket device is not yet available. The ctx bounds how long the
+// (blocking, cgo) dial may take.
+func (r *Runner) ProbeGuest(ctx context.Context) error {
+	if r.vm == nil {
+		return errors.New("vm not started")
+	}
+	socketDevices := r.vm.SocketDevices()
+	if len(socketDevices) == 0 {
+		return errors.New("vm has no virtio socket device")
+	}
+	device := socketDevices[0]
+
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan dialResult, 1)
+	go func() {
+		conn, err := device.Connect(r.cfg.VsockSSHPort)
+		ch <- dialResult{conn: conn, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case res := <-ch:
+		if res.err != nil {
+			return res.err
+		}
+		_ = res.conn.Close()
+		return nil
 	}
 }
 

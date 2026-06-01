@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -28,6 +29,12 @@ func init() {
 }
 
 func runLogs(_ *cobra.Command, args []string) error {
+	if jsonOutput {
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "logs")
+		emitJSONError(err)
+		return err
+	}
+
 	instance := args[0]
 
 	client, err := connectIncus()

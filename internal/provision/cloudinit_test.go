@@ -87,6 +87,60 @@ func TestBuildCloudInit_NoLegacySedGrubEdit(t *testing.T) {
 	}
 }
 
+// TestBuildCloudInit_VsockSSHBridgeBeforeIncusInstall guards the recovery fix:
+// the vsock SSH bridge unit must be created and enabled BEFORE the fragile,
+// network-heavy incus package install. Otherwise a failure installing/setting
+// up incus (or a transient apt error) aborts the bootstrap before the bridge
+// exists, permanently leaving the guest with no host<->guest SSH over vsock
+// (runcmd is once-per-instance and never retries). This is the root cause of a
+// guest that boots fine but where `br shell` resets with errno 54.
+func TestBuildCloudInit_VsockSSHBridgeBeforeIncusInstall(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	bridgeIdx := strings.Index(userData, "/etc/systemd/system/bladerunner-vsock-ssh.service")
+	incusIdx := strings.Index(userData, "incus incus-client")
+	if bridgeIdx < 0 {
+		t.Fatalf("user-data does not create the vsock SSH bridge unit\n---\n%s\n---", userData)
+	}
+	if incusIdx < 0 {
+		t.Fatalf("user-data does not install incus (test assumption broke)\n---\n%s\n---", userData)
+	}
+	if bridgeIdx > incusIdx {
+		t.Errorf("vsock SSH bridge (idx %d) is created AFTER incus install (idx %d); it must come first so SSH survives incus/apt failures", bridgeIdx, incusIdx)
+	}
+}
+
+// TestBuildCloudInit_AptUpdateResilient verifies apt-get update is retried and
+// non-fatal, so a transient mirror failure (the observed trixie-security "does
+// not have a Release file") does not abort the whole provisioning under
+// `set -e`.
+func TestBuildCloudInit_AptUpdateResilient(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"apt_update_retry",       // retry helper is defined and used
+		"continuing best-effort", // helper is non-fatal (returns success after retries)
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing apt-resilience snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+	// The bare, fatal `apt-get update -qq` at top level must be gone (it may
+	// only appear inside the retry helper).
+	if strings.Count(userData, "apt-get update -qq") > strings.Count(userData, "apt_update_retry") {
+		// Heuristic: every remaining `apt-get update -qq` should be the one
+		// inside the helper; callers use apt_update_retry instead.
+		t.Errorf("user-data still has direct fatal `apt-get update -qq` calls; route them through apt_update_retry\n---\n%s\n---", userData)
+	}
+}
+
 // TestBuildCloudInit_UpdateGrubStillRuns ensures bootcmd still regenerates
 // /boot/grub/grub.cfg so the drop-in is picked up before the sentinel reboot.
 func TestBuildCloudInit_UpdateGrubStillRuns(t *testing.T) {

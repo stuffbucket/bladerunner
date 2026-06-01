@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -12,10 +11,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var lsFlags struct {
-	jsonOut bool
-}
-
 var lsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List Incus instances",
@@ -24,27 +19,59 @@ var lsCmd = &cobra.Command{
 	RunE:  runLs,
 }
 
-func init() {
-	lsCmd.Flags().BoolVar(&lsFlags.jsonOut, "json", false, "Output as JSON")
-}
-
 func runLs(_ *cobra.Command, _ []string) error {
 	client, err := connectIncus()
 	if err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
 	}
 	instances, err := client.ListInstances(context.Background())
 	if err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
 	}
 
-	if lsFlags.jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(instances)
+	if jsonOutput {
+		return emitJSON(instanceReports(instances))
 	}
 
 	return renderInstanceTable(os.Stdout, instances)
+}
+
+// --- JSON output (br ls --json) ---
+
+// instanceReport is one row of `br ls`, mirroring the human table columns.
+type instanceReport struct {
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Status string `json:"status,omitempty"`
+	IPv4   string `json:"ipv4,omitempty"`
+	Image  string `json:"image,omitempty"`
+}
+
+// instanceReports builds the JSON view of the instance list. It always returns
+// a non-nil slice so zero instances marshal as `[]` rather than `null`.
+func instanceReports(instances []api.InstanceFull) []instanceReport {
+	reports := make([]instanceReport, 0, len(instances))
+	for i := range instances {
+		inst := &instances[i]
+		typ := inst.Type
+		if typ == "" {
+			typ = "container"
+		}
+		reports = append(reports, instanceReport{
+			Name:   inst.Name,
+			Type:   typ,
+			Status: inst.Status,
+			IPv4:   primaryIPv4(inst),
+			Image:  imageSource(inst),
+		})
+	}
+	return reports
 }
 
 func renderInstanceTable(out *os.File, instances []api.InstanceFull) error {

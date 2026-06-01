@@ -18,6 +18,12 @@ var incusCmd = &cobra.Command{
 }
 
 func runIncus(cmd *cobra.Command, args []string) error {
+	if jsonOutput {
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "incus")
+		emitJSONError(err)
+		return err
+	}
+
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
 			return cmd.Help()

@@ -33,9 +33,19 @@ func (r *Runner) WaitForIncus(context.Context) (*report.StartupReport, error) {
 	return nil, errors.New("unsupported platform")
 }
 
-func (r *Runner) StartGUI() error            { return errors.New("unsupported platform") }
-func (r *Runner) Wait(context.Context) error { return errors.New("unsupported platform") }
-func (r *Runner) Stop() error                { return nil }
+func (r *Runner) StartGUI() error                  { return errors.New("unsupported platform") }
+func (r *Runner) Wait(context.Context) error       { return errors.New("unsupported platform") }
+func (r *Runner) Stop() error                      { return nil }
+func (r *Runner) SetProgress(Progress)             {}
+func (r *Runner) ProbeGuest(context.Context) error { return errors.New("unsupported platform") }
+func (r *Runner) NestedVirtState() string          { return "unsupported" }
+func (r *Runner) SetRestoreFrom(string)            {}
+func (r *Runner) SupportsSaveRestore() error       { return errors.New("unsupported platform") }
+func (r *Runner) SaveState(string) error           { return errors.New("unsupported platform") }
+func (r *Runner) ResumeVM() error                  { return errors.New("unsupported platform") }
+
+// NestedVirtualizationSupported is always false off darwin.
+func NestedVirtualizationSupported() bool { return false }
 
 func (r *Runner) RunAgentHandshake(context.Context) (*agent.HandshakeResult, error) {
 	return nil, errors.New("unsupported platform")

@@ -32,16 +32,76 @@ func init() {
 	resetCmd.Flags().BoolVarP(&resetFlags.confirm, "yes", "y", false, "Skip confirmation prompt")
 }
 
-func runReset(cmd *cobra.Command, args []string) error {
+func runReset(_ *cobra.Command, _ []string) error {
 	stateDir := config.DefaultStateDir()
 
 	if _, err := os.Stat(stateDir); os.IsNotExist(err) {
+		if jsonOutput {
+			return emitJSON(resetResult{Status: "no-vm", Directory: stateDir})
+		}
 		fmt.Printf("No VM found at %s\n", stateDir)
 		return nil
 	}
 
-	// Define what to remove at each level
-	baselineFiles := []string{
+	toRemove, resetType := resetFileList(resetFlags.full, resetFlags.all)
+
+	if !jsonOutput {
+		fmt.Printf("Resetting VM (%s reset)\n", resetType)
+		fmt.Printf("Directory: %s\n\n", stateDir)
+	}
+
+	existingFiles := existingResetFiles(stateDir, toRemove)
+	if len(existingFiles) == 0 {
+		if jsonOutput {
+			return emitJSON(resetResult{Status: "nothing-to-reset", Type: resetType, Directory: stateDir})
+		}
+		fmt.Println("Nothing to reset - VM is already at baseline state.")
+		return nil
+	}
+
+	if !jsonOutput {
+		fmt.Println("Files to remove:")
+		for _, f := range existingFiles {
+			fmt.Printf("  - %s\n", f)
+		}
+	}
+
+	// In JSON mode there is no interactive prompt; require --yes so we never
+	// block waiting on stdin while emitting machine-readable output.
+	if !resetFlags.confirm {
+		if jsonOutput {
+			err := fmt.Errorf("reset requires --yes when --json is set (cannot prompt for confirmation)")
+			emitJSONError(err)
+			return err
+		}
+		if !confirmReset() {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	outcome := applyReset(stateDir, existingFiles, resetFlags.all)
+
+	if jsonOutput {
+		return emitJSON(resetResult{
+			Status:        "reset",
+			Type:          resetType,
+			Directory:     stateDir,
+			Removed:       len(outcome.removed),
+			Failed:        len(outcome.failed),
+			RemovedFiles:  outcome.removed,
+			DirectoryGone: outcome.dirGone,
+		})
+	}
+
+	reportResetHuman(outcome, resetFlags.all)
+	return nil
+}
+
+// resetFileList returns the files to remove for the requested reset level and a
+// human label for that level.
+func resetFileList(full, all bool) ([]string, string) {
+	files := []string{
 		"disk.raw",
 		"efi-vars.bin",
 		"machine-id.bin",
@@ -53,100 +113,95 @@ func runReset(cmd *cobra.Command, args []string) error {
 		"runtime-metadata.json",
 		"bladerunner.log",
 	}
-
-	fullFiles := []string{
-		"base-image.raw",
+	if full || all {
+		files = append(files, "base-image.raw")
+	}
+	if all {
+		files = append(files, "client.crt", "client.key", "incus-client-example.go")
 	}
 
-	allFiles := []string{
-		"client.crt",
-		"client.key",
-		"incus-client-example.go",
+	typ := "baseline"
+	switch {
+	case all:
+		typ = "complete"
+	case full:
+		typ = "full"
 	}
+	return files, typ
+}
 
-	// Build list of files to remove
-	var toRemove []string
-	toRemove = append(toRemove, baselineFiles...)
-	if resetFlags.full || resetFlags.all {
-		toRemove = append(toRemove, fullFiles...)
-	}
-	if resetFlags.all {
-		toRemove = append(toRemove, allFiles...)
-	}
-
-	// Show what will be removed
-	resetType := "baseline"
-	if resetFlags.all {
-		resetType = "complete"
-	} else if resetFlags.full {
-		resetType = "full"
-	}
-
-	fmt.Printf("Resetting VM (%s reset)\n", resetType)
-	fmt.Printf("Directory: %s\n\n", stateDir)
-
-	var existingFiles []string
-	for _, f := range toRemove {
-		path := filepath.Join(stateDir, f)
-		if _, err := os.Stat(path); err == nil {
-			existingFiles = append(existingFiles, f)
+// existingResetFiles filters candidates down to those that exist under stateDir.
+func existingResetFiles(stateDir string, candidates []string) []string {
+	var existing []string
+	for _, f := range candidates {
+		if _, err := os.Stat(filepath.Join(stateDir, f)); err == nil {
+			existing = append(existing, f)
 		}
 	}
+	return existing
+}
 
-	if len(existingFiles) == 0 {
-		fmt.Println("Nothing to reset - VM is already at baseline state.")
-		return nil
-	}
+// resetOutcome records the result of removing reset files.
+type resetOutcome struct {
+	removed []string
+	failed  []string
+	dirGone bool
+}
 
-	fmt.Println("Files to remove:")
-	for _, f := range existingFiles {
-		fmt.Printf("  - %s\n", f)
-	}
-
-	if !resetFlags.confirm {
-		if !confirmReset() {
-			fmt.Println("Aborted.")
-			return nil
-		}
-	}
-
-	// Remove files
-	var removed, failed int
-	for _, f := range existingFiles {
-		path := filepath.Join(stateDir, f)
-		if err := os.Remove(path); err != nil {
-			fmt.Printf("  ✗ Failed to remove %s: %v\n", f, err)
-			failed++
+// applyReset removes the given files under stateDir, prunes the empty cloud-init
+// directory, and (for a complete reset) removes the now-empty state directory.
+func applyReset(stateDir string, existing []string, all bool) resetOutcome {
+	out := resetOutcome{removed: make([]string, 0, len(existing))}
+	for _, f := range existing {
+		if err := os.Remove(filepath.Join(stateDir, f)); err != nil {
+			out.failed = append(out.failed, f)
 		} else {
-			removed++
+			out.removed = append(out.removed, f)
 		}
 	}
 
-	// Clean up empty cloud-init directory
 	cloudInitDir := filepath.Join(stateDir, "cloud-init")
 	if entries, err := os.ReadDir(cloudInitDir); err == nil && len(entries) == 0 {
 		_ = os.Remove(cloudInitDir)
 	}
 
-	// If --all, remove the entire directory if empty
-	if resetFlags.all {
+	if all {
 		if entries, err := os.ReadDir(stateDir); err == nil && len(entries) == 0 {
 			_ = os.Remove(stateDir)
-			fmt.Printf("\n✓ Removed empty VM directory\n")
+			out.dirGone = true
 		}
 	}
+	return out
+}
 
-	fmt.Printf("\n✓ Reset complete: %d files removed", removed)
-	if failed > 0 {
-		fmt.Printf(", %d failed", failed)
+// reportResetHuman prints the human-readable reset summary.
+func reportResetHuman(o resetOutcome, all bool) {
+	for _, f := range o.failed {
+		fmt.Printf("  ✗ Failed to remove %s\n", f)
+	}
+	if o.dirGone {
+		fmt.Printf("\n✓ Removed empty VM directory\n")
+	}
+	fmt.Printf("\n✓ Reset complete: %d files removed", len(o.removed))
+	if len(o.failed) > 0 {
+		fmt.Printf(", %d failed", len(o.failed))
 	}
 	fmt.Println()
-
-	if !resetFlags.all {
+	if !all {
 		fmt.Printf("\nRun 'br start' to create a fresh VM.\n")
 	}
+}
 
-	return nil
+// resetResult is the JSON payload emitted by `br reset --json`. Status is one
+// of "no-vm", "nothing-to-reset", or "reset".
+type resetResult struct {
+	Status        string   `json:"status"`
+	Type          string   `json:"type,omitempty"` // "baseline"|"full"|"complete"
+	Directory     string   `json:"directory,omitempty"`
+	Removed       int      `json:"removed"`
+	Failed        int      `json:"failed"`
+	RemovedFiles  []string `json:"removed_files,omitempty"`
+	DirectoryGone bool     `json:"directory_gone,omitempty"`
 }
 
 // confirmReset prompts the user for confirmation.

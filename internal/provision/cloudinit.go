@@ -166,6 +166,23 @@ if [ ! -e /dev/vsock ]; then
   echo "WARNING: /dev/vsock not found, vsock forwarding may not work" >&2
 fi
 
+# Resilient apt update: retry transient mirror failures (e.g. a freshly
+# promoted trixie-security that briefly has no Release file) and never abort
+# the whole bootstrap on apt. The host<->guest vsock SSH bridge created below
+# is more important than fully up-to-date package indexes; if it dies here,
+# runcmd is once-per-instance and never retries, permanently stranding SSH.
+apt_update_retry() {
+  for attempt in 1 2 3 4 5; do
+    if apt-get update -qq; then
+      return 0
+    fi
+    echo "bladerunner: apt-get update failed (attempt ${attempt}/5), retrying" >&2
+    sleep 3
+  done
+  echo "bladerunner: apt-get update still failing; continuing best-effort" >&2
+  return 0
+}
+
 # Zabbly fallback: dormant for the default Debian 13 (trixie) image, which ships
 # incus and incus-client in main. Retained for Ubuntu and other distros reached
 # via --image-url where the native package is not available.
@@ -211,52 +228,29 @@ native_incus_distro() {
   return 1
 }
 
+# --- Critical control-path packages FIRST, resiliently. socat + sshd are all
+#     the host<->guest vsock SSH bridge needs; install them (with retries)
+#     before the heavier, failure-prone incus provisioning below.
 if command -v apt-get >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y -qq ca-certificates curl gpg openssh-server socat jq
-  if native_incus_distro; then
-    apt-get install -y -qq incus incus-client
-  elif ! apt-get install -y -qq incus incus-client; then
-    install_zabbly_repo
-    apt-get update -qq
-    apt-get install -y -qq incus incus-client
-  fi
+  apt_update_retry
+  for attempt in 1 2 3; do
+    if apt-get install -y -qq ca-certificates curl gpg openssh-server socat jq; then
+      break
+    fi
+    echo "bladerunner: core package install failed (attempt ${attempt}/3), retrying" >&2
+    sleep 3
+  done
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q openssh-server socat incus incus-client || true
-fi
-
-if getent group incus-admin >/dev/null 2>&1; then
-  usermod -a -G incus-admin %s || true
+  dnf install -y -q openssh-server socat jq || true
 fi
 
 systemctl enable --now ssh || true
 systemctl enable --now sshd || true
-systemctl enable --now incus || true
-systemctl enable --now incus.socket || true
 
-for i in $(seq 1 60); do
-  if incus admin waitready --timeout=1 >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-incus admin init --auto || true
-incus config set core.https_address "[::]:8443" || true
-
-# Configure Incus to trust the bladerunner local OIDC provider.
-# The issuer URL is the loopback address inside the guest, which is forwarded
-# over vsock to the bladerunner OIDC server on the host. See internal/oidc.
-incus config set core.oidc.issuer    "%s" || true
-incus config set core.oidc.client.id "%s" || true
-incus config set core.oidc.audience  "%s" || true
-
-# Add the host client certificate to trust store (kept for the --auth=cert
-# fallback path; safe to leave even when OIDC is the primary auth method).
-incus config trust add-certificate /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
-  incus config trust add /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
-  echo "Note: Could not add host certificate to trust store (may already exist)"
-
+# --- vsock bridge units: create + enable BEFORE incus provisioning, so a
+#     failure installing/configuring incus (or any later command) can never
+#     strand host<->guest SSH. ConditionPathExists guards mean a unit simply
+#     waits, rather than errors, if socat / its TCP target is not up yet.
 cat >/etc/systemd/system/bladerunner-vsock-ssh.service <<'UNIT'
 [Unit]
 Description=Bladerunner vsock SSH forward
@@ -313,9 +307,58 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now bladerunner-vsock-ssh.service
-systemctl enable --now bladerunner-vsock-incus.service
-systemctl enable --now bladerunner-vsock-oidc.service
+systemctl enable --now bladerunner-vsock-ssh.service || true
+systemctl enable --now bladerunner-vsock-incus.service || true
+systemctl enable --now bladerunner-vsock-oidc.service || true
+
+# --- Best-effort incus provisioning. Everything below is non-fatal: if it
+#     fails, host<->guest SSH (configured above) still works, so the VM stays
+#     reachable and debuggable instead of silently stranding the operator.
+if command -v apt-get >/dev/null 2>&1; then
+  if native_incus_distro; then
+    apt-get install -y -qq incus incus-client || true
+  elif ! apt-get install -y -qq incus incus-client; then
+    install_zabbly_repo
+    apt_update_retry
+    apt-get install -y -qq incus incus-client || true
+  fi
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y -q incus incus-client || true
+fi
+
+if getent group incus-admin >/dev/null 2>&1; then
+  usermod -a -G incus-admin %s || true
+fi
+
+systemctl enable --now incus || true
+systemctl enable --now incus.socket || true
+
+for i in $(seq 1 60); do
+  if incus admin waitready --timeout=1 >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+incus admin init --auto || true
+incus config set core.https_address "[::]:8443" || true
+
+# Configure Incus to trust the bladerunner local OIDC provider.
+# The issuer URL is the loopback address inside the guest, which is forwarded
+# over vsock to the bladerunner OIDC server on the host. See internal/oidc.
+incus config set core.oidc.issuer    "%s" || true
+incus config set core.oidc.client.id "%s" || true
+incus config set core.oidc.audience  "%s" || true
+
+# Add the host client certificate to trust store (kept for the --auth=cert
+# fallback path; safe to leave even when OIDC is the primary auth method).
+incus config trust add-certificate /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
+  incus config trust add /var/lib/bladerunner/host-client.crt --name bladerunner-host 2>/dev/null ||
+  echo "Note: Could not add host certificate to trust store (may already exist)"
+
+# incus should be listening now; nudge the API bridge so it picks up :8443
+# without waiting for its restart timer.
+systemctl restart bladerunner-vsock-incus.service || true
 
 # Wait a moment for services to start
 sleep 2
@@ -335,13 +378,14 @@ ip -4 -br addr show scope global > /var/lib/bladerunner/ipv4.txt || true
 incus info > /var/lib/bladerunner/incus-info.txt || true
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 `,
+		cfg.VsockSSHPort, cfg.VsockAPIPort,
+		// The guest OIDC TCP listener binds LocalOIDCPort (the issuer's port) so the
+		// issuer URL resolves the same inside the guest as on the host; it then
+		// connects over vsock to the host provider on VsockOIDCPort. (TCP-LISTEN
+		// port = LocalOIDCPort, VSOCK-CONNECT port = VsockOIDCPort.)
+		cfg.LocalOIDCPort, cfg.VsockOIDCPort,
 		cfg.SSHUser,
 		cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCAudience,
-		cfg.VsockSSHPort, cfg.VsockAPIPort,
-		// The guest TCP listener binds LocalOIDCPort (the issuer's port) so the
-		// issuer URL resolves the same inside the guest as on the host; it then
-		// connects over vsock to the host provider on VsockOIDCPort.
-		cfg.LocalOIDCPort, cfg.VsockOIDCPort,
 	)
 }
 
