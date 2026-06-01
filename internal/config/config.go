@@ -87,7 +87,7 @@ type Config struct {
 	StateDir string
 	VMDir    string
 	DiskPath string
-	// SavedStatePath is where `br save` / `br upgrade` write the VZ saved
+	// SavedStatePath is where `runner save` / `runner upgrade` write the VZ saved
 	// machine state. Defaults to <stateDir>/saved-state.bin.
 	SavedStatePath string
 	DiskSizeGiB    int
@@ -142,7 +142,7 @@ type Config struct {
 	OIDCStateDir string
 	// IdentityDir is the directory of registered SSH-pubkey identity files.
 	IdentityDir string
-	// AuthMode selects how `br` talks to Incus: "oidc" (default) or "cert" (legacy mTLS).
+	// AuthMode selects how `runner` talks to Incus: "oidc" (default) or "cert" (legacy mTLS).
 	AuthMode        string
 	NetworkMode     string
 	BridgeInterface string

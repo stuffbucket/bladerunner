@@ -169,7 +169,7 @@ func (c *Client) StatusContext(_ context.Context) (string, error) {
 }
 
 // ServerVersion returns the running server's build version string, used to
-// detect that a newer client binary should take over the server (br upgrade).
+// detect that a newer client binary should take over the server (runner upgrade).
 func (c *Client) ServerVersion() (string, error) {
 	resp, err := c.sendCommand(CmdServerVersion, clientCmdTimeout)
 	if err != nil {

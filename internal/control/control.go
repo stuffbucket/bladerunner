@@ -87,7 +87,7 @@ const (
 	// The response body is the path written.
 	CmdSave = "save"
 	// CmdServerVersion reports the running server's build version string, so a
-	// client can detect that a newer binary should take over (br upgrade).
+	// client can detect that a newer binary should take over (runner upgrade).
 	CmdServerVersion = "version"
 )
 

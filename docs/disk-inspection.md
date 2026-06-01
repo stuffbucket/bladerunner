@@ -1,10 +1,10 @@
 # Inspecting a guest disk offline (without booting the VM)
 
-When a guest won't boot, `br shell` can't connect, or you suspect filesystem or
+When a guest won't boot, `runner shell` can't connect, or you suspect filesystem or
 provisioning damage, you can read the guest's root filesystem directly from the
 host — no VM, no SSH — using read-only `ext4` tooling.
 
-This is how the "guest boots but `br shell` resets with errno 54" case was first
+This is how the "guest boots but `runner shell` resets with errno 54" case was first
 root-caused (the cloud-init bootstrap had failed before creating the vsock SSH
 bridge unit).
 
@@ -19,9 +19,9 @@ brew install e2fsprogs        # keg-only; binaries under /opt/homebrew/opt/e2fsp
 
 `e2fsprogs` is GPL-2.0 (the libraries are LGPL-2.0). Bladerunner is MIT-licensed.
 Invoking `debugfs`/`dumpe2fs` as **separate executables** (as below, or from a
-future `br inspect-disk` subcommand that shells out to them) does **not** create
-a derivative work and imposes no licensing obligation on `br`. Only *bundling /
-redistributing* the GPL binaries inside a `br` release would trigger GPL source
+future `runner inspect-disk` subcommand that shells out to them) does **not** create
+a derivative work and imposes no licensing obligation on `runner`. Only *bundling /
+redistributing* the GPL binaries inside a `runner` release would trigger GPL source
 obligations — so we shell out to a user-installed copy instead of vendoring it.
 
 ## Procedure
@@ -30,7 +30,7 @@ obligations — so we shell out to a user-installed copy instead of vendoring it
 > and the image file may be held open by the running VZ process.
 
 ```bash
-br stop                 # or: br stop --force   (panicked/hung guest)
+runner stop                 # or: runner stop --force   (panicked/hung guest)
 
 cd ~/.local/state/bladerunner
 
@@ -70,9 +70,9 @@ Always detach when done:
 hdiutil detach /dev/diskN
 ```
 
-## Possible follow-up: a `br inspect-disk` subcommand
+## Possible follow-up: a `runner inspect-disk` subcommand
 
-The steps above are mechanical and could be wrapped as `br inspect-disk`
+The steps above are mechanical and could be wrapped as `runner inspect-disk`
 (detect `debugfs`/`dumpe2fs`, refuse if the VM is running, auto-pick the Linux
 root slice, run a fixed health/provisioning report, always detach). It would
 shell out to the user-installed `e2fsprogs` — same licensing position as above.

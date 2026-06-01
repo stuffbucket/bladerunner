@@ -60,7 +60,7 @@ func init() {
 	f.BoolVar(&startFlags.useAgent, "use-guest-agent", false, "Use the in-guest br-agent for boot config (requires pre-baked image or user-side install)")
 	f.BoolVar(&startFlags.noAgent, "no-agent", false, "Force the legacy cloud-init/HTTP-polling path even if use-guest-agent is enabled")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
-	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
+	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'runner save') instead of cold-booting")
 }
 
 // nestedVirtBanner describes whether the guest's Incus will be able to run VMs
@@ -77,7 +77,7 @@ func nestedVirtBanner() string {
 	}
 }
 
-// registerUpgradeHandlers registers the control commands that back `br upgrade`:
+// registerUpgradeHandlers registers the control commands that back `runner upgrade`:
 // reporting the server's build version, and pausing+saving the guest state.
 // getRunner returns the active runner once StartVM has created it (nil before).
 func registerUpgradeHandlers(router *control.Router, cfg *config.Config, getRunner func() *vm.Runner) {
@@ -114,7 +114,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Check if already running
 	client := control.NewClient(cfg.VMDir)
 	if client.IsRunning() {
-		return fmt.Errorf("VM is already running (use 'br stop' first)")
+		return fmt.Errorf("VM is already running (use 'runner stop' first)")
 	}
 
 	// Start control server. We build the controller explicitly (rather than
@@ -202,7 +202,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	setRunner(runner)
 
 	// --restore: bring the guest up from a saved-state file (and resume it)
-	// instead of cold-booting. Used by `br restore` and `br upgrade`.
+	// instead of cold-booting. Used by `runner restore` and `runner upgrade`.
 	if startFlags.restoreFrom != "" {
 		runner.SetRestoreFrom(startFlags.restoreFrom)
 	}
@@ -237,7 +237,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("start vm: %w", err)
 	}
 
-	// Now that the VM (and its vsock device) exists, teach `br status` to probe
+	// Now that the VM (and its vsock device) exists, teach `runner status` to probe
 	// guest liveness instead of trusting the host run-state alone. A panicked
 	// or unreachable guest now reports "unreachable" rather than "running".
 	ctrl.SetProbe(func(ctx context.Context) error {
@@ -246,7 +246,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return runner.ProbeGuest(pctx)
 	})
 
-	// Publish the resolved nested-virt state so `br status` can report whether
+	// Publish the resolved nested-virt state so `runner status` can report whether
 	// Incus VMs are available in this guest.
 	cfgHandler.Lock()
 	cfg.NestedVirt = runner.NestedVirtState()
@@ -310,7 +310,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 }
 
 // startReportJSON emits a one-line JSON object describing the running VM, used
-// by `br start --json`. The process keeps running afterward (start is a
+// by `runner start --json`. The process keeps running afterward (start is a
 // foreground server); agents read this single object to learn the endpoints.
 func startReportJSON(cfg *config.Config, endpoint string, bootErr error) error {
 	r := map[string]any{
@@ -353,10 +353,10 @@ func printRunningSummary(cfg *config.Config, endpoint string, bootErr error) {
 		fmt.Println(warning("⚠ VM is running but the guest did not finish booting"))
 		fmt.Printf("  %s %v\n", key("Reason:"), bootErr)
 		fmt.Printf("  %s %s\n", key("Console:"), value(cfg.ConsoleLogPath))
-		fmt.Printf("  %s %s\n", key("Hint:"), subtle("`br shell` and `br ssh` will fail until cloud-init completes."))
+		fmt.Printf("  %s %s\n", key("Hint:"), subtle("`runner shell` and `runner ssh` will fail until cloud-init completes."))
 	}
-	fmt.Printf("  %s %s\n", key("SSH:"), command("br ssh"))
-	fmt.Printf("  %s %s\n", key("Shell:"), command("br shell"))
+	fmt.Printf("  %s %s\n", key("SSH:"), command("runner ssh"))
+	fmt.Printf("  %s %s\n", key("Shell:"), command("runner shell"))
 	fmt.Printf("  %s %s\n", key("API:"), value(endpoint))
 	fmt.Println()
 }

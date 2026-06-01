@@ -12,22 +12,22 @@ import (
 
 const maxDisplayValueLen = 60
 
-// --- JSON output (br config ... --json) ---
+// --- JSON output (runner config ... --json) ---
 
-// configGetResult is the JSON shape for `br config get <key> --json`.
+// configGetResult is the JSON shape for `runner config get <key> --json`.
 type configGetResult struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
 
-// configSetResult is the JSON shape for `br config set <key> <value> --json`.
+// configSetResult is the JSON shape for `runner config set <key> <value> --json`.
 type configSetResult struct {
 	Key    string `json:"key"`
 	Value  string `json:"value"`
 	Status string `json:"status"`
 }
 
-// configKeyInfo is one element of the JSON array for `br config keys --json`.
+// configKeyInfo is one element of the JSON array for `runner config keys --json`.
 type configKeyInfo struct {
 	Key           string `json:"key"`
 	Description   string `json:"description,omitempty"`
@@ -47,16 +47,16 @@ to be started.
 
 Examples:
   # List all config keys with their defaults and status
-  br config keys
+  runner config keys
 
   # Get a specific config value
-  br config get base-image-url
+  runner config get base-image-url
 
   # Set a config value (only certain keys are modifiable)
-  br config set base-image-url https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img
+  runner config set base-image-url https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img
 
   # List all available config keys
-  br config keys`,
+  runner config keys`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runConfig,
 }
@@ -118,7 +118,7 @@ func defaultConfigValue(cfg *config.Config, k string) string {
 
 func runConfigGet(args []string) error {
 	if len(args) != 1 {
-		err := fmt.Errorf("usage: br config get <key>")
+		err := fmt.Errorf("usage: runner config get <key>")
 		if jsonOutput {
 			emitJSONError(err)
 		}
@@ -181,7 +181,7 @@ func runConfigGet(args []string) error {
 
 func runConfigSet(args []string) error {
 	if len(args) != 2 {
-		err := fmt.Errorf("usage: br config set <key> <value>")
+		err := fmt.Errorf("usage: runner config set <key> <value>")
 		if jsonOutput {
 			emitJSONError(err)
 		}
@@ -212,7 +212,7 @@ func runConfigSet(args []string) error {
 	client := control.NewClient(stateDir)
 
 	if !client.IsRunning() {
-		err := fmt.Errorf("VM is not running; start it first with: %s", command("br start"))
+		err := fmt.Errorf("VM is not running; start it first with: %s", command("runner start"))
 		if jsonOutput {
 			emitJSONError(err)
 		}
@@ -234,7 +234,7 @@ func runConfigSet(args []string) error {
 
 	if meta.RequiresReset {
 		fmt.Printf("\n%s This change requires a VM reset to take effect.\n", errorf("⚠"))
-		fmt.Printf("  Run %s and then %s\n", command("br reset"), command("br start"))
+		fmt.Printf("  Run %s and then %s\n", command("runner reset"), command("runner start"))
 	}
 
 	return nil
@@ -286,8 +286,8 @@ func runConfigKeys() error {
 		printDescLine(meta.Description, tags)
 	}
 	fmt.Println()
-	fmt.Println(subtle("Use 'br config get <key>' to see full values"))
-	fmt.Println(subtle("Use 'br config set <key> <value>' to modify writable keys"))
+	fmt.Println(subtle("Use 'runner config get <key>' to see full values"))
+	fmt.Println(subtle("Use 'runner config set <key> <value>' to modify writable keys"))
 
 	return nil
 }

@@ -20,7 +20,7 @@ import (
 // This file implements the browser single-sign-on flow on top of the SSH-key
 // identity model. Two paths are supported:
 //
-//   1. Silent pass-through (the `br web` happy path). A local CLI that holds a
+//   1. Silent pass-through (the `runner web` happy path). A local CLI that holds a
 //      registered SSH private key proves possession over /authn/* and receives a
 //      one-time ticket. Opening /authn/consume?ticket=... in the browser sets a
 //      session cookie. When Incus later redirects the browser to /authorize, the
@@ -29,7 +29,7 @@ import (
 //
 //   2. Challenge (anyone without a usable registered key). /authorize with no
 //      session renders an account picker that waits for an out-of-band approval:
-//      a terminal holding a registered key runs `br web approve <request-id>`,
+//      a terminal holding a registered key runs `runner web approve <request-id>`,
 //      which proves possession and binds that identity to the pending request.
 //      The browser polls /authorize/poll and proceeds once approved. A requester
 //      with no registered key can never satisfy the proof, so they stay blocked.
@@ -668,7 +668,7 @@ func (p *Provider) renderChallenge(w http.ResponseWriter, reqID string) {
 		RequestID:  reqID,
 		Accounts:   accts,
 		PollPath:   pathAuthorizePoll,
-		ApproveCmd: fmt.Sprintf("br web approve %s", reqID),
+		ApproveCmd: fmt.Sprintf("runner web approve %s", reqID),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := challengeTmpl.Execute(w, data); err != nil {
@@ -701,7 +701,7 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!doctype htm
 <p class="muted">Known accounts:</p>
 <ul>
 {{range .Accounts}}<li><code>{{.Fingerprint}}</code>{{if .Comment}} — {{.Comment}}{{end}}</li>
-{{else}}<li class="muted">No accounts registered. Add one with <code>br user add &lt;pubkey&gt;</code>.</li>
+{{else}}<li class="muted">No accounts registered. Add one with <code>runner user add &lt;pubkey&gt;</code>.</li>
 {{end}}</ul>
 <div id="status">Waiting for approval…</div>
 <script>

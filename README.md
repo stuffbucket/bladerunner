@@ -55,8 +55,8 @@ make sign
 Or manually:
 
 ```bash
-go build -o bin/br ./cmd/bladerunner
-codesign --entitlements vz.entitlements -s - bin/br
+go build -o bin/runner ./cmd/bladerunner
+codesign --entitlements vz.entitlements -s - bin/runner
 ```
 
 ## Run
@@ -64,38 +64,38 @@ codesign --entitlements vz.entitlements -s - bin/br
 Default (shared network + localhost forwarding):
 
 ```bash
-br start
+runner start
 ```
 
 With GUI console window:
 
 ```bash
-br start --gui
+runner start --gui
 ```
 
 Bridged network on `en0`:
 
 ```bash
-br start --network-mode bridged --bridge-interface en0
+runner start --network-mode bridged --bridge-interface en0
 ```
 
 Custom image path (raw disk image):
 
 ```bash
-br start --image-path /path/to/base.raw
+runner start --image-path /path/to/base.raw
 ```
 
 Custom log file path:
 
 ```bash
-br start --log-path /tmp/bladerunner.log
+runner start --log-path /tmp/bladerunner.log
 ```
 
 Optional log level. Accepts `debug`, `info`, `warn` (alias `warning`), or
 `error` (case-insensitive). Unknown or unset values default to `info`:
 
 ```bash
-BLADERUNNER_LOG_LEVEL=debug br start
+BLADERUNNER_LOG_LEVEL=debug runner start
 ```
 
 ## Access
@@ -130,6 +130,6 @@ curl --cert ~/.local/state/bladerunner/client.crt --key ~/.local/state/bladerunn
 - First boot can take several minutes while cloud-init installs and configures Incus.
 - A pre-baked bladerunner guest image (Debian Trixie + Incus + `br-agent`, built by `scripts/build-guest-image.sh` and published via the `build-guest-image` workflow) is the future default. While that release pipeline is bootstrapping it is opt-in: set `UseHostedGuestImage` (or pass `--image-url` with the GitHub Release URL) to use it. Once `guest-image-latest` is published the default will flip.
 - Downloaded base images are SHA-256 verified against a sidecar `.sha256` file. The check is strict for upstream Debian URLs and tolerant of a missing sidecar for GitHub Release URLs during the bootstrap window.
-- `br status` surfaces the pre-baked image build date from `/etc/bladerunner-image-version` when present.
+- `runner status` surfaces the pre-baked image build date from `/etc/bladerunner-image-version` when present.
 - GUI output is handled by VZ graphics window; serial console is logged at `console.log`.
 - Extended operations (download, VM readiness, Incus readiness) show live progress indicators in terminal.
