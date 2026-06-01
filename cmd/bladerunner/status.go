@@ -22,10 +22,6 @@ const (
 	rightPanelMin = panelWidth // never narrower than the left panel
 	rightPanelMax = 80         // cap so very long URLs don't stretch absurdly
 	edgeMargin    = 2          // columns kept clear at each terminal edge
-
-	// sepMarker is a placeholder line that render() expands to a full-width
-	// divider once the panel's final width is known.
-	sepMarker = "\x00sep\x00"
 )
 
 var statusCmd = &cobra.Command{
@@ -117,7 +113,11 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.rowIf("Cloud-init", getConfig(control.ConfigKeyCloudInitISO))
 	right.rowIf("Log", getConfig(control.ConfigKeyLogPath))
 
-	fmt.Println(title("Bladerunner Status"))
+	if b := ui.Banner(); b != "" {
+		fmt.Print(b) // gradient ASCII banner (includes its own margin)
+	} else {
+		fmt.Println(title("Bladerunner Status"))
+	}
 	fmt.Println(renderPanels(left, right))
 	fmt.Printf("  %s %s    %s %s\n",
 		subtle("Shell:"), command("br shell"),
@@ -145,10 +145,18 @@ func guestImageVersionForStatus(getConfig func(string) string) string {
 	return v
 }
 
-// panel accumulates rows of formatted text for a single column.
+// panel accumulates rows for a single status column. Rows are stored
+// structured (not pre-rendered) so render() can wrap each value within its own
+// column — continuation lines align under the value, not under the label.
 type panel struct {
 	title string
-	lines []string
+	rows  []panelRow
+}
+
+type panelRow struct {
+	label string // raw label; ignored for separators
+	value string // value, possibly already styled by the caller
+	sep   bool
 }
 
 func newPanel(name string) *panel {
@@ -156,8 +164,7 @@ func newPanel(name string) *panel {
 }
 
 func (p *panel) row(label, val string) {
-	padded := fmt.Sprintf("%-*s", labelWidth, label)
-	p.lines = append(p.lines, fmt.Sprintf("%s  %s", key(padded), val))
+	p.rows = append(p.rows, panelRow{label: label, value: val})
 }
 
 func (p *panel) rowIf(label, val string) {
@@ -173,36 +180,47 @@ func (p *panel) rowGiB(label, val string) {
 }
 
 func (p *panel) sep() {
-	p.lines = append(p.lines, sepMarker)
+	p.rows = append(p.rows, panelRow{sep: true})
 }
 
-// contentWidth is the visible width of the widest line (title or row), used to
-// let a panel hug its content. ANSI styling is excluded via lipgloss.Width.
+// labelColWidth is the width consumed by the label column plus its two-space
+// gutter, i.e. the column at which values (and their wrapped continuations)
+// begin.
+const labelColWidth = labelWidth + 2
+
+// contentWidth is the unwrapped width the panel wants: the title, or the label
+// column plus the widest value. Used to let the panel hug its content.
 func (p *panel) contentWidth() int {
 	w := lipgloss.Width(key(p.title))
-	for _, ln := range p.lines {
-		if ln == sepMarker {
+	for _, r := range p.rows {
+		if r.sep {
 			continue
 		}
-		if lw := lipgloss.Width(ln); lw > w {
+		if lw := labelColWidth + lipgloss.Width(r.value); lw > w {
 			w = lw
 		}
 	}
 	return w
 }
 
-// render lays the panel out at the given inner width, expanding sep markers to
-// full-width dividers.
+// render lays the panel out at the given inner width. Each row is a fixed-width
+// label cell joined to a value cell that wraps within the remaining columns, so
+// a wrapped value stays aligned under the value column rather than collapsing
+// to the left margin.
 func (p *panel) render(width int) string {
 	divider := subtle(strings.Repeat("─", width))
-	out := make([]string, 0, len(p.lines)+2)
+	valueWidth := max(width-labelColWidth, 1)
+
+	out := make([]string, 0, len(p.rows)+2)
 	out = append(out, key(p.title), divider)
-	for _, ln := range p.lines {
-		if ln == sepMarker {
+	for _, r := range p.rows {
+		if r.sep {
 			out = append(out, divider)
 			continue
 		}
-		out = append(out, ln)
+		labelCell := key(fmt.Sprintf("%-*s", labelWidth, r.label))
+		valueCell := lipgloss.NewStyle().Width(valueWidth).Render(r.value)
+		out = append(out, lipgloss.JoinHorizontal(lipgloss.Top, labelCell, "  ", valueCell))
 	}
 	return strings.Join(out, "\n")
 }
