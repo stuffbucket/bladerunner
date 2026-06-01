@@ -967,6 +967,52 @@ func TestLocalController(t *testing.T) {
 			t.Errorf("Stop() with nil func error = %v", err)
 		}
 	})
+
+	t.Run("Status is running when probe succeeds", func(t *testing.T) {
+		ctrl := NewLocalController(func() {})
+		ctrl.SetProbe(func(context.Context) error { return nil })
+		status, err := ctrl.Status(context.Background())
+		if err != nil {
+			t.Errorf("Status() error = %v", err)
+		}
+		if status != StatusRunning {
+			t.Errorf("Status() = %q, want %q", status, StatusRunning)
+		}
+	})
+
+	t.Run("Status is unreachable when probe fails", func(t *testing.T) {
+		ctrl := NewLocalController(func() {})
+		ctrl.SetProbe(func(context.Context) error {
+			return errors.New("connection reset by peer")
+		})
+		status, err := ctrl.Status(context.Background())
+		if err != nil {
+			t.Errorf("Status() error = %v", err)
+		}
+		if status != StatusUnreachable {
+			t.Errorf("Status() = %q, want %q", status, StatusUnreachable)
+		}
+	})
+
+	t.Run("stopped takes precedence over probe", func(t *testing.T) {
+		var probed atomic.Bool
+		ctrl := NewLocalController(func() {})
+		ctrl.SetProbe(func(context.Context) error {
+			probed.Store(true)
+			return nil
+		})
+		_ = ctrl.Stop(context.Background())
+		status, err := ctrl.Status(context.Background())
+		if err != nil {
+			t.Errorf("Status() error = %v", err)
+		}
+		if status != StatusStopped {
+			t.Errorf("Status() = %q, want %q", status, StatusStopped)
+		}
+		if probed.Load() {
+			t.Error("probe was called for a stopped controller; want skipped")
+		}
+	})
 }
 
 // --- Controller Interface Tests ---

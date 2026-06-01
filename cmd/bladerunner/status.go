@@ -59,8 +59,19 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		return v
 	}
 
+	// Color the status by health: running is green, an unreachable guest
+	// (host alive but guest not answering — e.g. kernel panic) is amber, and
+	// anything else (stopped/unknown) is red.
+	statusStyle := errorf
+	switch status {
+	case control.StatusRunning:
+		statusStyle = success
+	case control.StatusUnreachable:
+		statusStyle = warning
+	}
+
 	left := newPanel("VM")
-	left.row("Status", success(status))
+	left.row("Status", statusStyle(status))
 	left.rowIf("PID", getConfig(control.ConfigKeyPID))
 	left.rowIf("Name", getConfig(control.ConfigKeyName))
 	left.rowIf("Arch", getConfig(control.ConfigKeyArch))
@@ -68,6 +79,17 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	left.rowIf("CPUs", getConfig(control.ConfigKeyCPUs))
 	left.rowGiB("Memory", getConfig(control.ConfigKeyMemoryGiB))
 	left.rowGiB("Disk", getConfig(control.ConfigKeyDiskSizeGiB))
+	if nv := getConfig(control.ConfigKeyNestedVirt); nv != "" {
+		// "enabled" = Incus VMs work; "unsupported"/"disabled" = containers only.
+		nvStyle := subtle
+		switch nv {
+		case "enabled":
+			nvStyle = success
+		case "disabled":
+			nvStyle = warning
+		}
+		left.row("Incus VMs", nvStyle(nv))
+	}
 	left.sep()
 	if p := getConfig(control.ConfigKeyLocalSSHPort); p != "" {
 		left.row("SSH", "localhost:"+p)

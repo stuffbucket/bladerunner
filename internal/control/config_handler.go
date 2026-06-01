@@ -62,6 +62,7 @@ func NewConfigRouter(cfg *config.Config) *ConfigRouter {
 			ConfigKeyUseHostedGuestImage: {
 				getter: func() string { return strconv.FormatBool(cfg.UseHostedGuestImage) },
 			},
+			ConfigKeyNestedVirt: {getter: func() string { return cfg.NestedVirt }},
 			// ConfigKeyGuestImageVersion is read by the SSH-side helper in
 			// internal/vm; we register a getter that returns "" so the key is
 			// enumerable, but the live value is fetched on demand by the CLI.

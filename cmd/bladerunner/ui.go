@@ -14,6 +14,7 @@ var (
 	title   = ui.Title
 	subtle  = ui.Subtle
 	success = ui.Success
+	warning = ui.Warning
 	errorf  = ui.Error
 	key     = ui.Key
 	value   = ui.Value

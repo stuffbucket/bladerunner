@@ -37,8 +37,34 @@ type Runner struct {
 	reverseForwarders []*reversePortForwarder
 	agentListener     *agent.Listener
 	consoleLog        *logging.RotatingFile
+	progress          Progress
+	nestedVirt        string // resolved nested-virt state: enabled|unsupported|disabled
 	stopOnce          sync.Once
 	stopErr           error
+}
+
+// NestedVirtualizationSupported reports whether the host can run nested VMs
+// (Apple Silicon M3+ on macOS 15+). When true, bladerunner enables it so the
+// guest's Incus can launch VMs (`incus launch --vm`), not just containers.
+func NestedVirtualizationSupported() bool {
+	return vz.IsNestedVirtualizationSupported()
+}
+
+// NestedVirtState returns the resolved nested-virtualization state for this VM:
+// "enabled", "unsupported" (host can't), or "disabled" (opted out via config).
+// Empty until the platform has been configured (StartVM).
+func (r *Runner) NestedVirtState() string {
+	return r.nestedVirt
+}
+
+// SetProgress attaches a Progress reporter. Must be called before Start /
+// StartVM. Passing nil clears any previous reporter.
+func (r *Runner) SetProgress(p Progress) {
+	if p == nil {
+		r.progress = noopProgress{}
+		return
+	}
+	r.progress = p
 }
 
 // StartVMResult contains the initial state after VM starts running.
@@ -53,7 +79,7 @@ func NewRunner(cfg *config.Config) (*Runner, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &Runner{cfg: cfg}, nil
+	return &Runner{cfg: cfg, progress: NewTimedProgress()}, nil
 }
 
 // StartVM provisions and starts the VM, returning as soon as it's running.
@@ -117,17 +143,16 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 		return nil, fmt.Errorf("start vm: %w", err)
 	}
 
-	vmWait := logging.NewTimedProgress("Waiting for VM to reach running state", 2*time.Minute)
+	r.progress.Begin(StageVMBoot, "Waiting for VM to reach running state", 2*time.Minute)
 	if err := r.waitForRunning(ctx, 2*time.Minute, func(st vz.VirtualMachineState) {
 		msg := fmt.Sprintf("state=%s", st.String())
-		vmWait.SetStatus(msg)
+		r.progress.Substatus(StageVMBoot, msg)
 		log.Info("vm state changed", "state", st.String())
 	}); err != nil {
-		vmWait.Fail(err)
+		r.progress.Fail(StageVMBoot, err)
 		return nil, err
 	}
-	vmWait.SetStatus("running")
-	vmWait.Finish()
+	r.progress.Done(StageVMBoot)
 
 	log.Info("starting localhost forwarders")
 	if err := r.startForwarders(); err != nil {
@@ -192,17 +217,16 @@ func (r *Runner) WaitForIncus(ctx context.Context) (*report.StartupReport, error
 	incusCtx, cancel := context.WithTimeout(ctx, r.cfg.WaitForIncus)
 	defer cancel()
 
-	incusWait := logging.NewTimedProgress("Waiting for Incus API readiness", r.cfg.WaitForIncus)
+	r.progress.Begin(StageIncusWait, "Waiting for Incus API readiness", r.cfg.WaitForIncus)
 	serverInfo, err := incusctl.WaitForServer(incusCtx, endpoint, r.clientCrt, r.clientKey, 4*time.Second, func(p incusctl.WaitProgress) {
-		incusWait.SetStatus(fmt.Sprintf("attempt=%d %s", p.Attempt, summarizeErr(p.LastError)))
+		r.progress.Substatus(StageIncusWait, fmt.Sprintf("attempt=%d %s", p.Attempt, summarizeErr(p.LastError)))
 	})
 	if err != nil {
-		incusWait.Fail(err)
+		r.progress.Fail(StageIncusWait, err)
 		log.Warn("incus api was not ready before timeout; continuing with partial report", "endpoint", endpoint, "err", err)
 		serverInfo = nil
 	} else {
-		incusWait.SetStatus("ready")
-		incusWait.Finish()
+		r.progress.Done(StageIncusWait)
 	}
 
 	log.Info("assembling startup report")
@@ -359,6 +383,45 @@ func (r *Runner) waitForRunning(ctx context.Context, timeout time.Duration, onSt
 				// Other states (Starting, Pausing, etc.): continue waiting
 			}
 		}
+	}
+}
+
+// ProbeGuest checks guest liveness by opening a vsock connection to the
+// in-guest SSH bridge port and immediately closing it. A successful connect
+// means the guest kernel is alive and the vsock SSH forwarder is listening;
+// an error (typically ECONNRESET) means the guest is unreachable — kernel
+// panic, not yet booted, or the bridge is down. It returns an error when the
+// VM or its socket device is not yet available. The ctx bounds how long the
+// (blocking, cgo) dial may take.
+func (r *Runner) ProbeGuest(ctx context.Context) error {
+	if r.vm == nil {
+		return errors.New("vm not started")
+	}
+	socketDevices := r.vm.SocketDevices()
+	if len(socketDevices) == 0 {
+		return errors.New("vm has no virtio socket device")
+	}
+	device := socketDevices[0]
+
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan dialResult, 1)
+	go func() {
+		conn, err := device.Connect(r.cfg.VsockSSHPort)
+		ch <- dialResult{conn: conn, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case res := <-ch:
+		if res.err != nil {
+			return res.err
+		}
+		_ = res.conn.Close()
+		return nil
 	}
 }
 
