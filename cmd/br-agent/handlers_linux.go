@@ -95,14 +95,15 @@ func applyConfigPush(ctx context.Context, s *handlerState, args *agent.ConfigPus
 	}
 
 	keys := map[string]string{}
+	// Incus 6.x OIDC keys are oidc.* (not core.oidc.*, which it rejects).
 	if args.OIDCIssuer != "" {
-		keys["core.oidc.issuer"] = args.OIDCIssuer
+		keys["oidc.issuer"] = args.OIDCIssuer
 	}
 	if args.OIDCClientID != "" {
-		keys["core.oidc.client.id"] = args.OIDCClientID
+		keys["oidc.client.id"] = args.OIDCClientID
 	}
 	if args.OIDCAudience != "" {
-		keys["core.oidc.audience"] = args.OIDCAudience
+		keys["oidc.audience"] = args.OIDCAudience
 	}
 	if args.CoreHTTPSAddress != "" {
 		keys["core.https_address"] = args.CoreHTTPSAddress

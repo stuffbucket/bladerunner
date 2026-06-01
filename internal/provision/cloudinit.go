@@ -346,9 +346,11 @@ incus config set core.https_address "[::]:8443" || true
 # Configure Incus to trust the bladerunner local OIDC provider.
 # The issuer URL is the loopback address inside the guest, which is forwarded
 # over vsock to the bladerunner OIDC server on the host. See internal/oidc.
-incus config set core.oidc.issuer    "%s" || true
-incus config set core.oidc.client.id "%s" || true
-incus config set core.oidc.audience  "%s" || true
+# NOTE: the keys are oidc.* (Incus 6.x), NOT core.oidc.* — the latter are
+# rejected as unknown keys and silently swallowed by the trailing '|| true'.
+incus config set oidc.issuer    "%s" || true
+incus config set oidc.client.id "%s" || true
+incus config set oidc.audience  "%s" || true
 
 # Add the host client certificate to trust store (kept for the --auth=cert
 # fallback path; safe to leave even when OIDC is the primary auth method).

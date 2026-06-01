@@ -101,9 +101,9 @@ func TestApplyConfigPushWritesConfigAndSetsIncusKeys(t *testing.T) {
 	}
 
 	wantCalls := []string{
-		"incus config set core.oidc.issuer " + testIssuer,
-		"incus config set core.oidc.client.id bladerunner",
-		"incus config set core.oidc.audience bladerunner",
+		"incus config set oidc.issuer " + testIssuer,
+		"incus config set oidc.client.id bladerunner",
+		"incus config set oidc.audience bladerunner",
 		"incus config set core.https_address " + testIncusAPIAddr,
 		"systemctl daemon-reload",
 	}
@@ -117,7 +117,7 @@ func TestApplyConfigPushWritesConfigAndSetsIncusKeys(t *testing.T) {
 func TestApplyConfigPushIncusFailureIsLoggedNotFatal(t *testing.T) {
 	tmp := t.TempDir()
 	fr := newFakeRunner()
-	fr.errs["incus config set core.oidc.issuer "+testIssuer] = errors.New("boom")
+	fr.errs["incus config set oidc.issuer "+testIssuer] = errors.New("boom")
 	s := &handlerState{runner: fr, rootDir: tmp}
 	args := &agent.ConfigPushArgs{OIDCIssuer: testIssuer}
 	if err := applyConfigPush(context.Background(), s, args); err != nil {
