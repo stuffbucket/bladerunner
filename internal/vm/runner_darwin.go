@@ -103,6 +103,11 @@ func (r *Runner) SaveState(path string) error {
 	if err := r.vm.Pause(); err != nil {
 		return fmt.Errorf("pause vm: %w", err)
 	}
+	// VZ refuses to overwrite an existing save file, so clear any stale one.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		_ = r.vm.Resume()
+		return fmt.Errorf("remove stale saved state %s: %w", path, err)
+	}
 	if err := r.vm.SaveMachineStateToPath(path); err != nil {
 		_ = r.vm.Resume() // best effort: don't strand a paused VM on failure
 		return fmt.Errorf("save vm state: %w", err)
