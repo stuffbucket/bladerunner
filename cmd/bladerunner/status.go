@@ -113,8 +113,8 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.rowIf("Cloud-init", getConfig(control.ConfigKeyCloudInitISO))
 	right.rowIf("Log", getConfig(control.ConfigKeyLogPath))
 
-	if b := ui.Banner(); b != "" {
-		fmt.Print(b) // gradient ASCII banner (includes its own margin)
+	if b := bannerHeader(); b != "" {
+		fmt.Print(b) // gradient ASCII banner (includes its own top margin)
 	} else {
 		fmt.Println(title("Bladerunner Status"))
 	}
@@ -143,6 +143,40 @@ func guestImageVersionForStatus(getConfig func(string) string) string {
 		return ""
 	}
 	return v
+}
+
+// bannerHeader returns the gradient ASCII banner indented to align with the
+// panels' left margin, or "" when stdout isn't a TTY or the terminal is too
+// narrow to fit the banner plus that margin (the caller then prints the plain
+// text title instead).
+func bannerHeader() string {
+	b := ui.Banner()
+	if b == "" {
+		return ""
+	}
+	if tw := ui.TerminalWidth(); tw > 0 && ui.BannerWidth()+edgeMargin > tw {
+		return ""
+	}
+	return indentLeft(b, edgeMargin)
+}
+
+// indentLeft prefixes n spaces to every non-empty line of s. The pad is plain
+// spaces written before any ANSI sequences, so styling is preserved.
+func indentLeft(s string, n int) string {
+	pad := strings.Repeat(" ", n)
+	var b strings.Builder
+	first := true
+	for line := range strings.SplitSeq(s, "\n") {
+		if !first {
+			b.WriteByte('\n')
+		}
+		first = false
+		if line != "" {
+			b.WriteString(pad)
+		}
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // panel accumulates rows for a single status column. Rows are stored
