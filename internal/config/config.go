@@ -116,8 +116,11 @@ type Config struct {
 	// cloud-init bootstrap script. Requires br-agent to be present in the
 	// guest image (see #45) or installed via cloud-init user override.
 	UseGuestAgent bool
-	// OIDCIssuerURL is the issuer URL Incus sees from inside the VM.
-	// Defaults to http://127.0.0.1:<VsockOIDCPort>.
+	// OIDCIssuerURL is the issuer URL advertised in discovery and tokens. It uses
+	// the host provider's loopback port (LocalOIDCPort) so it resolves identically
+	// from inside the VM (Incus, via the guest→host vsock bridge) and on the host
+	// (the browser, direct) — which the browser authorization-code redirect needs.
+	// Defaults to http://127.0.0.1:<LocalOIDCPort>.
 	OIDCIssuerURL string
 	// OIDCClientID is the OAuth2 client_id Incus uses (and that this provider expects).
 	OIDCClientID string
@@ -208,38 +211,43 @@ func Default(baseDir string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Name:                appName,
-		Hostname:            appName,
-		StateDir:            baseDir,
-		VMDir:               baseDir,
-		DiskPath:            filepath.Join(baseDir, diskFileName),
-		DiskSizeGiB:         DefaultDiskSizeGiB,
-		BaseImageURL:        imageURL,
-		BaseImagePath:       "",
-		MachineIDPath:       filepath.Join(baseDir, machineIDFileName),
-		EFIVarsPath:         filepath.Join(baseDir, efiVarsFileName),
-		CloudInitISO:        filepath.Join(baseDir, cloudInitISOFileName),
-		CloudInitDir:        filepath.Join(baseDir, cloudInitDirName),
-		ConsoleLogPath:      filepath.Join(baseDir, consoleLogFileName),
-		LogPath:             filepath.Join(baseDir, logFileName),
-		ReportPath:          filepath.Join(baseDir, reportFileName),
-		MetadataPath:        filepath.Join(baseDir, metadataFileName),
-		SSHUser:             "incus",
-		SSHPublicKey:        "", // Set by EnsureSSHKeys
-		SSHPrivateKeyPath:   "", // Set by EnsureSSHKeys
-		SSHConfigPath:       "", // Set after VM starts
-		ClientCertPath:      filepath.Join(baseDir, clientCertFileName),
-		ClientKeyPath:       filepath.Join(baseDir, clientKeyFileName),
-		TrustPassword:       trustPassword,
-		LocalSSHPort:        DefaultLocalSSHPort,
-		LocalAPIPort:        DefaultLocalAPIPort,
-		LocalOIDCPort:       DefaultLocalOIDCPort,
-		VsockSSHPort:        DefaultVsockSSHPort,
-		VsockAPIPort:        DefaultVsockAPIPort,
-		VsockOIDCPort:       DefaultVsockOIDCPort,
-		AgentVsockPort:      DefaultAgentVsockPort,
-		UseGuestAgent:       false,
-		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultVsockOIDCPort),
+		Name:              appName,
+		Hostname:          appName,
+		StateDir:          baseDir,
+		VMDir:             baseDir,
+		DiskPath:          filepath.Join(baseDir, diskFileName),
+		DiskSizeGiB:       DefaultDiskSizeGiB,
+		BaseImageURL:      imageURL,
+		BaseImagePath:     "",
+		MachineIDPath:     filepath.Join(baseDir, machineIDFileName),
+		EFIVarsPath:       filepath.Join(baseDir, efiVarsFileName),
+		CloudInitISO:      filepath.Join(baseDir, cloudInitISOFileName),
+		CloudInitDir:      filepath.Join(baseDir, cloudInitDirName),
+		ConsoleLogPath:    filepath.Join(baseDir, consoleLogFileName),
+		LogPath:           filepath.Join(baseDir, logFileName),
+		ReportPath:        filepath.Join(baseDir, reportFileName),
+		MetadataPath:      filepath.Join(baseDir, metadataFileName),
+		SSHUser:           "incus",
+		SSHPublicKey:      "", // Set by EnsureSSHKeys
+		SSHPrivateKeyPath: "", // Set by EnsureSSHKeys
+		SSHConfigPath:     "", // Set after VM starts
+		ClientCertPath:    filepath.Join(baseDir, clientCertFileName),
+		ClientKeyPath:     filepath.Join(baseDir, clientKeyFileName),
+		TrustPassword:     trustPassword,
+		LocalSSHPort:      DefaultLocalSSHPort,
+		LocalAPIPort:      DefaultLocalAPIPort,
+		LocalOIDCPort:     DefaultLocalOIDCPort,
+		VsockSSHPort:      DefaultVsockSSHPort,
+		VsockAPIPort:      DefaultVsockAPIPort,
+		VsockOIDCPort:     DefaultVsockOIDCPort,
+		AgentVsockPort:    DefaultAgentVsockPort,
+		UseGuestAgent:     false,
+		// Issuer uses the host provider's loopback port (LocalOIDCPort), not the
+		// vsock-bridge port. The guest forwards 127.0.0.1:LocalOIDCPort over vsock
+		// to the host provider, so this single URL resolves identically from inside
+		// the guest (Incus, via the bridge) and on the host (the browser, direct) —
+		// which the browser-based authorization-code redirect requires.
+		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultLocalOIDCPort),
 		OIDCClientID:        DefaultOIDCClientID,
 		OIDCAudience:        DefaultOIDCAudience,
 		OIDCStateDir:        filepath.Join(baseDir, "oidc"),

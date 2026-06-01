@@ -127,7 +127,7 @@ func TestTokenEndpoint(t *testing.T) {
 		{
 			name: "unsupported grant type",
 			form: url.Values{
-				formFieldGrantType: {"authorization_code"},
+				formFieldGrantType: {"client_credentials"},
 			},
 			wantStatus: http.StatusBadRequest,
 			wantError:  "unsupported_grant_type",
@@ -173,17 +173,45 @@ func TestTokenEndpoint(t *testing.T) {
 	}
 }
 
-func TestAuthorizeStub(t *testing.T) {
+// TestAuthorizeChallengesWithoutSession verifies that hitting /authorize with no
+// session cookie renders the HTML challenge page (Case B) rather than silently
+// issuing a code.
+func TestAuthorizeChallengesWithoutSession(t *testing.T) {
 	p := newTestProvider(t)
 	srv := httptest.NewServer(p.Handler())
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + pathAuthorize)
+	// A no-redirect client so we can inspect the response directly.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(srv.URL + pathAuthorize +
+		"?response_type=code&client_id=bladerunner&redirect_uri=http://127.0.0.1:9999/cb&state=xyz")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 challenge page, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("expected html challenge, got content-type %q", ct)
+	}
+}
+
+// TestAuthorizeRequiresRedirectURI verifies the redirect_uri is mandatory and
+// must be loopback.
+func TestAuthorizeRequiresRedirectURI(t *testing.T) {
+	p := newTestProvider(t)
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + pathAuthorize + "?response_type=code")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 without redirect_uri, got %d", resp.StatusCode)
 	}
 }

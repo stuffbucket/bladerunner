@@ -338,7 +338,10 @@ date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 		cfg.SSHUser,
 		cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCAudience,
 		cfg.VsockSSHPort, cfg.VsockAPIPort,
-		cfg.VsockOIDCPort, cfg.VsockOIDCPort,
+		// The guest TCP listener binds LocalOIDCPort (the issuer's port) so the
+		// issuer URL resolves the same inside the guest as on the host; it then
+		// connects over vsock to the host provider on VsockOIDCPort.
+		cfg.LocalOIDCPort, cfg.VsockOIDCPort,
 	)
 }
 
