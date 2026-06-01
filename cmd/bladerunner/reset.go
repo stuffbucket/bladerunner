@@ -188,11 +188,11 @@ func reportResetHuman(o resetOutcome, all bool) {
 	}
 	fmt.Println()
 	if !all {
-		fmt.Printf("\nRun 'br start' to create a fresh VM.\n")
+		fmt.Printf("\nRun 'runner start' to create a fresh VM.\n")
 	}
 }
 
-// resetResult is the JSON payload emitted by `br reset --json`. Status is one
+// resetResult is the JSON payload emitted by `runner reset --json`. Status is one
 // of "no-vm", "nothing-to-reset", or "reset".
 type resetResult struct {
 	Status        string   `json:"status"`

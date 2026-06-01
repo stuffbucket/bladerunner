@@ -91,7 +91,7 @@ func (r *RotatingFile) File() *os.File {
 
 // Rotate forces lumberjack to close the current log file and start a new
 // one, even if MaxSize has not been reached. Callers use this to guarantee
-// that a long-running operation gets its own log file (e.g. `br start`
+// that a long-running operation gets its own log file (e.g. `runner start`
 // rotates console.log so the new boot's serial output isn't mixed with
 // the previous shutdown's). Returns any error from the rotator.
 func (r *RotatingFile) Rotate() error {

@@ -68,8 +68,8 @@ Test installation:
 ```bash
 brew uninstall bladerunner 2>/dev/null || true
 brew install stuffbucket/tap/bladerunner
-br --version
-codesign --display --entitlements - $(which br)
+runner --version
+codesign --display --entitlements - $(which runner)
 ```
 
 ## Checklist

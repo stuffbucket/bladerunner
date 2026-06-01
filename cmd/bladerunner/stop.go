@@ -101,7 +101,7 @@ func runStop(_ *cobra.Command, _ []string) error {
 	}
 
 	if !stopFlags.force {
-		err := fmt.Errorf("timeout waiting for VM to stop (use 'br stop --force' to terminate a hung/panicked VM)")
+		err := fmt.Errorf("timeout waiting for VM to stop (use 'runner stop --force' to terminate a hung/panicked VM)")
 		if jsonOutput {
 			emitJSONError(err)
 		}
@@ -111,7 +111,7 @@ func runStop(_ *cobra.Command, _ []string) error {
 	return forceTerminate(socketPath, hostPID)
 }
 
-// stopResult is the JSON payload emitted by `br stop --json` on success.
+// stopResult is the JSON payload emitted by `runner stop --json` on success.
 type stopResult struct {
 	Status string `json:"status"`           // "stopped" or "force-stopped"
 	Signal string `json:"signal,omitempty"` // "SIGTERM"|"SIGKILL" on the force path
@@ -200,7 +200,7 @@ func waitForProcessGone(pid int, within time.Duration) bool {
 }
 
 // cleanupSocket removes a stale control socket left behind by a force-kill so
-// later `br status`/`br start` don't see a dead listener.
+// later `runner status`/`runner start` don't see a dead listener.
 func cleanupSocket(socketPath string) {
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) && !jsonOutput {
 		fmt.Printf("note: could not remove stale control socket %s: %v\n", socketPath, err)

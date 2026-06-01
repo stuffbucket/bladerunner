@@ -31,7 +31,7 @@ type Progress interface {
 }
 
 // timedProgress wraps logging.TimedProgress so it satisfies Progress with one
-// spinner per active stage. This preserves the original `br start` UX when no
+// spinner per active stage. This preserves the original `runner start` UX when no
 // richer renderer is attached.
 type timedProgress struct {
 	mu     sync.Mutex

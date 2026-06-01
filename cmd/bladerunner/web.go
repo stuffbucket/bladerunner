@@ -42,12 +42,12 @@ var webCmd = &cobra.Command{
 	Long: `Open the Incus web UI in your browser, authenticated as your SSH identity.
 
 If your SSH private key is registered with bladerunner (the same key you use for
-'br ssh'), 'br web' proves possession of it and hands the browser a session so
+'runner ssh'), 'runner web' proves possession of it and hands the browser a session so
 you sail straight into the Incus UI with no prompt.
 
 If the key is missing or not registered, the browser instead lands on a sign-in
 challenge that asks you to pick an account and approve it from a terminal that
-holds a registered key (see 'br web approve').`,
+holds a registered key (see 'runner web approve').`,
 	RunE: runWeb,
 }
 
@@ -77,13 +77,13 @@ trusted SSL certificate, so https://127.0.0.1:<api-port>/ui/ loads without the
 The cert is self-signed by Incus but already carries 127.0.0.1 in its SANs, so
 trusting it is sufficient — nothing is regenerated. macOS will prompt you to
 authorize the keychain change. By default the cert goes in your login keychain;
-pass --system to install it system-wide (requires sudo). Undo with 'br web untrust'.`,
+pass --system to install it system-wide (requires sudo). Undo with 'runner web untrust'.`,
 	RunE: runWebTrust,
 }
 
 var webUntrustCmd = &cobra.Command{
 	Use:   "untrust",
-	Short: "Remove the Incus server certificate previously added by 'br web trust'",
+	Short: "Remove the Incus server certificate previously added by 'runner web trust'",
 	RunE:  runWebUntrust,
 }
 

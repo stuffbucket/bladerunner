@@ -64,14 +64,14 @@ jobs:
             depends_on arch: :arm64
 
             def install
-              bin.install "br"
+              bin.install "runner"
             end
 
             def post_install
               # Codesign with Virtualization.framework entitlements
               entitlements = prefix/"vz.entitlements"
               if entitlements.exist?
-                system "codesign", "--force", "--entitlements", entitlements, "-s", "-", bin/"br"
+                system "codesign", "--force", "--entitlements", entitlements, "-s", "-", bin/"runner"
               end
             end
 
@@ -81,12 +81,12 @@ jobs:
 
                 The binary has been codesigned with Virtualization.framework entitlements.
                 If you need to re-sign manually:
-                  codesign --entitlements #{prefix}/vz.entitlements -s - #{bin}/br
+                  codesign --entitlements #{prefix}/vz.entitlements -s - #{bin}/runner
               EOS
             end
 
             test do
-              assert_match version.to_s, shell_output("#{bin}/br --version")
+              assert_match version.to_s, shell_output("#{bin}/runner --version")
             end
           end
           FORMULA

@@ -19,7 +19,7 @@ var shellCmd = &cobra.Command{
 
 func runShell(cmd *cobra.Command, args []string) error {
 	if jsonOutput {
-		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "shell")
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'runner status --json' or 'runner ls --json' for machine-readable state", "shell")
 		emitJSONError(err)
 		return err
 	}

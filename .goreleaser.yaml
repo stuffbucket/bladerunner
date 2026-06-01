@@ -12,7 +12,7 @@ before:
 builds:
   - id: macos
     main: ./cmd/bladerunner
-    binary: br
+    binary: runner
     env:
       - CGO_ENABLED=1
     goos:
@@ -96,5 +96,5 @@ release:
 
     Manual downloads require codesigning after extraction:
     ```bash
-    codesign --entitlements vz.entitlements -s - ./br
+    codesign --entitlements vz.entitlements -s - ./runner
     ```

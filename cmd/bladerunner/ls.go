@@ -42,9 +42,9 @@ func runLs(_ *cobra.Command, _ []string) error {
 	return renderInstanceTable(os.Stdout, instances)
 }
 
-// --- JSON output (br ls --json) ---
+// --- JSON output (runner ls --json) ---
 
-// instanceReport is one row of `br ls`, mirroring the human table columns.
+// instanceReport is one row of `runner ls`, mirroring the human table columns.
 type instanceReport struct {
 	Name   string `json:"name"`
 	Type   string `json:"type"`

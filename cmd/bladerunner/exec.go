@@ -22,8 +22,8 @@ var execCmd = &cobra.Command{
 	Long: `Execute a command inside the named Incus instance. Use -- to separate
 br flags from the command. Examples:
 
-  br exec mybox -- ls /
-  br exec -i -t mybox -- /bin/bash`,
+  runner exec mybox -- ls /
+  runner exec -i -t mybox -- /bin/bash`,
 	Args:              cobra.MinimumNArgs(2),
 	RunE:              runExec,
 	ValidArgsFunction: instanceNameCompletion,
@@ -41,7 +41,7 @@ func (e *exitError) Error() string { return fmt.Sprintf("exit status %d", e.code
 
 func runExec(cmdCobra *cobra.Command, args []string) error {
 	if jsonOutput {
-		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "exec")
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'runner status --json' or 'runner ls --json' for machine-readable state", "exec")
 		emitJSONError(err)
 		return err
 	}

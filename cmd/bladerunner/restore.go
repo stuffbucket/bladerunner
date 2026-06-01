@@ -16,14 +16,14 @@ var restoreFlags struct {
 var restoreCmd = &cobra.Command{
 	Use:   "restore",
 	Short: "Start the VM by restoring a previously saved state",
-	Long: `Bring the VM up from a saved-state file (see 'br save') and resume the
+	Long: `Bring the VM up from a saved-state file (see 'runner save') and resume the
 guest where it left off, instead of cold-booting.
 
 The CPU/memory/disk configuration is read from the saved state's metadata, so
 you don't need to re-specify it. The restore is refused if the disk image has
 changed since the snapshot (which would corrupt the guest).
 
-This is a foreground process, like 'br start'. The VM must not already be
+This is a foreground process, like 'runner start'. The VM must not already be
 running.`,
 	RunE: runRestore,
 }
@@ -34,7 +34,7 @@ func init() {
 
 func runRestore(cmd *cobra.Command, args []string) error {
 	if control.NewClient(config.DefaultStateDir()).IsRunning() {
-		return jsonOrError(fmt.Errorf("VM is already running; stop it first ('br stop') before restoring"))
+		return jsonOrError(fmt.Errorf("VM is already running; stop it first ('runner stop') before restoring"))
 	}
 
 	path := restoreFlags.path
@@ -46,7 +46,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		path = cfg.SavedStatePath
 	}
 	if _, err := os.Stat(path); err != nil {
-		return jsonOrError(fmt.Errorf("saved state not found at %s (run 'br save' first): %w", path, err))
+		return jsonOrError(fmt.Errorf("saved state not found at %s (run 'runner save' first): %w", path, err))
 	}
 
 	// Hand off to the start flow in restore mode.

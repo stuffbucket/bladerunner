@@ -19,7 +19,7 @@ make all
 ### Building
 
 ```bash
-make build      # Build binary to ./bin/br
+make build      # Build binary to ./bin/runner
 make sign       # Build and sign with entitlements
 make run ARGS='--gui=false'  # Build, sign, and run
 ```
