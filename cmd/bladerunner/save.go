@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/vm"
 )
 
 var saveFlags struct {
@@ -48,6 +49,8 @@ func runSave(_ *cobra.Command, _ []string) error {
 		if err := os.Rename(savedPath, saveFlags.path); err != nil {
 			return jsonOrError(fmt.Errorf("move saved state to %s: %w", saveFlags.path, err))
 		}
+		// Keep the metadata sidecar alongside the save file.
+		_ = os.Rename(vm.SaveMetadataPath(savedPath), vm.SaveMetadataPath(saveFlags.path))
 		finalPath = saveFlags.path
 	}
 

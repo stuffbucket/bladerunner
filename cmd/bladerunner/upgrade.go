@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,13 +48,10 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Upgrading server %s → %s\n", subtle(serverVer), value(version))
 	}
 
-	// Match the running VM's resource config so the restored configuration is
-	// compatible with the saved state.
-	applyServerResourceConfig(client)
-
 	// Try a live save (keeping the guest paused so the disk stays consistent
-	// with the saved RAM). If save/restore isn't supported, fall back to a cold
-	// restart.
+	// with the saved RAM). The saved-state sidecar records the hardware config,
+	// so the restored server rebuilds a matching configuration automatically.
+	// If save/restore isn't supported, fall back to a cold restart.
 	savedPath, saveErr := client.SaveState(true)
 	if saveErr != nil {
 		return upgradeColdRestart(cmd, args, client, stateDir, saveErr)
@@ -95,20 +91,4 @@ func stopAndWait(client *control.Client, stateDir string) error {
 		return fmt.Errorf("old server did not exit within %s", upgradeStopTimeout)
 	}
 	return nil
-}
-
-// applyServerResourceConfig copies the running VM's CPU/memory/disk settings
-// into startFlags so the upgraded server builds a matching configuration (a
-// prerequisite for restoring the saved state).
-func applyServerResourceConfig(client *control.Client) {
-	get := func(k string) string { v, _ := client.GetConfig(k); return v }
-	if v, err := strconv.ParseUint(get(control.ConfigKeyCPUs), 10, 32); err == nil && v > 0 {
-		startFlags.cpus = uint(v)
-	}
-	if v, err := strconv.ParseUint(get(control.ConfigKeyMemoryGiB), 10, 64); err == nil && v > 0 {
-		startFlags.memory = v
-	}
-	if v, err := strconv.Atoi(get(control.ConfigKeyDiskSizeGiB)); err == nil && v > 0 {
-		startFlags.disk = v
-	}
 }

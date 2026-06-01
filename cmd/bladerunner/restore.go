@@ -19,8 +19,9 @@ var restoreCmd = &cobra.Command{
 	Long: `Bring the VM up from a saved-state file (see 'br save') and resume the
 guest where it left off, instead of cold-booting.
 
-The VM configuration (CPUs, memory, disk) must match the one that produced the
-saved state; pass the same start flags if you used non-default values.
+The CPU/memory/disk configuration is read from the saved state's metadata, so
+you don't need to re-specify it. The restore is refused if the disk image has
+changed since the snapshot (which would corrupt the guest).
 
 This is a foreground process, like 'br start'. The VM must not already be
 running.`,
@@ -29,10 +30,6 @@ running.`,
 
 func init() {
 	restoreCmd.Flags().StringVar(&restoreFlags.path, "path", "", "Saved-state file (default: <state-dir>/saved-state.bin)")
-	// Accept the same resource flags as start so the restored config can match.
-	restoreCmd.Flags().UintVar(&startFlags.cpus, "cpus", config.DefaultCPUs, "Number of CPUs (must match the saved VM)")
-	restoreCmd.Flags().Uint64Var(&startFlags.memory, "memory", config.DefaultMemoryGiB, "Memory in GiB (must match the saved VM)")
-	restoreCmd.Flags().IntVar(&startFlags.disk, "disk", config.DefaultDiskSizeGiB, "Disk size in GiB (must match the saved VM)")
 }
 
 func runRestore(cmd *cobra.Command, args []string) error {

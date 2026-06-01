@@ -113,6 +113,41 @@ func (r *Runner) SaveState(path string) error {
 		return fmt.Errorf("save vm state: %w", err)
 	}
 	r.savedState = true
+
+	// Record the snapshot's hardware config + disk stamp alongside the file so
+	// restore can rebuild a matching configuration and detect a changed disk.
+	// Written while paused (disk frozen). Non-fatal: the save itself succeeded.
+	if err := writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.DiskPath); err != nil {
+		logging.L().Warn("could not write saved-state metadata sidecar", "err", err)
+	}
+	return nil
+}
+
+// prepareRestore loads the saved-state sidecar (when present), applies the
+// snapshot's hardware configuration so the VZ config matches, and refuses the
+// restore if the disk has changed since the snapshot. A missing sidecar (an
+// older save) degrades to the current config with no disk check.
+func (r *Runner) prepareRestore() error {
+	meta, err := LoadSaveMetadata(r.restoreFrom)
+	if err != nil {
+		if os.IsNotExist(err) {
+			logging.L().Warn("no saved-state metadata sidecar; using current config and skipping disk-stamp check", "save", r.restoreFrom)
+			return nil
+		}
+		return fmt.Errorf("read saved-state metadata: %w", err)
+	}
+	if meta.CPUs > 0 {
+		r.cfg.CPUs = meta.CPUs
+	}
+	if meta.MemoryGiB > 0 {
+		r.cfg.MemoryGiB = meta.MemoryGiB
+	}
+	if meta.DiskSizeGiB > 0 {
+		r.cfg.DiskSizeGiB = meta.DiskSizeGiB
+	}
+	if err := meta.VerifyDisk(); err != nil {
+		return fmt.Errorf("refusing restore: %w", err)
+	}
 	return nil
 }
 
@@ -157,6 +192,15 @@ func NewRunner(cfg *config.Config) (*Runner, error) {
 // Call WaitForIncus() separately to wait for cloud-init and Incus API readiness.
 func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	log := logging.L()
+
+	// On restore, adopt the snapshot's hardware config and verify the disk
+	// hasn't changed before touching anything.
+	if r.restoreFrom != "" {
+		if err := r.prepareRestore(); err != nil {
+			return nil, err
+		}
+	}
+
 	log.Info("starting VM provisioning", "name", r.cfg.Name, "vm_dir", r.cfg.VMDir, "cpus", r.cfg.CPUs, "memory_gib", r.cfg.MemoryGiB)
 
 	if err := ensureVMDir(r.cfg); err != nil {
