@@ -10,6 +10,9 @@ import (
 // so that agents and scripts can consume them.
 var jsonOutput bool
 
+// jsonFieldStatus is the common "status" key used across command JSON results.
+const jsonFieldStatus = "status"
+
 // emitJSON writes v to stdout as indented JSON followed by a newline. Commands
 // gather their result into a struct or map and call this when jsonOutput is set.
 func emitJSON(v any) error {

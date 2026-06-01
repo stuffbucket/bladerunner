@@ -30,14 +30,6 @@ type Progress interface {
 	Fail(stage string, err error)
 }
 
-// noopProgress is used when a Runner has no progress reporter attached.
-type noopProgress struct{}
-
-func (noopProgress) Begin(string, string, time.Duration) {}
-func (noopProgress) Substatus(string, string)            {}
-func (noopProgress) Done(string)                         {}
-func (noopProgress) Fail(string, error)                  {}
-
 // timedProgress wraps logging.TimedProgress so it satisfies Progress with one
 // spinner per active stage. This preserves the original `br start` UX when no
 // richer renderer is attached.

@@ -314,13 +314,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 // foreground server); agents read this single object to learn the endpoints.
 func startReportJSON(cfg *config.Config, endpoint string, bootErr error) error {
 	r := map[string]any{
-		"status": "running",
-		"ssh":    fmt.Sprintf("localhost:%d", cfg.LocalSSHPort),
-		"api":    endpoint,
-		"log":    cfg.LogPath,
+		jsonFieldStatus: "running",
+		"ssh_addr":      fmt.Sprintf("localhost:%d", cfg.LocalSSHPort),
+		"api":           endpoint,
+		"log":           cfg.LogPath,
 	}
 	if bootErr != nil {
-		r["status"] = "running-degraded"
+		r[jsonFieldStatus] = "running-degraded"
 		r["boot_error"] = bootErr.Error()
 		r["console_log"] = cfg.ConsoleLogPath
 	}
@@ -361,6 +361,15 @@ func printRunningSummary(cfg *config.Config, endpoint string, bootErr error) {
 	fmt.Println()
 }
 
+// Board stage IDs (kept as constants so they're referenced consistently across
+// the stage list, the runner-stage mapping, and the console tailer).
+const (
+	boardStageVMBoot    = "vm-boot"
+	boardStageCloudInit = "cloud-init"
+	boardStageSSH       = "ssh"
+	boardStageIncusWait = "incus-wait"
+)
+
 // startBootBoard constructs the split-view boot board, wires it into the
 // runner as the progress reporter, and starts a console.log tailer that
 // feeds raw lines into the tail panel and advances stage state from parsed
@@ -371,10 +380,10 @@ func startBootBoard(ctx context.Context, cfg *config.Config, runner *vm.Runner) 
 		return nil, func() {}
 	}
 	stages := []board.Stage{
-		{ID: "vm-boot", Label: "VM running"},
-		{ID: "cloud-init", Label: "cloud-init complete"},
-		{ID: "ssh", Label: "SSH ready"},
-		{ID: "incus-wait", Label: "Incus API ready"},
+		{ID: boardStageVMBoot, Label: "VM running"},
+		{ID: boardStageCloudInit, Label: "cloud-init complete"},
+		{ID: boardStageSSH, Label: "SSH ready"},
+		{ID: boardStageIncusWait, Label: "Incus API ready"},
 	}
 	brd := board.New(stages, board.Options{
 		Out:            os.Stderr,
@@ -423,9 +432,9 @@ func (a *boardAdapter) Fail(stage string, err error) {
 func mapRunnerStage(s string) string {
 	switch s {
 	case vm.StageVMBoot:
-		return "vm-boot"
+		return boardStageVMBoot
 	case vm.StageIncusWait:
-		return "incus-wait"
+		return boardStageIncusWait
 	}
 	return ""
 }
@@ -448,20 +457,20 @@ func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
 		}
 		if (ev.Status.KernelBooted || ev.Status.SystemdReached) && !seenCIBegin {
 			seenCIBegin = true
-			b.Begin("cloud-init")
+			b.Begin(boardStageCloudInit)
 		}
 		if ev.Status.CloudInitFailed && !seenCIFail {
 			seenCIFail = true
-			b.Fail("cloud-init", fmt.Errorf("cloud-init reported failure (see console.log)"))
+			b.Fail(boardStageCloudInit, fmt.Errorf("cloud-init reported failure (see console.log)"))
 		}
 		if ev.Status.CloudInitDone && !seenCIDone {
 			seenCIDone = true
-			b.Complete("cloud-init")
-			b.Begin("ssh")
+			b.Complete(boardStageCloudInit)
+			b.Begin(boardStageSSH)
 		}
 		if ev.Status.SSHReady && !seenSSH {
 			seenSSH = true
-			b.Complete("ssh")
+			b.Complete(boardStageSSH)
 		}
 	}
 }

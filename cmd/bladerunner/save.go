@@ -55,7 +55,7 @@ func runSave(_ *cobra.Command, _ []string) error {
 	}
 
 	if jsonOutput {
-		return emitJSON(map[string]string{"status": "saved", "path": finalPath})
+		return emitJSON(map[string]string{jsonFieldStatus: "saved", "path": finalPath})
 	}
 	fmt.Printf("%s VM state saved to %s\n", success("✓"), value(finalPath))
 	return nil
