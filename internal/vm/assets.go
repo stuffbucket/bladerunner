@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -269,21 +271,80 @@ func convertQcow2ToRaw(qcow2Path string) error {
 	return nil
 }
 
+// Image-download tuning. cloud.debian.org 302-redirects to regional mirrors,
+// some of which accept the TLS connection but never send a response (or stall
+// mid-body). Without bounds the download hangs forever; these timeouts make it
+// fail fast so the retry loop can land on a healthy mirror.
+const (
+	imageConnectTimeout  = 30 * time.Second // dial + TLS handshake
+	imageHeaderTimeout   = 45 * time.Second // server must start responding
+	imageStallTimeout    = 60 * time.Second // max gap between received chunks
+	imageKeepAlive       = 30 * time.Second
+	imageIdleConnTimeout = 90 * time.Second
+	imageRetryBackoff    = 2 * time.Second
+	imageDownloadRetries = 3
+)
+
+func imageHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   imageConnectTimeout,
+				KeepAlive: imageKeepAlive,
+			}).DialContext,
+			TLSHandshakeTimeout:   imageConnectTimeout,
+			ResponseHeaderTimeout: imageHeaderTimeout,
+			IdleConnTimeout:       imageIdleConnTimeout,
+			ForceAttemptHTTP2:     true,
+		},
+	}
+}
+
+// downloadFile fetches url to path, retrying on transient failures (each retry
+// re-resolves the cloud.debian.org redirect and often lands on a different
+// mirror). Connection, header, and stall timeouts bound every attempt.
 func downloadFile(ctx context.Context, url, path string) error {
+	var lastErr error
+	for attempt := 1; attempt <= imageDownloadRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := downloadOnce(ctx, url, path)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		logging.L().Warn("base image download attempt failed; retrying",
+			"attempt", attempt, "max", imageDownloadRetries, "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * imageRetryBackoff):
+		}
+	}
+	return fmt.Errorf("download base image after %d attempts: %w", imageDownloadRetries, lastErr)
+}
+
+func downloadOnce(ctx context.Context, url, path string) error {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	// A cancelable child context lets the stall watchdog abort an in-flight read.
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("create download request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := imageHTTPClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("download base image: %w", err)
+		return fmt.Errorf("connect/headers: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download base image failed: %s", resp.Status)
+		return fmt.Errorf("unexpected status: %s", resp.Status)
 	}
 
 	tmpPath := path + ".tmp"
@@ -295,15 +356,25 @@ func downloadFile(ctx context.Context, url, path string) error {
 	}
 
 	progress := logging.NewByteProgress("Downloading base image", resp.ContentLength)
-	if _, err := io.Copy(f, io.TeeReader(resp.Body, progress)); err != nil {
-		progress.Fail(err)
-		_ = f.Close()
-		return fmt.Errorf("write image to disk: %w", err)
+	sr := newStallReader(io.TeeReader(resp.Body, progress), cancel, imageStallTimeout)
+	sr.arm()
+	_, copyErr := io.Copy(f, sr)
+	sr.disarm()
+	closeErr := f.Close()
+
+	if copyErr != nil {
+		progress.Fail(copyErr)
+		_ = os.Remove(tmpPath)
+		if sr.stalled() {
+			return fmt.Errorf("download stalled: no data for %s", imageStallTimeout)
+		}
+		return fmt.Errorf("write image to disk: %w", copyErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp image file: %w", closeErr)
 	}
 	progress.Finish()
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close temp image file: %w", err)
-	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("move downloaded image into place: %w", err)
@@ -311,3 +382,40 @@ func downloadFile(ctx context.Context, url, path string) error {
 	logging.L().Info("download complete", "url", url, "path", path, "elapsed", time.Since(start).Round(time.Millisecond).String())
 	return nil
 }
+
+// stallReader wraps a reader and cancels the request if no bytes are read for
+// the configured timeout, catching mirrors that hang mid-transfer.
+type stallReader struct {
+	r       io.Reader
+	cancel  context.CancelFunc
+	timeout time.Duration
+	timer   *time.Timer
+	didFire atomic.Bool
+}
+
+func newStallReader(r io.Reader, cancel context.CancelFunc, timeout time.Duration) *stallReader {
+	return &stallReader{r: r, cancel: cancel, timeout: timeout}
+}
+
+func (s *stallReader) arm() {
+	s.timer = time.AfterFunc(s.timeout, func() {
+		s.didFire.Store(true)
+		s.cancel()
+	})
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 && s.timer != nil {
+		s.timer.Reset(s.timeout)
+	}
+	return n, err
+}
+
+func (s *stallReader) disarm() {
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+}
+
+func (s *stallReader) stalled() bool { return s.didFire.Load() }
