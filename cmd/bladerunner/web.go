@@ -65,51 +65,60 @@ func init() {
 	webCmd.AddCommand(webApproveCmd)
 }
 
-// webEndpoints resolves the running VM's provider URL, Incus UI URL and SSH key
-// path from the control socket.
-func webEndpoints() (providerBase, incusUI, keyPath string, err error) {
+// webEndpoints resolves the running VM's provider URL, Incus UI URLs and SSH key
+// path from the control socket. incusUI is the UI root (for the manual-login
+// fallback); incusLogin is Incus's /oidc/login entry point, which initiates the
+// OIDC redirect itself so the browser lands authenticated without the user
+// having to click "Login with SSO" on the Incus login page.
+func webEndpoints() (providerBase, incusUI, incusLogin, keyPath string, err error) {
 	client, err := requireRunningVM()
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 
 	oidcPort, err := client.GetConfig(control.ConfigKeyLocalOIDCPort)
 	if err != nil {
 		logging.L().Debug("get local-oidc-port failed", "err", err)
-		return "", "", "", errVMNotRunning
+		return "", "", "", "", errVMNotRunning
 	}
 	if oidcPort == "" || oidcPort == "0" {
-		return "", "", "", errors.New("the local OIDC provider is disabled (LocalOIDCPort=0); web SSO is unavailable")
+		return "", "", "", "", errors.New("the local OIDC provider is disabled (LocalOIDCPort=0); web SSO is unavailable")
 	}
 	apiPort, err := client.GetConfig(control.ConfigKeyLocalAPIPort)
 	if err != nil {
 		logging.L().Debug("get local-api-port failed", "err", err)
-		return "", "", "", errVMNotRunning
+		return "", "", "", "", errVMNotRunning
 	}
 	keyPath, _ = client.GetConfig(control.ConfigKeySSHPrivateKeyPath)
 
 	providerBase = fmt.Sprintf("http://127.0.0.1:%s", oidcPort)
 	incusUI = fmt.Sprintf("https://127.0.0.1:%s/ui/", apiPort)
-	return providerBase, incusUI, keyPath, nil
+	incusLogin = fmt.Sprintf("https://127.0.0.1:%s/oidc/login", apiPort)
+	return providerBase, incusUI, incusLogin, keyPath, nil
 }
 
 func runWeb(_ *cobra.Command, _ []string) error {
-	providerBase, incusUI, keyPath, err := webEndpoints()
+	providerBase, incusUI, incusLogin, keyPath, err := webEndpoints()
 	if err != nil {
 		return err
 	}
 
 	ticket, perr := proveAndGetTicket(providerBase, keyPath)
 	if perr != nil {
-		// No usable registered key: fall back to the browser challenge.
+		// No usable registered key: fall back to the browser challenge on the UI
+		// login page, where the user can pick SSO or a client certificate.
 		fmt.Printf("%s %s\n", subtle("Could not sign in with your SSH key:"), perr.Error())
 		fmt.Println(subtle("Opening the Incus web UI; you'll be challenged to pick an account."))
 		return openBrowser(incusUI)
 	}
 
+	// next=/oidc/login: consume sets the SSO session cookie, then redirects into
+	// Incus's OIDC login, which bounces to the provider's /authorize. Because the
+	// cookie is already set, /authorize issues a code silently and the browser
+	// lands on the authenticated UI — no login page, no button to click.
 	consume := providerBase + authnConsumePath +
 		"?ticket=" + url.QueryEscape(ticket) +
-		"&next=" + url.QueryEscape(incusUI)
+		"&next=" + url.QueryEscape(incusLogin)
 	fmt.Printf("%s Signing in to Incus as your SSH identity…\n", success("✓"))
 	return openBrowser(consume)
 }
@@ -119,7 +128,7 @@ func runWebApprove(_ *cobra.Command, args []string) error {
 	if reqID == "" {
 		return errors.New("request id is required")
 	}
-	providerBase, _, keyPath, err := webEndpoints()
+	providerBase, _, _, keyPath, err := webEndpoints()
 	if err != nil {
 		return err
 	}
