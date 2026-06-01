@@ -62,6 +62,16 @@ const (
 
 	randTokenBytes = 32
 	reqIDBytes     = 16
+
+	// Repeated string literals lifted to constants (goconst).
+	pkceMethodS256       = "S256"
+	pkceMethodPlain      = "plain"
+	statusApproved       = "approved"
+	responseTypeCode     = "code"
+	formFieldNonce       = "nonce"
+	formFieldFingerprint = "fingerprint"
+	formFieldSignature   = "signature"
+	fieldStatus          = "status"
 )
 
 // grant is an authenticated identity bound to a ticket/session, with an expiry.
@@ -339,12 +349,12 @@ func verifyPKCE(challenge, method, verifier string) error {
 		return errors.New("code_verifier required")
 	}
 	switch method {
-	case "S256":
+	case pkceMethodS256:
 		sum := sha256.Sum256([]byte(verifier))
 		if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
 			return errors.New("pkce verification failed")
 		}
-	case "plain", "":
+	case pkceMethodPlain, "":
 		if verifier != challenge {
 			return errors.New("pkce verification failed")
 		}
@@ -384,7 +394,7 @@ func buildCodeRedirect(redirectURI, code, state string) string {
 		return redirectURI
 	}
 	q := u.Query()
-	q.Set("code", code)
+	q.Set(responseTypeCode, code)
 	if state != "" {
 		q.Set("state", state)
 	}
@@ -404,7 +414,7 @@ func (p *Provider) handleAuthnNonce(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"nonce": n})
+	writeJSON(w, http.StatusOK, map[string]string{formFieldNonce: n})
 }
 
 func (p *Provider) handleAuthnExchange(w http.ResponseWriter, r *http.Request) {
@@ -435,6 +445,8 @@ func (p *Provider) handleAuthnConsume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
+	//nolint:gosec // G124: the provider serves plain HTTP on loopback; setting
+	// Secure would stop the cookie from ever being sent. HttpOnly+SameSite are set.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    sid,
@@ -443,6 +455,7 @@ func (p *Provider) handleAuthnConsume(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(sessionTTL),
 	})
+	//nolint:gosec // G710: sanitizeNext restricts the target to loopback/relative URLs.
 	http.Redirect(w, r, sanitizeNext(r.URL.Query().Get("next")), http.StatusFound)
 }
 
@@ -460,7 +473,7 @@ func (p *Provider) handleAuthnApprove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "invalid_request", "no such pending request")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+	writeJSON(w, http.StatusOK, map[string]string{fieldStatus: statusApproved})
 }
 
 // verifyProofRequest parses a POSTed SSH-key proof (fingerprint+nonce+signature),
@@ -477,9 +490,9 @@ func (p *Provider) verifyProofRequest(w http.ResponseWriter, r *http.Request) (I
 		writeError(w, http.StatusBadRequest, "invalid_request", "cannot parse form")
 		return Identity{}, false
 	}
-	fingerprint := strings.TrimSpace(r.PostForm.Get("fingerprint"))
-	nonce := r.PostForm.Get("nonce")
-	signature := r.PostForm.Get("signature")
+	fingerprint := strings.TrimSpace(r.PostForm.Get(formFieldFingerprint))
+	nonce := r.PostForm.Get(formFieldNonce)
+	signature := r.PostForm.Get(formFieldSignature)
 	if fingerprint == "" || nonce == "" || signature == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "fingerprint, nonce and signature are required")
 		return Identity{}, false
@@ -521,7 +534,8 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "redirect_uri must be loopback")
 		return
 	}
-	if respType != "" && respType != "code" {
+	if respType != "" && respType != responseTypeCode {
+		//nolint:gosec // G710: redirectURI is validated as loopback above before any redirect.
 		http.Redirect(w, r, buildErrorRedirect(redirectURI, "unsupported_response_type", state), http.StatusFound)
 		return
 	}
@@ -534,6 +548,7 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "server_error", cerr.Error())
 				return
 			}
+			//nolint:gosec // G710: redirectURI is validated as loopback above before any redirect.
 			http.Redirect(w, r, buildCodeRedirect(redirectURI, code, state), http.StatusFound)
 			return
 		}
@@ -552,11 +567,11 @@ func (p *Provider) handleAuthorizePoll(w http.ResponseWriter, r *http.Request) {
 	reqID := r.URL.Query().Get("request_id")
 	g, params, approved, found := p.sso.takeApproved(reqID)
 	if !found {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "expired"})
+		writeJSON(w, http.StatusOK, map[string]string{fieldStatus: "expired"})
 		return
 	}
 	if !approved {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "pending"})
+		writeJSON(w, http.StatusOK, map[string]string{fieldStatus: "pending"})
 		return
 	}
 	code, err := p.sso.newCode(g, params.clientID, params.redirectURI, params.codeChallenge, params.codeMethod)
@@ -565,8 +580,8 @@ func (p *Provider) handleAuthorizePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"status":   "approved",
-		"redirect": buildCodeRedirect(params.redirectURI, code, params.state),
+		fieldStatus: statusApproved,
+		"redirect":  buildCodeRedirect(params.redirectURI, code, params.state),
 	})
 }
 
@@ -587,7 +602,7 @@ func buildErrorRedirect(redirectURI, errCode, state string) string {
 // handleAuthCodeGrant redeems an authorization code at the token endpoint.
 // r.PostForm is already parsed by handleToken.
 func (p *Provider) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
-	code := r.PostForm.Get("code")
+	code := r.PostForm.Get(responseTypeCode)
 	redirectURI := r.PostForm.Get("redirect_uri")
 	verifier := r.PostForm.Get("code_verifier")
 	clientID := r.PostForm.Get("client_id")

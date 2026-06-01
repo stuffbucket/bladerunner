@@ -108,7 +108,7 @@ func redeemCodeForToken(t *testing.T, p *Provider, base, code, redirectURI, veri
 	t.Helper()
 	form := url.Values{
 		formFieldGrantType: {grantTypeAuthCode},
-		"code":             {code},
+		responseTypeCode:   {code},
 		"redirect_uri":     {redirectURI},
 		"client_id":        {oidcClientID},
 	}
@@ -157,7 +157,7 @@ func TestSilentSSOFlow(t *testing.T) {
 	// Step 1: proof -> ticket.
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
 	exResp, err := http.PostForm(srv.URL+pathAuthnExchange, url.Values{
-		"fingerprint": {fp}, "nonce": {nonce}, "signature": {sig},
+		formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	if err != nil {
 		t.Fatalf("exchange: %v", err)
@@ -200,7 +200,7 @@ func TestSilentSSOFlow(t *testing.T) {
 		t.Fatalf("authorize status=%d want 302 (silent)", aResp.StatusCode)
 	}
 	loc, _ := url.Parse(aResp.Header.Get("Location"))
-	code := loc.Query().Get("code")
+	code := loc.Query().Get(responseTypeCode)
 	if code == "" {
 		t.Fatalf("no code in redirect %s", aResp.Header.Get("Location"))
 	}
@@ -228,7 +228,7 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
 	exResp, _ := http.PostForm(srv.URL+pathAuthnExchange, url.Values{
-		"fingerprint": {fp}, "nonce": {nonce}, "signature": {sig},
+		formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	var ex struct {
 		Ticket string `json:"ticket"`
@@ -253,7 +253,7 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 		"&code_challenge=" + challenge + "&code_challenge_method=S256")
 	_ = aResp.Body.Close()
 	loc, _ := url.Parse(aResp.Header.Get("Location"))
-	code := loc.Query().Get("code")
+	code := loc.Query().Get(responseTypeCode)
 	if code == "" {
 		t.Fatal("no code")
 	}
@@ -261,7 +261,7 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 	// Wrong verifier rejected.
 	badForm := url.Values{
 		formFieldGrantType: {grantTypeAuthCode},
-		"code":             {code},
+		responseTypeCode:   {code},
 		"redirect_uri":     {redirectURI},
 		"code_verifier":    {"wrong-verifier"},
 	}
@@ -278,7 +278,7 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 		"&code_challenge=" + challenge + "&code_challenge_method=S256")
 	_ = aResp2.Body.Close()
 	loc2, _ := url.Parse(aResp2.Header.Get("Location"))
-	claims := redeemCodeForToken(t, p, srv.URL, loc2.Query().Get("code"), redirectURI, verifier)
+	claims := redeemCodeForToken(t, p, srv.URL, loc2.Query().Get(responseTypeCode), redirectURI, verifier)
 	if claims.Subject != fp {
 		t.Fatalf("sub=%s want %s", claims.Subject, fp)
 	}
@@ -318,7 +318,7 @@ func TestChallengeApproveFlow(t *testing.T) {
 	// Approve from a terminal that holds the key.
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
 	apResp, err := http.PostForm(srv.URL+pathAuthnApprove, url.Values{
-		"request_id": {reqID}, "fingerprint": {fp}, "nonce": {nonce}, "signature": {sig},
+		"request_id": {reqID}, formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	if err != nil {
 		t.Fatalf("approve: %v", err)
@@ -330,14 +330,14 @@ func TestChallengeApproveFlow(t *testing.T) {
 	}
 
 	pr := pollOnce(t, srv.URL, reqID)
-	if pr.Status != "approved" {
+	if pr.Status != statusApproved {
 		t.Fatalf("status=%s want approved", pr.Status)
 	}
 	loc, _ := url.Parse(pr.Redirect)
 	if loc.Query().Get("state") != "foo" {
 		t.Fatalf("state not echoed: %s", pr.Redirect)
 	}
-	claims := redeemCodeForToken(t, p, srv.URL, loc.Query().Get("code"), redirectURI, "")
+	claims := redeemCodeForToken(t, p, srv.URL, loc.Query().Get(responseTypeCode), redirectURI, "")
 	if claims.Subject != ident.Fingerprint {
 		t.Fatalf("sub=%s want %s", claims.Subject, ident.Fingerprint)
 	}
@@ -352,7 +352,7 @@ func TestExchangeRejectsUnregisteredKey(t *testing.T) {
 	_, signer := genKeyAndSigner(t, "mallory@host") // never added to the store
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
 	resp, err := http.PostForm(srv.URL+pathAuthnExchange, url.Values{
-		"fingerprint": {fp}, "nonce": {nonce}, "signature": {sig},
+		formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	if err != nil {
 		t.Fatalf("exchange: %v", err)
@@ -374,7 +374,7 @@ func TestNonceIsSingleUse(t *testing.T) {
 		t.Fatalf("add: %v", err)
 	}
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
-	form := url.Values{"fingerprint": {fp}, "nonce": {nonce}, "signature": {sig}}
+	form := url.Values{formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig}}
 
 	first, _ := http.PostForm(srv.URL+pathAuthnExchange, form)
 	firstStatus := first.StatusCode
@@ -403,10 +403,10 @@ func TestVerifyPKCE(t *testing.T) {
 		wantErr   bool
 	}{
 		{"no pkce", "", "", "", false},
-		{"s256 ok", s256, "S256", verifier, false},
-		{"s256 mismatch", s256, "S256", "nope", true},
-		{"s256 missing verifier", s256, "S256", "", true},
-		{"plain ok", verifier, "plain", verifier, false},
+		{"s256 ok", s256, pkceMethodS256, verifier, false},
+		{"s256 mismatch", s256, pkceMethodS256, "nope", true},
+		{"s256 missing verifier", s256, pkceMethodS256, "", true},
+		{"plain ok", verifier, pkceMethodPlain, verifier, false},
 		{"plain default method", verifier, "", verifier, false},
 		{"bad method", s256, "S512", verifier, true},
 	}
