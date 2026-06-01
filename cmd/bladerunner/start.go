@@ -159,19 +159,26 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = runner.Stop() }()
 
-	fmt.Println(title("Starting Bladerunner VM..."))
-	fmt.Printf("  %s %s\n", key("Name:"), value(cfg.Name))
-	fmt.Printf("  %s %d\n", key("CPUs:"), cfg.CPUs)
-	fmt.Printf("  %s %d GiB\n", key("Memory:"), cfg.MemoryGiB)
-	fmt.Printf("  %s %s\n", key("Arch:"), value(runtime.GOARCH))
-	fmt.Printf("  %s %s\n", key("Incus VMs:"), nestedVirtBanner())
-	fmt.Println()
+	if !jsonOutput {
+		fmt.Println(title("Starting Bladerunner VM..."))
+		fmt.Printf("  %s %s\n", key("Name:"), value(cfg.Name))
+		fmt.Printf("  %s %d\n", key("CPUs:"), cfg.CPUs)
+		fmt.Printf("  %s %d GiB\n", key("Memory:"), cfg.MemoryGiB)
+		fmt.Printf("  %s %s\n", key("Arch:"), value(runtime.GOARCH))
+		fmt.Printf("  %s %s\n", key("Incus VMs:"), nestedVirtBanner())
+		fmt.Println()
+	}
 
 	// Build the buildx-style boot board when stderr is a TTY. It shows
 	// stage state on top and a live tail of the guest serial console
 	// underneath. Non-TTY callers (CI, log capture) still get plain slog
-	// output via the noop board path.
-	brd, tailCancel := startBootBoard(ctx, cfg, runner)
+	// output via the noop board path. In --json mode we skip it entirely so
+	// the only stdout output is the final JSON report.
+	var brd *board.Board
+	tailCancel := context.CancelFunc(func() {})
+	if !jsonOutput {
+		brd, tailCancel = startBootBoard(ctx, cfg, runner)
+	}
 	defer tailCancel()
 
 	result, err := runner.StartVM(ctx)
@@ -212,34 +219,64 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// the SIGINT wait. In GUI mode we tear the board down first because
 	// StartGUI takes over the macOS event loop and the user is watching
 	// the guest window, not the terminal.
-	if cfg.GUI {
-		// GUI mode can't block on Incus before opening the window — the
-		// macOS event loop must run on the main thread immediately. We
-		// don't yet know if boot will succeed, so don't claim it did.
+	// report emits the running summary as JSON or human text, depending on the
+	// --json flag, after tearing down the boot board.
+	report := func(bootErr error) {
 		if brd != nil {
 			brd.Stop()
 			tailCancel()
 		}
-		printRunningSummary(cfg, result.Endpoint, nil)
+		if jsonOutput {
+			_ = startReportJSON(cfg, result.Endpoint, bootErr)
+			return
+		}
+		printRunningSummary(cfg, result.Endpoint, bootErr)
+	}
+
+	if cfg.GUI {
+		// GUI mode can't block on Incus before opening the window — the
+		// macOS event loop must run on the main thread immediately. We
+		// don't yet know if boot will succeed, so don't claim it did.
+		report(nil)
 		go func() { _ = waitForGuestReady(ctx, cfg, runner) }()
 
-		fmt.Println(subtle("Opening GUI window (runs on main thread)..."))
+		if !jsonOutput {
+			fmt.Println(subtle("Opening GUI window (runs on main thread)..."))
+		}
 		if err := runner.StartGUI(); err != nil {
 			return fmt.Errorf("start gui: %w", err)
 		}
 	} else {
 		bootErr := waitForGuestReady(ctx, cfg, runner)
-		if brd != nil {
-			brd.Stop()
-			tailCancel()
+		report(bootErr)
+		if !jsonOutput {
+			fmt.Println(subtle("Headless mode. Press Ctrl+C to stop."))
 		}
-		printRunningSummary(cfg, result.Endpoint, bootErr)
-		fmt.Println(subtle("Headless mode. Press Ctrl+C to stop."))
 		<-ctx.Done()
 	}
 
-	fmt.Println(subtle("\nShutting down..."))
+	if !jsonOutput {
+		fmt.Println(subtle("\nShutting down..."))
+	}
 	return nil
+}
+
+// startReportJSON emits a one-line JSON object describing the running VM, used
+// by `br start --json`. The process keeps running afterward (start is a
+// foreground server); agents read this single object to learn the endpoints.
+func startReportJSON(cfg *config.Config, endpoint string, bootErr error) error {
+	r := map[string]any{
+		"status": "running",
+		"ssh":    fmt.Sprintf("localhost:%d", cfg.LocalSSHPort),
+		"api":    endpoint,
+		"log":    cfg.LogPath,
+	}
+	if bootErr != nil {
+		r["status"] = "running-degraded"
+		r["boot_error"] = bootErr.Error()
+		r["console_log"] = cfg.ConsoleLogPath
+	}
+	return emitJSON(r)
 }
 
 // waitForGuestReady runs the agent handshake (when enabled) and the Incus

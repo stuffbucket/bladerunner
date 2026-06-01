@@ -18,6 +18,12 @@ var shellCmd = &cobra.Command{
 }
 
 func runShell(cmd *cobra.Command, args []string) error {
+	if jsonOutput {
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "shell")
+		emitJSONError(err)
+		return err
+	}
+
 	// Parse args: [-- command...]
 	var shellArgs []string
 	for i, arg := range args {

@@ -59,6 +59,7 @@ func NewConfigRouter(cfg *config.Config) *ConfigRouter {
 			},
 			ConfigKeyBaseImagePath: {getter: func() string { return cfg.BaseImagePath }, deferred: true},
 			ConfigKeyCloudInitISO:  {getter: func() string { return cfg.CloudInitISO }},
+			ConfigKeyDiskPath:      {getter: func() string { return cfg.DiskPath }},
 			ConfigKeyUseHostedGuestImage: {
 				getter: func() string { return strconv.FormatBool(cfg.UseHostedGuestImage) },
 			},

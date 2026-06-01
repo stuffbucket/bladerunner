@@ -44,6 +44,22 @@ func init() {
 	userCmd.AddCommand(userListCmd, userAddCmd, userRemoveCmd)
 }
 
+// --- JSON output (br user ... --json) ---
+
+// identityReport mirrors the fields shown by the human `user list` output.
+type identityReport struct {
+	Fingerprint string `json:"fingerprint"`
+	Label       string `json:"label,omitempty"`
+	Path        string `json:"path,omitempty"`
+}
+
+// userActionReport is the result object for `user add` / `user remove`.
+type userActionReport struct {
+	Status      string `json:"status"`
+	Fingerprint string `json:"fingerprint"`
+	Label       string `json:"label,omitempty"`
+}
+
 func openStore() (*oidc.Store, error) {
 	dir := oidc.DefaultIdentityDir()
 	store := oidc.NewStore(dir)
@@ -56,9 +72,23 @@ func openStore() (*oidc.Store, error) {
 func runUserList(_ *cobra.Command, _ []string) error {
 	store, err := openStore()
 	if err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
 	}
 	idents := store.List()
+	if jsonOutput {
+		reports := make([]identityReport, 0, len(idents))
+		for _, ident := range idents {
+			reports = append(reports, identityReport{
+				Fingerprint: ident.Fingerprint,
+				Label:       ident.Comment,
+				Path:        ident.Path,
+			})
+		}
+		return emitJSON(reports)
+	}
 	if len(idents) == 0 {
 		fmt.Println(subtle("No identities registered."))
 		fmt.Printf("Add one with %s\n", command("br user add <pubkey>"))
@@ -83,15 +113,29 @@ func runUserList(_ *cobra.Command, _ []string) error {
 func runUserAdd(_ *cobra.Command, args []string) error {
 	store, err := openStore()
 	if err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
 	}
 	path := args[0]
-	if !strings.HasSuffix(path, ".pub") {
+	if !strings.HasSuffix(path, ".pub") && !jsonOutput {
 		fmt.Println(subtle("Note: expected a .pub file; continuing anyway"))
 	}
 	ident, err := store.AddFromFile(path)
 	if err != nil {
-		return fmt.Errorf("add identity: %w", err)
+		err = fmt.Errorf("add identity: %w", err)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
+	}
+	if jsonOutput {
+		return emitJSON(userActionReport{
+			Status:      "added",
+			Fingerprint: ident.Fingerprint,
+			Label:       ident.Comment,
+		})
 	}
 	fmt.Printf("%s Registered identity %s\n", success("✓"), value(ident.Fingerprint))
 	if ident.Comment != "" {
@@ -103,15 +147,28 @@ func runUserAdd(_ *cobra.Command, args []string) error {
 func runUserRemove(_ *cobra.Command, args []string) error {
 	store, err := openStore()
 	if err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
 	}
 	fp := args[0]
 	removed, err := store.Remove(fp)
 	if err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
 	}
 	if !removed {
-		return fmt.Errorf("no identity with fingerprint %s", fp)
+		err = fmt.Errorf("no identity with fingerprint %s", fp)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
+	}
+	if jsonOutput {
+		return emitJSON(userActionReport{Status: "removed", Fingerprint: fp})
 	}
 	fmt.Printf("%s Removed identity %s\n", success("✓"), value(fp))
 	return nil

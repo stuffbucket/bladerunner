@@ -112,6 +112,7 @@ const (
 	ConfigKeyBaseImageURL      = "base-image-url"
 	ConfigKeyBaseImagePath     = "base-image-path"
 	ConfigKeyCloudInitISO      = "cloud-init-iso"
+	ConfigKeyDiskPath          = "disk-path"
 	// ConfigKeyGuestImageVersion is the YYYY.MM.DD build date baked into the
 	// guest image at /etc/bladerunner-image-version. Read via SSH; empty when
 	// the running image was not built by scripts/build-guest-image.sh
@@ -149,6 +150,7 @@ func ConfigKeyRegistry() []ConfigKeyMeta {
 		{Key: ConfigKeyBaseImageURL, Writable: true, RequiresReset: true, Description: "Cloud image URL"},
 		{Key: ConfigKeyCloudInitISO, Description: "Cloud-init ISO path"},
 		{Key: ConfigKeyCPUs, RequiresReset: true, Description: "Number of CPUs"},
+		{Key: ConfigKeyDiskPath, Description: "Main disk image path"},
 		{Key: ConfigKeyDiskSizeGiB, RequiresReset: true, Description: "Disk size in GiB"},
 		{Key: ConfigKeyGuestImageVersion, RequiresVM: true, Description: "Pre-baked guest image build date (YYYY.MM.DD)"},
 		{Key: ConfigKeyGUI, RequiresReset: true, Description: "GUI console enabled"},

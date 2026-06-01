@@ -53,21 +53,32 @@ func runStop(_ *cobra.Command, _ []string) error {
 	client := control.NewClient(stateDir)
 
 	if !client.IsRunning() {
-		return fmt.Errorf("VM is not running")
+		err := fmt.Errorf("VM is not running")
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	// Capture the host PID up front, while the control server still answers —
 	// --force needs it even if the server later wedges.
 	hostPID := readHostPID(client)
 
-	fmt.Println("Stopping VM (sending graceful shutdown signal)...")
+	if !jsonOutput {
+		fmt.Println("Stopping VM (sending graceful shutdown signal)...")
+	}
 	if err := client.StopVM(); err != nil {
 		// Under --force a wedged server is exactly the case we handle below;
 		// don't abort, fall through to the PID escalation.
 		if !stopFlags.force {
+			if jsonOutput {
+				emitJSONError(err)
+			}
 			return err
 		}
-		fmt.Printf("Graceful stop request failed (%v); will force-terminate.\n", err)
+		if !jsonOutput {
+			fmt.Printf("Graceful stop request failed (%v); will force-terminate.\n", err)
+		}
 	}
 
 	socketPath := control.SocketPath(stateDir)
@@ -78,17 +89,32 @@ func runStop(_ *cobra.Command, _ []string) error {
 	if stopFlags.force && graceful > forceGracePeriod {
 		graceful = forceGracePeriod
 	}
-	fmt.Printf("Waiting up to %s for shutdown...\n", graceful.Round(time.Second))
+	if !jsonOutput {
+		fmt.Printf("Waiting up to %s for shutdown...\n", graceful.Round(time.Second))
+	}
 	if waitForSocketGone(socketPath, graceful) {
+		if jsonOutput {
+			return emitJSON(stopResult{Status: "stopped"})
+		}
 		fmt.Println("VM stopped")
 		return nil
 	}
 
 	if !stopFlags.force {
-		return fmt.Errorf("timeout waiting for VM to stop (use 'br stop --force' to terminate a hung/panicked VM)")
+		err := fmt.Errorf("timeout waiting for VM to stop (use 'br stop --force' to terminate a hung/panicked VM)")
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	return forceTerminate(socketPath, hostPID)
+}
+
+// stopResult is the JSON payload emitted by `br stop --json` on success.
+type stopResult struct {
+	Status string `json:"status"`           // "stopped" or "force-stopped"
+	Signal string `json:"signal,omitempty"` // "SIGTERM"|"SIGKILL" on the force path
 }
 
 // readHostPID returns the host process PID reported by the control server, or
@@ -123,13 +149,22 @@ func waitForSocketGone(socketPath string, within time.Duration) bool {
 // the stale control socket. Used only by --force.
 func forceTerminate(socketPath string, pid int) error {
 	if pid <= 0 {
-		return fmt.Errorf("cannot force-stop: host PID unknown (control server gave no pid)")
+		err := fmt.Errorf("cannot force-stop: host PID unknown (control server gave no pid)")
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
-	fmt.Printf("Graceful shutdown stalled; force-terminating host process %d...\n", pid)
+	if !jsonOutput {
+		fmt.Printf("Graceful shutdown stalled; force-terminating host process %d...\n", pid)
+	}
 
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 	if waitForProcessGone(pid, sigtermGrace) {
 		cleanupSocket(socketPath)
+		if jsonOutput {
+			return emitJSON(stopResult{Status: "force-stopped", Signal: "SIGTERM"})
+		}
 		fmt.Println("VM force-stopped (SIGTERM)")
 		return nil
 	}
@@ -137,11 +172,18 @@ func forceTerminate(socketPath string, pid int) error {
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	if waitForProcessGone(pid, sigkillGrace) {
 		cleanupSocket(socketPath)
+		if jsonOutput {
+			return emitJSON(stopResult{Status: "force-stopped", Signal: "SIGKILL"})
+		}
 		fmt.Println("VM force-stopped (SIGKILL)")
 		return nil
 	}
 
-	return fmt.Errorf("failed to terminate host process %d", pid)
+	err := fmt.Errorf("failed to terminate host process %d", pid)
+	if jsonOutput {
+		emitJSONError(err)
+	}
+	return err
 }
 
 // waitForProcessGone polls signal 0 against pid until it no longer exists or
@@ -160,7 +202,7 @@ func waitForProcessGone(pid int, within time.Duration) bool {
 // cleanupSocket removes a stale control socket left behind by a force-kill so
 // later `br status`/`br start` don't see a dead listener.
 func cleanupSocket(socketPath string) {
-	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) && !jsonOutput {
 		fmt.Printf("note: could not remove stale control socket %s: %v\n", socketPath, err)
 	}
 }

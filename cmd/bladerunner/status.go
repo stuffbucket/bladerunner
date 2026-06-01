@@ -42,6 +42,9 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.row("Built", date)
 
 	if !client.IsRunning() {
+		if jsonOutput {
+			return emitJSON(statusReport{Running: false, Status: "stopped", Build: currentBuildInfo()})
+		}
 		left := newPanel("VM")
 		left.row("Status", errorf("stopped"))
 
@@ -54,7 +57,11 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 	status, err := client.GetStatus()
 	if err != nil {
-		return fmt.Errorf("get status: %w", err)
+		err = fmt.Errorf("get status: %w", err)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	getConfig := func(k string) string {
@@ -112,6 +119,11 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.rowIf("Hosted", getConfig(control.ConfigKeyUseHostedGuestImage))
 	right.rowIf("Cloud-init", getConfig(control.ConfigKeyCloudInitISO))
 	right.rowIf("Log", getConfig(control.ConfigKeyLogPath))
+	right.rowIf("Disk", getConfig(control.ConfigKeyDiskPath))
+
+	if jsonOutput {
+		return emitJSON(runningStatusReport(status, getConfig))
+	}
 
 	if b := bannerHeader(); b != "" {
 		fmt.Print(b) // gradient ASCII banner (includes its own top margin)
@@ -125,6 +137,72 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	fmt.Println()
 
 	return nil
+}
+
+// --- JSON output (br status --json) ---
+
+type statusReport struct {
+	Running bool      `json:"running"`
+	Status  string    `json:"status"`
+	Build   buildInfo `json:"build"`
+	VM      *vmInfo   `json:"vm,omitempty"`
+}
+
+type buildInfo struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Built   string `json:"built"`
+}
+
+type vmInfo struct {
+	PID          string `json:"pid,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Arch         string `json:"arch,omitempty"`
+	CPUs         string `json:"cpus,omitempty"`
+	MemoryGiB    string `json:"memory_gib,omitempty"`
+	DiskSizeGiB  string `json:"disk_size_gib,omitempty"`
+	DiskPath     string `json:"disk_path,omitempty"`
+	NestedVirt   string `json:"nested_virt,omitempty"`
+	Network      string `json:"network,omitempty"`
+	SSHPort      string `json:"ssh_port,omitempty"`
+	APIPort      string `json:"api_port,omitempty"`
+	Image        string `json:"image,omitempty"`
+	ImagePath    string `json:"image_path,omitempty"`
+	ImageVersion string `json:"image_version,omitempty"`
+	Hosted       string `json:"hosted,omitempty"`
+	CloudInitISO string `json:"cloud_init_iso,omitempty"`
+	LogPath      string `json:"log_path,omitempty"`
+}
+
+func currentBuildInfo() buildInfo {
+	return buildInfo{Version: version, Commit: commit, Built: date}
+}
+
+func runningStatusReport(status string, get func(string) string) statusReport {
+	return statusReport{
+		Running: true,
+		Status:  status,
+		Build:   currentBuildInfo(),
+		VM: &vmInfo{
+			PID:          get(control.ConfigKeyPID),
+			Name:         get(control.ConfigKeyName),
+			Arch:         get(control.ConfigKeyArch),
+			CPUs:         get(control.ConfigKeyCPUs),
+			MemoryGiB:    get(control.ConfigKeyMemoryGiB),
+			DiskSizeGiB:  get(control.ConfigKeyDiskSizeGiB),
+			DiskPath:     get(control.ConfigKeyDiskPath),
+			NestedVirt:   get(control.ConfigKeyNestedVirt),
+			Network:      get(control.ConfigKeyNetworkMode),
+			SSHPort:      get(control.ConfigKeyLocalSSHPort),
+			APIPort:      get(control.ConfigKeyLocalAPIPort),
+			Image:        get(control.ConfigKeyBaseImageURL),
+			ImagePath:    get(control.ConfigKeyBaseImagePath),
+			ImageVersion: guestImageVersionForStatus(get),
+			Hosted:       get(control.ConfigKeyUseHostedGuestImage),
+			CloudInitISO: get(control.ConfigKeyCloudInitISO),
+			LogPath:      get(control.ConfigKeyLogPath),
+		},
+	}
 }
 
 // guestImageVersionForStatus reads /etc/bladerunner-image-version via SSH
