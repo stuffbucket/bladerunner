@@ -16,7 +16,18 @@ var sshCmd = &cobra.Command{
 func runSSH(_ *cobra.Command, _ []string) error {
 	configPath, err := sshConfigFromControl()
 	if err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
+	}
+
+	if jsonOutput {
+		return emitJSON(map[string]string{
+			"ssh_config_path": configPath,
+			"host":            "bladerunner",
+			"command":         fmt.Sprintf("ssh -F %s bladerunner", configPath),
+		})
 	}
 
 	fmt.Printf("ssh -F %s bladerunner\n", configPath)

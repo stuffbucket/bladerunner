@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -134,7 +135,7 @@ func TestVerifyImageChecksum_MatchingSidecar(t *testing.T) {
 	defer srv.Close()
 
 	path := writeTempFile(t, data)
-	if err := verifyImageChecksum(context.Background(), srv.URL+"/image", path); err != nil {
+	if err := verifyImageChecksum(context.Background(), srv.URL+"/image", "", path); err != nil {
 		t.Errorf("verifyImageChecksum error = %v", err)
 	}
 }
@@ -146,7 +147,7 @@ func TestVerifyImageChecksum_MismatchedSidecar(t *testing.T) {
 	defer srv.Close()
 
 	path := writeTempFile(t, data)
-	err := verifyImageChecksum(context.Background(), srv.URL+"/image", path)
+	err := verifyImageChecksum(context.Background(), srv.URL+"/image", "", path)
 	if err == nil {
 		t.Fatal("expected mismatch error, got nil")
 	}
@@ -165,7 +166,7 @@ func TestVerifyImageChecksum_MissingSidecar_NonGitHub_Tolerant(t *testing.T) {
 	defer srv.Close()
 
 	path := writeTempFile(t, data)
-	if err := verifyImageChecksum(context.Background(), srv.URL+"/image", path); err != nil {
+	if err := verifyImageChecksum(context.Background(), srv.URL+"/image", "", path); err != nil {
 		t.Fatalf("missing sidecar on non-GitHub URL should warn and pass; got: %v", err)
 	}
 }
@@ -197,7 +198,29 @@ func TestVerifyImageChecksum_MissingSidecar_GitHub_Tolerant(t *testing.T) {
 	// The sidecar URL will be srv.URL + "/github.com/foo/releases/download/x/image.sha256"
 	// which our mux 404s. Because url contains "github.com/" and "/releases/",
 	// the function should treat the missing sidecar as a warning, not error.
-	if err := verifyImageChecksum(context.Background(), url, path); err != nil {
+	if err := verifyImageChecksum(context.Background(), url, "", path); err != nil {
 		t.Errorf("expected nil error for GitHub Release with missing sidecar, got %v", err)
+	}
+}
+
+func TestVerifyImageChecksum_PinnedSHA512(t *testing.T) {
+	data := []byte("trixie genericcloud pinned")
+	sum := sha512.Sum512(data)
+	want := hex.EncodeToString(sum[:])
+	path := writeTempFile(t, data)
+
+	// Matching embedded SHA-512: no network/sidecar needed, passes.
+	if err := verifyImageChecksum(context.Background(), "http://example.invalid/image", want, path); err != nil {
+		t.Errorf("verifyImageChecksum with matching pinned SHA-512 error = %v", err)
+	}
+
+	// Mismatched embedded SHA-512: fatal, and never touches the sidecar.
+	wrong := strings.Repeat("a", 128)
+	err := verifyImageChecksum(context.Background(), "http://example.invalid/image", wrong, path)
+	if err == nil {
+		t.Fatal("expected SHA-512 mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "SHA-512 mismatch") {
+		t.Errorf("expected SHA-512 mismatch error, got %v", err)
 	}
 }

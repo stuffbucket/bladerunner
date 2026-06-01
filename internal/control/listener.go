@@ -21,6 +21,9 @@ const (
 	listenerRWTimeout = 5 * time.Second
 	clientPingTimeout = 2 * time.Second
 	clientCmdTimeout  = 5 * time.Second
+	// saveCommandTimeout bounds the server-side CmdSave handling (pause + write
+	// the full guest RAM image), which can run for many seconds.
+	saveCommandTimeout = 10 * time.Minute
 )
 
 // ListenerConfig holds configuration for a control listener.
@@ -151,6 +154,11 @@ func (l *Listener) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 
 	req := NewRequest(msg.Command)
+	// Saving a VM's RAM state can take many seconds (multi-GB write); give that
+	// command a much longer deadline than the default request timeout.
+	if req.Command == CmdSave {
+		_ = conn.SetDeadline(time.Now().Add(saveCommandTimeout))
+	}
 	resp := l.router.Dispatch(ctx, req)
 	resp.Version = ProtocolVersion
 	_ = l.wireFormat.Encode(conn, resp)

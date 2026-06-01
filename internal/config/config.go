@@ -48,6 +48,10 @@ const (
 	// containing the YYYY.MM.DD build date of the running image.
 	GuestImageVersionPath = "/etc/bladerunner-image-version"
 
+	// Supported guest architectures (GOARCH values).
+	archARM64 = "arm64"
+	archAMD64 = "amd64"
+
 	// AuthMode values
 	AuthModeOIDC = "oidc"
 	AuthModeCert = "cert"
@@ -72,18 +76,26 @@ const (
 	logFileName          = "bladerunner.log"
 	reportFileName       = "startup-report.json"
 	metadataFileName     = "runtime-metadata.json"
+	savedStateFileName   = "saved-state.bin"
 	clientCertFileName   = "client.crt"
 	clientKeyFileName    = "client.key"
 )
 
 type Config struct {
-	Name              string
-	Hostname          string
-	StateDir          string
-	VMDir             string
-	DiskPath          string
-	DiskSizeGiB       int
-	BaseImageURL      string
+	Name     string
+	Hostname string
+	StateDir string
+	VMDir    string
+	DiskPath string
+	// SavedStatePath is where `br save` / `br upgrade` write the VZ saved
+	// machine state. Defaults to <stateDir>/saved-state.bin.
+	SavedStatePath string
+	DiskSizeGiB    int
+	BaseImageURL   string
+	// BaseImageSHA512 is the expected SHA-512 of the downloaded base image. Set
+	// for the pinned Debian default; empty for a custom --image-url (which falls
+	// back to sidecar verification) or a local --image-path.
+	BaseImageSHA512   string
 	BaseImagePath     string
 	MachineIDPath     string
 	EFIVarsPath       string
@@ -142,6 +154,14 @@ type Config struct {
 	Arch                string
 	WaitForIncus        time.Duration
 	DashboardPath       string
+	// NestedVirtDisabled opts out of nested virtualization even when the host
+	// supports it (set via --no-nested-virt). When false, bladerunner enables
+	// nested virt where available so the guest's Incus can run VMs.
+	NestedVirtDisabled bool
+	// NestedVirt is the resolved nested-virtualization state for the running
+	// VM ("enabled", "unsupported", or "disabled"), set by the runner at start
+	// for status/UI reporting. Empty before the VM is configured.
+	NestedVirt string
 }
 
 // DefaultBaseImageURL returns the default base image URL for the given GOARCH.
@@ -151,17 +171,46 @@ func DefaultBaseImageURL(goarch string) (string, error) {
 	return DebianTrixieGenericCloudURL(goarch)
 }
 
+// DebianTrixieBuild pins the Debian Trixie genericcloud snapshot bladerunner
+// downloads by default, instead of the rolling "latest" pointer, so the base
+// image is reproducible and verifiable. To adopt a newer snapshot, bump this
+// and the SHA-512 constants below together (from that build's SHA512SUMS).
+// Source: https://cloud.debian.org/images/cloud/trixie/
+const DebianTrixieBuild = "20260525-2489"
+
+// Expected SHA-512 of the pinned genericcloud qcow2 for each arch, copied from
+// the pinned build's SHA512SUMS. verifyImageChecksum checks the download
+// against these (fatal on mismatch) so a pinned image is reproducible.
+const (
+	debianTrixieSHA512ARM64 = "b4f9240559da2c044953418d0632cee4d45e3d447a0ec6a9129ef7946e39ec4135ec9e085c176f8dc77af6536d7279c03487e9aa61fd6c628fb493886e23aef5"
+	debianTrixieSHA512AMD64 = "23999f64d896af10a8c12bc391856ffb2982d459c3e4c987c241cca920920c6d0fbdccab389fbb37aeecb2e21145f60d9d50bf317bdf47f7bc1388cd945aa1da"
+)
+
 // DebianTrixieGenericCloudURL returns the upstream Debian Trixie genericcloud
-// qcow2 URL for the given GOARCH. This is the fallback base image used when
-// the pre-baked bladerunner guest image is unavailable or not opted into.
+// qcow2 URL for the given GOARCH, pinned to DebianTrixieBuild. This is the
+// fallback base image used when the pre-baked bladerunner guest image is
+// unavailable or not opted into.
 func DebianTrixieGenericCloudURL(goarch string) (string, error) {
 	switch goarch {
-	case "arm64":
-		return "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2", nil
-	case "amd64":
-		return "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2", nil
+	case archARM64, archAMD64:
+		return fmt.Sprintf(
+			"https://cloud.debian.org/images/cloud/trixie/%s/debian-13-genericcloud-%s-%s.qcow2",
+			DebianTrixieBuild, goarch, DebianTrixieBuild), nil
 	default:
 		return "", fmt.Errorf("unsupported architecture: %s", goarch)
+	}
+}
+
+// DebianTrixieGenericCloudSHA512 returns the expected SHA-512 of the pinned
+// genericcloud qcow2 for the given GOARCH, or "" for an unknown arch.
+func DebianTrixieGenericCloudSHA512(goarch string) string {
+	switch goarch {
+	case archARM64:
+		return debianTrixieSHA512ARM64
+	case archAMD64:
+		return debianTrixieSHA512AMD64
+	default:
+		return ""
 	}
 }
 
@@ -171,7 +220,7 @@ func DebianTrixieGenericCloudURL(goarch string) (string, error) {
 // release.
 func HostedGuestImageURL(goarch string) (string, error) {
 	switch goarch {
-	case "arm64", "amd64":
+	case archARM64, archAMD64:
 		return fmt.Sprintf(
 			"https://github.com/stuffbucket/bladerunner/releases/download/%s/bladerunner-guest-%s.qcow2",
 			HostedGuestImageTag, goarch), nil
@@ -201,6 +250,12 @@ func Default(baseDir string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Only the pinned Debian default carries an embedded checksum; the hosted
+	// image is verified via its own sidecar elsewhere.
+	baseImageSHA512 := ""
+	if !useHosted {
+		baseImageSHA512 = DebianTrixieGenericCloudSHA512(runtime.GOARCH)
+	}
 
 	trustPassword, err := randomHex(TrustPasswordLen)
 	if err != nil {
@@ -213,8 +268,10 @@ func Default(baseDir string) (*Config, error) {
 		StateDir:            baseDir,
 		VMDir:               baseDir,
 		DiskPath:            filepath.Join(baseDir, diskFileName),
+		SavedStatePath:      filepath.Join(baseDir, savedStateFileName),
 		DiskSizeGiB:         DefaultDiskSizeGiB,
 		BaseImageURL:        imageURL,
+		BaseImageSHA512:     baseImageSHA512,
 		BaseImagePath:       "",
 		MachineIDPath:       filepath.Join(baseDir, machineIDFileName),
 		EFIVarsPath:         filepath.Join(baseDir, efiVarsFileName),

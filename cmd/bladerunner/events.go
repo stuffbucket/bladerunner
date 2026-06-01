@@ -38,6 +38,12 @@ func init() {
 }
 
 func runEvents(_ *cobra.Command, _ []string) error {
+	if jsonOutput {
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "events")
+		emitJSONError(err)
+		return err
+	}
+
 	for _, t := range eventsFlags.types {
 		if _, ok := validEventTypes[t]; !ok {
 			return fmt.Errorf("invalid --type %q (valid: %s)", t, validEventTypesList())

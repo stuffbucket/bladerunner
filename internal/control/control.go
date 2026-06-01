@@ -68,6 +68,12 @@ const ProtocolVersion = 1
 const (
 	StatusRunning = "running"
 	StatusStopped = "stopped"
+	// StatusUnreachable means the host process is alive and the VM is in the
+	// running state, but the guest does not answer a liveness probe (e.g. the
+	// guest kernel has panicked, the vsock SSH bridge is down, or the guest is
+	// still booting). The host run-state alone would report StatusRunning, so
+	// this exists to avoid reporting a dead guest as healthy.
+	StatusUnreachable = "unreachable"
 )
 
 // Command constants
@@ -75,7 +81,19 @@ const (
 	CmdPing   = "ping"
 	CmdStop   = "stop"
 	CmdStatus = "status"
+	// CmdSave pauses the guest and writes its machine state to the server's
+	// default saved-state path. With the SaveModePause argument the guest is
+	// left paused (for an upgrade handoff); otherwise it is resumed (snapshot).
+	// The response body is the path written.
+	CmdSave = "save"
+	// CmdServerVersion reports the running server's build version string, so a
+	// client can detect that a newer binary should take over (br upgrade).
+	CmdServerVersion = "version"
 )
+
+// SaveModePause is the CmdSave argument that leaves the guest paused after
+// saving instead of resuming it.
+const SaveModePause = "pause"
 
 // Config command constants
 const (
@@ -106,6 +124,7 @@ const (
 	ConfigKeyBaseImageURL      = "base-image-url"
 	ConfigKeyBaseImagePath     = "base-image-path"
 	ConfigKeyCloudInitISO      = "cloud-init-iso"
+	ConfigKeyDiskPath          = "disk-path"
 	// ConfigKeyGuestImageVersion is the YYYY.MM.DD build date baked into the
 	// guest image at /etc/bladerunner-image-version. Read via SSH; empty when
 	// the running image was not built by scripts/build-guest-image.sh
@@ -115,6 +134,10 @@ const (
 	// guest image is the chosen base. Defaults to "false" while
 	// guest-image-latest is not yet published.
 	ConfigKeyUseHostedGuestImage = "use-hosted-guest-image"
+	// ConfigKeyNestedVirt reports the resolved nested-virtualization state of
+	// the running VM ("enabled", "unsupported", or "disabled"), i.e. whether
+	// the guest's Incus can launch VMs in addition to containers.
+	ConfigKeyNestedVirt = "nested-virt"
 )
 
 // ConfigKeyMeta describes a config key's properties for CLI display and access control.
@@ -139,6 +162,7 @@ func ConfigKeyRegistry() []ConfigKeyMeta {
 		{Key: ConfigKeyBaseImageURL, Writable: true, RequiresReset: true, Description: "Cloud image URL"},
 		{Key: ConfigKeyCloudInitISO, Description: "Cloud-init ISO path"},
 		{Key: ConfigKeyCPUs, RequiresReset: true, Description: "Number of CPUs"},
+		{Key: ConfigKeyDiskPath, Description: "Main disk image path"},
 		{Key: ConfigKeyDiskSizeGiB, RequiresReset: true, Description: "Disk size in GiB"},
 		{Key: ConfigKeyGuestImageVersion, RequiresVM: true, Description: "Pre-baked guest image build date (YYYY.MM.DD)"},
 		{Key: ConfigKeyGUI, RequiresReset: true, Description: "GUI console enabled"},
@@ -148,6 +172,7 @@ func ConfigKeyRegistry() []ConfigKeyMeta {
 		{Key: ConfigKeyLogPath, Description: "Log file path"},
 		{Key: ConfigKeyMemoryGiB, RequiresReset: true, Description: "Memory in GiB"},
 		{Key: ConfigKeyName, Description: "Instance name"},
+		{Key: ConfigKeyNestedVirt, RequiresVM: true, Description: "Nested virtualization / Incus VM support (enabled/unsupported/disabled)"},
 		{Key: ConfigKeyNetworkMode, RequiresReset: true, Description: "Network mode (shared/bridged)"},
 		{Key: ConfigKeyPID, RequiresVM: true, Description: "VM process ID"},
 		{Key: ConfigKeySSHConfigPath, RequiresVM: true, Description: "SSH config file path"},

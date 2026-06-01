@@ -31,9 +31,16 @@ func init() {
 	defaultHelp := rootCmd.HelpTemplate()
 	rootCmd.SetHelpTemplate("{{banner}}" + defaultHelp)
 	cobra.AddTemplateFunc("banner", ui.Banner)
+
+	// Global --json flag: commands emit machine-readable JSON for agents.
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format (for scripting/agents)")
+
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(saveCmd)
+	rootCmd.AddCommand(restoreCmd)
+	rootCmd.AddCommand(upgradeCmd)
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(shellCmd)
 	rootCmd.AddCommand(incusCmd)

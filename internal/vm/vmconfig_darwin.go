@@ -72,8 +72,32 @@ func (r *Runner) configurePlatform(cfg *vz.VirtualMachineConfiguration) error {
 		return fmt.Errorf("create generic platform configuration: %w", err)
 	}
 
+	r.configureNestedVirt(platformConfig)
+
 	cfg.SetPlatformVirtualMachineConfiguration(platformConfig)
 	return nil
+}
+
+// configureNestedVirt enables nested virtualization when the host supports it
+// (so the guest's Incus can run VMs, not just containers) unless the user opted
+// out. It records the resolved state on the Runner for status/UI reporting.
+func (r *Runner) configureNestedVirt(platformConfig *vz.GenericPlatformConfiguration) {
+	switch {
+	case r.cfg.NestedVirtDisabled:
+		r.nestedVirt = "disabled"
+		logging.L().Info("nested virtualization disabled by config; Incus VMs unavailable")
+	case !vz.IsNestedVirtualizationSupported():
+		r.nestedVirt = "unsupported"
+		logging.L().Info("nested virtualization unsupported by host; Incus can run containers but not VMs")
+	default:
+		if err := platformConfig.SetNestedVirtualizationEnabled(true); err != nil {
+			r.nestedVirt = "unsupported"
+			logging.L().Warn("enabling nested virtualization failed; Incus VMs unavailable", "err", err)
+			return
+		}
+		r.nestedVirt = "enabled"
+		logging.L().Info("nested virtualization enabled; Incus can run VMs")
+	}
 }
 
 func (r *Runner) configureStorage(cfg *vz.VirtualMachineConfiguration) error {
@@ -187,6 +211,14 @@ func (r *Runner) configureSerial(cfg *vz.VirtualMachineConfiguration) error {
 	})
 	if err != nil {
 		return fmt.Errorf("open rotating console log: %w", err)
+	}
+	// Force a rotation per boot so this run's serial output starts in a
+	// fresh file. Without this, console.log grows across boots and a tail
+	// reader sees the previous shutdown's content before the new boot's
+	// kernel banner. Non-fatal — if rotation fails we still get the log,
+	// just appended to the prior content.
+	if err := consoleLog.Rotate(); err != nil {
+		logging.L().Warn("console log rotation failed; continuing with append", "err", err)
 	}
 	// Stash on Runner so Stop() can close it after VM shutdown.
 	r.consoleLog = consoleLog

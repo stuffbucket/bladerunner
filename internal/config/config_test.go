@@ -1,13 +1,23 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
+
+// pinnedURL builds the expected pinned genericcloud URL for an arch so the
+// tests track DebianTrixieBuild automatically when the pin is bumped.
+func pinnedURL(arch string) string {
+	return fmt.Sprintf(
+		"https://cloud.debian.org/images/cloud/trixie/%s/debian-13-genericcloud-%s-%s.qcow2",
+		DebianTrixieBuild, arch, DebianTrixieBuild)
+}
 
 func TestDefaultBaseImageURL(t *testing.T) {
 	tests := []struct {
@@ -17,15 +27,15 @@ func TestDefaultBaseImageURL(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "arm64 returns Debian 13 trixie ARM64 image",
+			name:    "arm64 returns pinned Debian 13 trixie ARM64 image",
 			arch:    "arm64",
-			wantURL: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2",
+			wantURL: pinnedURL("arm64"),
 			wantErr: false,
 		},
 		{
-			name:    "amd64 returns Debian 13 trixie AMD64 image",
+			name:    "amd64 returns pinned Debian 13 trixie AMD64 image",
 			arch:    "amd64",
-			wantURL: "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
+			wantURL: pinnedURL("amd64"),
 			wantErr: false,
 		},
 		{
@@ -56,8 +66,8 @@ func TestDebianTrixieGenericCloudURL(t *testing.T) {
 		wantURL string
 		wantErr bool
 	}{
-		{"arm64", "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2", false},
-		{"amd64", "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2", false},
+		{"arm64", pinnedURL("arm64"), false},
+		{"amd64", pinnedURL("amd64"), false},
 		{"riscv64", "", true},
 	}
 	for _, tt := range tests {
@@ -70,6 +80,47 @@ func TestDebianTrixieGenericCloudURL(t *testing.T) {
 				t.Errorf("DebianTrixieGenericCloudURL() = %q, want %q", got, tt.wantURL)
 			}
 		})
+	}
+}
+
+// TestDebianTrixieImageIsPinned guards the reproducibility fix: the default
+// image URL must point at a specific dated snapshot, never the rolling
+// "latest" pointer, and must carry an embedded SHA-512 for verification.
+func TestDebianTrixieImageIsPinned(t *testing.T) {
+	for _, arch := range []string{"arm64", "amd64"} {
+		url, err := DebianTrixieGenericCloudURL(arch)
+		if err != nil {
+			t.Fatalf("DebianTrixieGenericCloudURL(%s) error = %v", arch, err)
+		}
+		if strings.Contains(url, "/latest/") {
+			t.Errorf("%s image URL uses rolling /latest/ (not reproducible): %s", arch, url)
+		}
+		if !strings.Contains(url, DebianTrixieBuild) {
+			t.Errorf("%s image URL not pinned to DebianTrixieBuild %q: %s", arch, DebianTrixieBuild, url)
+		}
+		sum := DebianTrixieGenericCloudSHA512(arch)
+		if len(sum) != 128 { // SHA-512 = 64 bytes = 128 hex chars
+			t.Errorf("%s pinned SHA-512 should be 128 hex chars, got %d (%q)", arch, len(sum), sum)
+		}
+	}
+	if DebianTrixieGenericCloudSHA512("riscv64") != "" {
+		t.Errorf("unknown arch should have empty SHA-512")
+	}
+}
+
+// TestDefaultConfigCarriesPinnedChecksum verifies Default() wires the embedded
+// SHA-512 for the host arch so the download is verified.
+func TestDefaultConfigCarriesPinnedChecksum(t *testing.T) {
+	want := DebianTrixieGenericCloudSHA512(runtime.GOARCH)
+	if want == "" {
+		t.Skipf("no pinned checksum for arch %s", runtime.GOARCH)
+	}
+	cfg, err := Default(t.TempDir())
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	if cfg.BaseImageSHA512 != want {
+		t.Errorf("Default().BaseImageSHA512 = %q, want %q", cfg.BaseImageSHA512, want)
 	}
 }
 

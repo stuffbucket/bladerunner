@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -85,14 +86,44 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// verifyImageChecksum compares the downloaded image at path against the
-// sidecar checksum hosted at imageURL+".sha256". A missing or unreachable
-// sidecar is logged at WARN and skipped — many upstream image hosts
-// (Debian's cloud.debian.org, GitHub Releases pre-first-publish) don't
-// publish per-image .sha256 sidecars, and blocking boot on their absence
-// regresses the default user experience. Mismatched sidecars remain fatal.
-// See issue: SHA256SUMS-style combined manifests are not yet parsed.
-func verifyImageChecksum(ctx context.Context, imageURL, path string) error {
+func fileSHA512(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open for sha512: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha512.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash file: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// verifyImageChecksum verifies the downloaded image at path. When expectedSHA512
+// is non-empty (the pinned Debian default), it is checked against that embedded
+// hash and a mismatch is fatal — this makes the default image reproducible and
+// tamper-evident without a network round-trip.
+//
+// Otherwise (custom --image-url) it falls back to a sidecar checksum hosted at
+// imageURL+".sha256". A missing or unreachable sidecar is logged at WARN and
+// skipped — many upstream image hosts (Debian's cloud.debian.org, GitHub
+// Releases pre-first-publish) don't publish per-image .sha256 sidecars, and
+// blocking boot on their absence regresses the default user experience.
+// Mismatched sidecars remain fatal.
+func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512, path string) error {
+	if expectedSHA512 != "" {
+		got, err := fileSHA512(path)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(got, expectedSHA512) {
+			return fmt.Errorf("base image SHA-512 mismatch: got %s, want %s", got, expectedSHA512)
+		}
+		logging.L().Info("base image SHA-512 verified (pinned)", "sha512", got)
+		return nil
+	}
+
 	want, err := fetchSidecarSHA256(ctx, imageURL)
 	if err != nil {
 		logging.L().Warn("sidecar SHA-256 fetch failed, continuing without verification",
@@ -154,7 +185,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		return "", err
 	}
 
-	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, path); err != nil {
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, path); err != nil {
 		// Remove the corrupt download so subsequent runs don't reuse it.
 		_ = os.Remove(path)
 		return "", err

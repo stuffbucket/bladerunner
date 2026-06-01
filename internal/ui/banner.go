@@ -29,6 +29,18 @@ func Banner() string {
 	return renderBanner()
 }
 
+// BannerWidth returns the column width of the widest banner line. The banner is
+// plain ASCII, so byte length equals column width.
+func BannerWidth() int {
+	w := 0
+	for line := range strings.SplitSeq(strings.TrimRight(bannerText, "\n"), "\n") {
+		if len(line) > w {
+			w = len(line)
+		}
+	}
+	return w
+}
+
 // renderBanner applies the gradient to the banner text unconditionally.
 func renderBanner() string {
 	lines := strings.Split(strings.TrimRight(bannerText, "\n"), "\n")

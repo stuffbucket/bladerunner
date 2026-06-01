@@ -14,8 +14,14 @@ import (
 
 const (
 	labelWidth = 12 // key column width within a panel
-	panelWidth = 34 // each panel's inner width
+	panelWidth = 34 // left panel inner width (its content is short and uniform)
 	gapWidth   = 4  // space between panels
+
+	// The right (Build) panel hugs its content between these bounds, capped to
+	// fit the terminal with a margin on each edge (see responsiveRightWidth).
+	rightPanelMin = panelWidth // never narrower than the left panel
+	rightPanelMax = 80         // cap so very long URLs don't stretch absurdly
+	edgeMargin    = 2          // columns kept clear at each terminal edge
 )
 
 var statusCmd = &cobra.Command{
@@ -36,6 +42,9 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.row("Built", date)
 
 	if !client.IsRunning() {
+		if jsonOutput {
+			return emitJSON(statusReport{Running: false, Status: "stopped", Build: currentBuildInfo()})
+		}
 		left := newPanel("VM")
 		left.row("Status", errorf("stopped"))
 
@@ -48,7 +57,11 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 	status, err := client.GetStatus()
 	if err != nil {
-		return fmt.Errorf("get status: %w", err)
+		err = fmt.Errorf("get status: %w", err)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	getConfig := func(k string) string {
@@ -59,8 +72,19 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		return v
 	}
 
+	// Color the status by health: running is green, an unreachable guest
+	// (host alive but guest not answering — e.g. kernel panic) is amber, and
+	// anything else (stopped/unknown) is red.
+	statusStyle := errorf
+	switch status {
+	case control.StatusRunning:
+		statusStyle = success
+	case control.StatusUnreachable:
+		statusStyle = warning
+	}
+
 	left := newPanel("VM")
-	left.row("Status", success(status))
+	left.row("Status", statusStyle(status))
 	left.rowIf("PID", getConfig(control.ConfigKeyPID))
 	left.rowIf("Name", getConfig(control.ConfigKeyName))
 	left.rowIf("Arch", getConfig(control.ConfigKeyArch))
@@ -68,6 +92,17 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	left.rowIf("CPUs", getConfig(control.ConfigKeyCPUs))
 	left.rowGiB("Memory", getConfig(control.ConfigKeyMemoryGiB))
 	left.rowGiB("Disk", getConfig(control.ConfigKeyDiskSizeGiB))
+	if nv := getConfig(control.ConfigKeyNestedVirt); nv != "" {
+		// "enabled" = Incus VMs work; "unsupported"/"disabled" = containers only.
+		nvStyle := subtle
+		switch nv {
+		case "enabled":
+			nvStyle = success
+		case "disabled":
+			nvStyle = warning
+		}
+		left.row("Incus VMs", nvStyle(nv))
+	}
 	left.sep()
 	if p := getConfig(control.ConfigKeyLocalSSHPort); p != "" {
 		left.row("SSH", "localhost:"+p)
@@ -84,8 +119,17 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.rowIf("Hosted", getConfig(control.ConfigKeyUseHostedGuestImage))
 	right.rowIf("Cloud-init", getConfig(control.ConfigKeyCloudInitISO))
 	right.rowIf("Log", getConfig(control.ConfigKeyLogPath))
+	right.rowIf("Disk", getConfig(control.ConfigKeyDiskPath))
 
-	fmt.Println(title("Bladerunner Status"))
+	if jsonOutput {
+		return emitJSON(runningStatusReport(status, getConfig))
+	}
+
+	if b := bannerHeader(); b != "" {
+		fmt.Print(b) // gradient ASCII banner (includes its own top margin)
+	} else {
+		fmt.Println(title("Bladerunner Status"))
+	}
 	fmt.Println(renderPanels(left, right))
 	fmt.Printf("  %s %s    %s %s\n",
 		subtle("Shell:"), command("br shell"),
@@ -93,6 +137,72 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	fmt.Println()
 
 	return nil
+}
+
+// --- JSON output (br status --json) ---
+
+type statusReport struct {
+	Running bool      `json:"running"`
+	Status  string    `json:"status"`
+	Build   buildInfo `json:"build"`
+	VM      *vmInfo   `json:"vm,omitempty"`
+}
+
+type buildInfo struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Built   string `json:"built"`
+}
+
+type vmInfo struct {
+	PID          string `json:"pid,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Arch         string `json:"arch,omitempty"`
+	CPUs         string `json:"cpus,omitempty"`
+	MemoryGiB    string `json:"memory_gib,omitempty"`
+	DiskSizeGiB  string `json:"disk_size_gib,omitempty"`
+	DiskPath     string `json:"disk_path,omitempty"`
+	NestedVirt   string `json:"nested_virt,omitempty"`
+	Network      string `json:"network,omitempty"`
+	SSHPort      string `json:"ssh_port,omitempty"`
+	APIPort      string `json:"api_port,omitempty"`
+	Image        string `json:"image,omitempty"`
+	ImagePath    string `json:"image_path,omitempty"`
+	ImageVersion string `json:"image_version,omitempty"`
+	Hosted       string `json:"hosted,omitempty"`
+	CloudInitISO string `json:"cloud_init_iso,omitempty"`
+	LogPath      string `json:"log_path,omitempty"`
+}
+
+func currentBuildInfo() buildInfo {
+	return buildInfo{Version: version, Commit: commit, Built: date}
+}
+
+func runningStatusReport(status string, get func(string) string) statusReport {
+	return statusReport{
+		Running: true,
+		Status:  status,
+		Build:   currentBuildInfo(),
+		VM: &vmInfo{
+			PID:          get(control.ConfigKeyPID),
+			Name:         get(control.ConfigKeyName),
+			Arch:         get(control.ConfigKeyArch),
+			CPUs:         get(control.ConfigKeyCPUs),
+			MemoryGiB:    get(control.ConfigKeyMemoryGiB),
+			DiskSizeGiB:  get(control.ConfigKeyDiskSizeGiB),
+			DiskPath:     get(control.ConfigKeyDiskPath),
+			NestedVirt:   get(control.ConfigKeyNestedVirt),
+			Network:      get(control.ConfigKeyNetworkMode),
+			SSHPort:      get(control.ConfigKeyLocalSSHPort),
+			APIPort:      get(control.ConfigKeyLocalAPIPort),
+			Image:        get(control.ConfigKeyBaseImageURL),
+			ImagePath:    get(control.ConfigKeyBaseImagePath),
+			ImageVersion: guestImageVersionForStatus(get),
+			Hosted:       get(control.ConfigKeyUseHostedGuestImage),
+			CloudInitISO: get(control.ConfigKeyCloudInitISO),
+			LogPath:      get(control.ConfigKeyLogPath),
+		},
+	}
 }
 
 // guestImageVersionForStatus reads /etc/bladerunner-image-version via SSH
@@ -113,10 +223,52 @@ func guestImageVersionForStatus(getConfig func(string) string) string {
 	return v
 }
 
-// panel accumulates rows of formatted text for a single column.
+// bannerHeader returns the gradient ASCII banner indented to align with the
+// panels' left margin, or "" when stdout isn't a TTY or the terminal is too
+// narrow to fit the banner plus that margin (the caller then prints the plain
+// text title instead).
+func bannerHeader() string {
+	b := ui.Banner()
+	if b == "" {
+		return ""
+	}
+	if tw := ui.TerminalWidth(); tw > 0 && ui.BannerWidth()+edgeMargin > tw {
+		return ""
+	}
+	return indentLeft(b, edgeMargin)
+}
+
+// indentLeft prefixes n spaces to every non-empty line of s. The pad is plain
+// spaces written before any ANSI sequences, so styling is preserved.
+func indentLeft(s string, n int) string {
+	pad := strings.Repeat(" ", n)
+	var b strings.Builder
+	first := true
+	for line := range strings.SplitSeq(s, "\n") {
+		if !first {
+			b.WriteByte('\n')
+		}
+		first = false
+		if line != "" {
+			b.WriteString(pad)
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// panel accumulates rows for a single status column. Rows are stored
+// structured (not pre-rendered) so render() can wrap each value within its own
+// column — continuation lines align under the value, not under the label.
 type panel struct {
 	title string
-	lines []string
+	rows  []panelRow
+}
+
+type panelRow struct {
+	label string // raw label; ignored for separators
+	value string // value, possibly already styled by the caller
+	sep   bool
 }
 
 func newPanel(name string) *panel {
@@ -124,8 +276,7 @@ func newPanel(name string) *panel {
 }
 
 func (p *panel) row(label, val string) {
-	padded := fmt.Sprintf("%-*s", labelWidth, label)
-	p.lines = append(p.lines, fmt.Sprintf("%s  %s", key(padded), val))
+	p.rows = append(p.rows, panelRow{label: label, value: val})
 }
 
 func (p *panel) rowIf(label, val string) {
@@ -141,27 +292,79 @@ func (p *panel) rowGiB(label, val string) {
 }
 
 func (p *panel) sep() {
-	p.lines = append(p.lines, subtle(strings.Repeat("─", panelWidth)))
+	p.rows = append(p.rows, panelRow{sep: true})
 }
 
-func (p *panel) render() string {
-	header := key(p.title)
-	divider := subtle(strings.Repeat("─", panelWidth))
-	body := strings.Join(p.lines, "\n")
-	return fmt.Sprintf("%s\n%s\n%s", header, divider, body)
+// labelColWidth is the width consumed by the label column plus its two-space
+// gutter, i.e. the column at which values (and their wrapped continuations)
+// begin.
+const labelColWidth = labelWidth + 2
+
+// contentWidth is the unwrapped width the panel wants: the title, or the label
+// column plus the widest value. Used to let the panel hug its content.
+func (p *panel) contentWidth() int {
+	w := lipgloss.Width(key(p.title))
+	for _, r := range p.rows {
+		if r.sep {
+			continue
+		}
+		if lw := labelColWidth + lipgloss.Width(r.value); lw > w {
+			w = lw
+		}
+	}
+	return w
 }
 
-// renderPanels places two panels side by side with a gap.
+// render lays the panel out at the given inner width. Each row is a fixed-width
+// label cell joined to a value cell that wraps within the remaining columns, so
+// a wrapped value stays aligned under the value column rather than collapsing
+// to the left margin.
+func (p *panel) render(width int) string {
+	divider := subtle(strings.Repeat("─", width))
+	valueWidth := max(width-labelColWidth, 1)
+
+	out := make([]string, 0, len(p.rows)+2)
+	out = append(out, key(p.title), divider)
+	for _, r := range p.rows {
+		if r.sep {
+			out = append(out, divider)
+			continue
+		}
+		labelCell := key(fmt.Sprintf("%-*s", labelWidth, r.label))
+		valueCell := lipgloss.NewStyle().Width(valueWidth).Render(r.value)
+		out = append(out, lipgloss.JoinHorizontal(lipgloss.Top, labelCell, "  ", valueCell))
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderPanels places the two panels side by side with a gap. The left panel
+// is fixed; the right (Build) panel hugs its content responsively.
 func renderPanels(left, right *panel) string {
-	style := lipgloss.NewStyle().Width(panelWidth)
-	gap := strings.Repeat(" ", gapWidth)
+	leftWidth := panelWidth
+	rightWidth := responsiveRightWidth(right, leftWidth)
 
-	l := style.Render(left.render())
-	r := style.Render(right.render())
+	l := lipgloss.NewStyle().Width(leftWidth).Render(left.render(leftWidth))
+	r := lipgloss.NewStyle().Width(rightWidth).Render(right.render(rightWidth))
 
 	if !ui.IsTTY() {
 		return l + "\n\n" + r
 	}
 
+	gap := strings.Repeat(" ", gapWidth)
 	return lipgloss.JoinHorizontal(lipgloss.Top, "  ", l, gap, r)
+}
+
+// responsiveRightWidth sizes the right panel to hug its content within
+// [rightPanelMin, rightPanelMax], capped to fit the terminal with edgeMargin
+// columns clear on each side. With unknown terminal width it just honors the
+// content/min/max bounds.
+func responsiveRightWidth(right *panel, leftWidth int) int {
+	w := right.contentWidth()
+	w = min(max(w, rightPanelMin), rightPanelMax)
+	if term := ui.TerminalWidth(); term > 0 {
+		// edgeMargin + leftWidth + gap + right + edgeMargin <= term
+		avail := term - edgeMargin - leftWidth - gapWidth - edgeMargin
+		w = min(w, avail)
+	}
+	return max(w, rightPanelMin) // narrow terminal: prefer min over collapsing
 }

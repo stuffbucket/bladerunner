@@ -12,6 +12,30 @@ import (
 
 const maxDisplayValueLen = 60
 
+// --- JSON output (br config ... --json) ---
+
+// configGetResult is the JSON shape for `br config get <key> --json`.
+type configGetResult struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// configSetResult is the JSON shape for `br config set <key> <value> --json`.
+type configSetResult struct {
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+	Status string `json:"status"`
+}
+
+// configKeyInfo is one element of the JSON array for `br config keys --json`.
+type configKeyInfo struct {
+	Key           string `json:"key"`
+	Description   string `json:"description,omitempty"`
+	RequiresVM    bool   `json:"requires_vm"`
+	RequiresReset bool   `json:"requires_reset"`
+	Writable      bool   `json:"writable"`
+}
+
 var configCmd = &cobra.Command{
 	Use:   "config <get|set|keys> [key] [value]",
 	Short: "Get or set configuration values",
@@ -94,14 +118,22 @@ func defaultConfigValue(cfg *config.Config, k string) string {
 
 func runConfigGet(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: br config get <key>")
+		err := fmt.Errorf("usage: br config get <key>")
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	configKey := args[0]
 	metaMap := control.ConfigKeyMetaMap()
 	meta, known := metaMap[configKey]
 	if !known {
-		return fmt.Errorf("unknown config key: %s", configKey)
+		err := fmt.Errorf("unknown config key: %s", configKey)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	stateDir := config.DefaultStateDir()
@@ -112,6 +144,9 @@ func runConfigGet(args []string) error {
 	if vmRunning {
 		configValue, err := client.GetConfig(configKey)
 		if err == nil {
+			if jsonOutput {
+				return emitJSON(configGetResult{Key: configKey, Value: configValue})
+			}
 			fmt.Println(configValue)
 			return nil
 		}
@@ -119,23 +154,38 @@ func runConfigGet(args []string) error {
 
 	// Runtime-only key but VM not running
 	if meta.RequiresVM {
-		return fmt.Errorf("%s is only available when the VM is running", configKey)
+		err := fmt.Errorf("%s is only available when the VM is running", configKey)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	// Fall back to default config
 	cfg, err := config.Default("")
 	if err != nil {
-		return fmt.Errorf("load defaults: %w", err)
+		err = fmt.Errorf("load defaults: %w", err)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	configValue := defaultConfigValue(cfg, configKey)
+	if jsonOutput {
+		return emitJSON(configGetResult{Key: configKey, Value: configValue})
+	}
 	fmt.Println(configValue)
 	return nil
 }
 
 func runConfigSet(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: br config set <key> <value>")
+		err := fmt.Errorf("usage: br config set <key> <value>")
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	configKey := args[0]
@@ -144,21 +194,40 @@ func runConfigSet(args []string) error {
 	metaMap := control.ConfigKeyMetaMap()
 	meta, known := metaMap[configKey]
 	if !known {
-		return fmt.Errorf("unknown config key: %s", configKey)
+		err := fmt.Errorf("unknown config key: %s", configKey)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 	if !meta.Writable {
-		return fmt.Errorf("config key %s is read-only", configKey)
+		err := fmt.Errorf("config key %s is read-only", configKey)
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	stateDir := config.DefaultStateDir()
 	client := control.NewClient(stateDir)
 
 	if !client.IsRunning() {
-		return fmt.Errorf("VM is not running; start it first with: %s", command("br start"))
+		err := fmt.Errorf("VM is not running; start it first with: %s", command("br start"))
+		if jsonOutput {
+			emitJSONError(err)
+		}
+		return err
 	}
 
 	if err := client.SetConfig(configKey, configValue); err != nil {
+		if jsonOutput {
+			emitJSONError(err)
+		}
 		return err
+	}
+
+	if jsonOutput {
+		return emitJSON(configSetResult{Key: configKey, Value: configValue, Status: "ok"})
 	}
 
 	fmt.Printf("%s Set %s to %s\n", success("✓"), key(configKey), value(configValue))
@@ -173,6 +242,21 @@ func runConfigSet(args []string) error {
 
 func runConfigKeys() error {
 	registry := control.ConfigKeyRegistry()
+
+	if jsonOutput {
+		keys := make([]configKeyInfo, 0, len(registry))
+		for _, meta := range registry {
+			keys = append(keys, configKeyInfo{
+				Key:           meta.Key,
+				Description:   meta.Description,
+				RequiresVM:    meta.RequiresVM,
+				RequiresReset: meta.RequiresReset,
+				Writable:      meta.Writable,
+			})
+		}
+		return emitJSON(keys)
+	}
+
 	cfg, err := config.Default("")
 	if err != nil {
 		return fmt.Errorf("load defaults: %w", err)
