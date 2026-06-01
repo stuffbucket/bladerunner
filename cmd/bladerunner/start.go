@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,17 +25,18 @@ import (
 )
 
 var startFlags struct {
-	cpus      uint
-	memory    uint64
-	disk      int
-	gui       bool
-	stateDir  string
-	imageURL  string
-	imagePath string
-	timeout   time.Duration
-	useAgent  bool
-	noAgent   bool
-	noNested  bool
+	cpus        uint
+	memory      uint64
+	disk        int
+	gui         bool
+	stateDir    string
+	imageURL    string
+	imagePath   string
+	timeout     time.Duration
+	useAgent    bool
+	noAgent     bool
+	noNested    bool
+	restoreFrom string
 }
 
 var startCmd = &cobra.Command{
@@ -58,6 +60,7 @@ func init() {
 	f.BoolVar(&startFlags.useAgent, "use-guest-agent", false, "Use the in-guest br-agent for boot config (requires pre-baked image or user-side install)")
 	f.BoolVar(&startFlags.noAgent, "no-agent", false, "Force the legacy cloud-init/HTTP-polling path even if use-guest-agent is enabled")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
+	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
 }
 
 // nestedVirtBanner describes whether the guest's Incus will be able to run VMs
@@ -72,6 +75,30 @@ func nestedVirtBanner() string {
 	default:
 		return subtle("unsupported — containers only (host lacks nested virtualization)")
 	}
+}
+
+// registerUpgradeHandlers registers the control commands that back `br upgrade`:
+// reporting the server's build version, and pausing+saving the guest state.
+// getRunner returns the active runner once StartVM has created it (nil before).
+func registerUpgradeHandlers(router *control.Router, cfg *config.Config, getRunner func() *vm.Runner) {
+	router.HandleFunc(control.CmdServerVersion, func(_ context.Context, _ *control.Request) *control.Message {
+		return &control.Message{Response: version}
+	})
+	router.HandleFunc(control.CmdSave, func(_ context.Context, req *control.Request) *control.Message {
+		r := getRunner()
+		if r == nil {
+			return &control.Message{Error: "VM is not started yet"}
+		}
+		if err := r.SaveState(cfg.SavedStatePath); err != nil {
+			return &control.Message{Error: err.Error()}
+		}
+		if req.Args["0"] != control.SaveModePause {
+			if err := r.ResumeVM(); err != nil {
+				return &control.Message{Error: err.Error()}
+			}
+		}
+		return &control.Message{Response: cfg.SavedStatePath}
+	})
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -103,6 +130,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Mount config handler (captures cfg by reference; sees values set after VM start)
 	cfgHandler := control.NewConfigRouter(cfg)
 	ctrlServer.Router().Mount("config", cfgHandler.Router())
+
+	// Synchronized holder so the save handler (registered before the server
+	// starts serving, to avoid a handlers-map race) can reach the runner once
+	// it exists.
+	var (
+		runnerMu     sync.Mutex
+		activeRunner *vm.Runner
+	)
+	setRunner := func(r *vm.Runner) { runnerMu.Lock(); activeRunner = r; runnerMu.Unlock() }
+	registerUpgradeHandlers(ctrlServer.Router(), cfg, func() *vm.Runner {
+		runnerMu.Lock()
+		defer runnerMu.Unlock()
+		return activeRunner
+	})
 
 	go ctrlServer.Start(ctx)
 
@@ -158,6 +199,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create runner: %w", err)
 	}
 	defer func() { _ = runner.Stop() }()
+	setRunner(runner)
+
+	// --restore: bring the guest up from a saved-state file (and resume it)
+	// instead of cold-booting. Used by `br restore` and `br upgrade`.
+	if startFlags.restoreFrom != "" {
+		runner.SetRestoreFrom(startFlags.restoreFrom)
+	}
 
 	if !jsonOutput {
 		fmt.Println(title("Starting Bladerunner VM..."))

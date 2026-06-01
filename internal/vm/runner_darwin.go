@@ -28,10 +28,18 @@ type Runner struct {
 	cfg *config.Config
 
 	vm            *vz.VirtualMachine
+	vmConfig      *vz.VirtualMachineConfiguration
 	metadata      *runtimeMetadata
 	clientCrt     []byte
 	clientKey     []byte
 	baseImagePath string
+	// restoreFrom, when set before StartVM, makes StartVM restore the guest
+	// from a saved-state file (and resume it) instead of cold-booting.
+	restoreFrom string
+	// savedState records that the guest's RAM state has been saved to disk and
+	// the VM is paused; Stop then skips the graceful ACPI request and tears the
+	// VM down directly (the guest must not resume after a save).
+	savedState bool
 
 	forwarders        []*portForwarder
 	reverseForwarders []*reversePortForwarder
@@ -55,6 +63,64 @@ func NestedVirtualizationSupported() bool {
 // Empty until the platform has been configured (StartVM).
 func (r *Runner) NestedVirtState() string {
 	return r.nestedVirt
+}
+
+// SetRestoreFrom configures StartVM to restore the guest from a saved-state
+// file (produced by SaveState) and resume it, instead of cold-booting. Must be
+// called before StartVM.
+func (r *Runner) SetRestoreFrom(path string) { r.restoreFrom = path }
+
+// SupportsSaveRestore reports whether the configured VM supports VZ
+// save/restore, returning an error explaining why not when it doesn't.
+func (r *Runner) SupportsSaveRestore() error {
+	if r.vmConfig == nil {
+		return errors.New("vm not configured")
+	}
+	ok, err := r.vmConfig.ValidateSaveRestoreSupport()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("this VM configuration does not support save/restore")
+	}
+	return nil
+}
+
+// SaveState pauses the guest and writes its machine state to path. On success
+// the VM is left paused: callers either ResumeVM for a live snapshot, or Stop
+// for an upgrade handoff. The guest must not resume between save and a
+// subsequent Stop, or the on-disk image diverges from the saved RAM.
+func (r *Runner) SaveState(path string) error {
+	if r.vm == nil {
+		return errors.New("vm not started")
+	}
+	if err := r.SupportsSaveRestore(); err != nil {
+		return err
+	}
+	if !r.vm.CanPause() {
+		return errors.New("vm is not in a pausable state")
+	}
+	if err := r.vm.Pause(); err != nil {
+		return fmt.Errorf("pause vm: %w", err)
+	}
+	if err := r.vm.SaveMachineStateToPath(path); err != nil {
+		_ = r.vm.Resume() // best effort: don't strand a paused VM on failure
+		return fmt.Errorf("save vm state: %w", err)
+	}
+	r.savedState = true
+	return nil
+}
+
+// ResumeVM resumes a paused guest (e.g. after a live snapshot save).
+func (r *Runner) ResumeVM() error {
+	if r.vm == nil {
+		return errors.New("vm not started")
+	}
+	r.savedState = false
+	if !r.vm.CanResume() {
+		return nil
+	}
+	return r.vm.Resume()
 }
 
 // SetProgress attaches a Progress reporter. Must be called before Start /
@@ -100,13 +166,19 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	r.clientCrt = certPEM
 	r.clientKey = keyPEM
 
-	log.Info("building cloud-init payload")
-	userData, metaData := provision.BuildCloudInit(r.cfg, string(certPEM))
-	if err := provision.WriteSeedFiles(r.cfg, userData, metaData); err != nil {
-		return nil, err
-	}
-	if err := provision.BuildCloudInitISO(ctx, r.cfg); err != nil {
-		return nil, err
+	// On restore the guest is already configured and frozen in the saved
+	// state; regenerating cloud-init would needlessly rewrite the seed ISO. The
+	// existing ISO file is still attached so the device topology matches the
+	// saved configuration.
+	if r.restoreFrom == "" {
+		log.Info("building cloud-init payload")
+		userData, metaData := provision.BuildCloudInit(r.cfg, string(certPEM))
+		if err := provision.WriteSeedFiles(r.cfg, userData, metaData); err != nil {
+			return nil, err
+		}
+		if err := provision.BuildCloudInitISO(ctx, r.cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	log.Info("resolving base image and main disk")
@@ -130,6 +202,7 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.vmConfig = vmCfg
 
 	log.Info("creating virtual machine instance")
 	vm, err := vz.NewVirtualMachine(vmCfg)
@@ -138,9 +211,19 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	}
 	r.vm = vm
 
-	log.Info("starting virtual machine")
-	if err := vm.Start(); err != nil {
-		return nil, fmt.Errorf("start vm: %w", err)
+	if r.restoreFrom != "" {
+		log.Info("restoring saved VM state", "path", r.restoreFrom)
+		if err := vm.RestoreMachineStateFromURL(r.restoreFrom); err != nil {
+			return nil, fmt.Errorf("restore vm state: %w", err)
+		}
+		if err := vm.Resume(); err != nil {
+			return nil, fmt.Errorf("resume restored vm: %w", err)
+		}
+	} else {
+		log.Info("starting virtual machine")
+		if err := vm.Start(); err != nil {
+			return nil, fmt.Errorf("start vm: %w", err)
+		}
 	}
 
 	r.progress.Begin(StageVMBoot, "Waiting for VM to reach running state", 2*time.Minute)
@@ -326,6 +409,11 @@ func (r *Runner) closeForwarders() {
 }
 
 func (r *Runner) requestStopVM(log loggerLike) {
+	if r.savedState {
+		// State already saved and the guest is paused; a graceful ACPI request
+		// would only stall. forceStopVMIfNeeded tears it down directly.
+		return
+	}
 	for i := 0; i < 3 && r.vm.CanRequestStop(); i++ {
 		ok, err := r.vm.RequestStop()
 		log.Info("sent stop request", "attempt", i+1, "accepted", ok, "err", err)

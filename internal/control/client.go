@@ -168,6 +168,38 @@ func (c *Client) StatusContext(_ context.Context) (string, error) {
 	return resp.Response, nil
 }
 
+// ServerVersion returns the running server's build version string, used to
+// detect that a newer client binary should take over the server (br upgrade).
+func (c *Client) ServerVersion() (string, error) {
+	resp, err := c.sendCommand(CmdServerVersion, clientCmdTimeout)
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("server error: %s", resp.Error)
+	}
+	return resp.Response, nil
+}
+
+// SaveState asks the server to pause the guest and write its machine state to
+// the server's default saved-state path, returning that path. When keepPaused
+// is true the guest is left paused (for an upgrade handoff); otherwise it is
+// resumed afterward (a live snapshot).
+func (c *Client) SaveState(keepPaused bool) (string, error) {
+	cmd := CmdSave
+	if keepPaused {
+		cmd = BuildCommand(CmdSave, SaveModePause)
+	}
+	resp, err := c.sendCommand(cmd, saveCommandTimeout)
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("save error: %s", resp.Error)
+	}
+	return resp.Response, nil
+}
+
 // Controller interface adapter
 
 func (c *Client) Ping(ctx context.Context) error {

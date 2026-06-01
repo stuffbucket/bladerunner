@@ -81,7 +81,19 @@ const (
 	CmdPing   = "ping"
 	CmdStop   = "stop"
 	CmdStatus = "status"
+	// CmdSave pauses the guest and writes its machine state to the server's
+	// default saved-state path. With the SaveModePause argument the guest is
+	// left paused (for an upgrade handoff); otherwise it is resumed (snapshot).
+	// The response body is the path written.
+	CmdSave = "save"
+	// CmdServerVersion reports the running server's build version string, so a
+	// client can detect that a newer binary should take over (br upgrade).
+	CmdServerVersion = "version"
 )
+
+// SaveModePause is the CmdSave argument that leaves the guest paused after
+// saving instead of resuming it.
+const SaveModePause = "pause"
 
 // Config command constants
 const (

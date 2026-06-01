@@ -76,6 +76,7 @@ const (
 	logFileName          = "bladerunner.log"
 	reportFileName       = "startup-report.json"
 	metadataFileName     = "runtime-metadata.json"
+	savedStateFileName   = "saved-state.bin"
 	clientCertFileName   = "client.crt"
 	clientKeyFileName    = "client.key"
 )
@@ -86,6 +87,9 @@ type Config struct {
 	StateDir     string
 	VMDir        string
 	DiskPath     string
+	// SavedStatePath is where `br save` / `br upgrade` write the VZ saved
+	// machine state. Defaults to <stateDir>/saved-state.bin.
+	SavedStatePath string
 	DiskSizeGiB  int
 	BaseImageURL string
 	// BaseImageSHA512 is the expected SHA-512 of the downloaded base image. Set
@@ -264,6 +268,7 @@ func Default(baseDir string) (*Config, error) {
 		StateDir:            baseDir,
 		VMDir:               baseDir,
 		DiskPath:            filepath.Join(baseDir, diskFileName),
+		SavedStatePath:      filepath.Join(baseDir, savedStateFileName),
 		DiskSizeGiB:         DefaultDiskSizeGiB,
 		BaseImageURL:        imageURL,
 		BaseImageSHA512:     baseImageSHA512,
