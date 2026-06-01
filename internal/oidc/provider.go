@@ -56,6 +56,7 @@ const (
 type Provider struct {
 	issuer   *Issuer
 	store    *Store
+	sso      *ssoState
 	listener net.Listener
 	server   *http.Server
 	addr     string
@@ -110,6 +111,7 @@ func NewProvider(cfg Config) (*Provider, error) {
 	return &Provider{
 		issuer:  issuer,
 		store:   cfg.Store,
+		sso:     newSSOState(),
 		addr:    cfg.ListenAddr,
 		baseURL: cfg.IssuerURL,
 	}, nil
@@ -138,6 +140,11 @@ func (p *Provider) Handler() http.Handler {
 	mux.HandleFunc(pathJWKS, p.handleJWKS)
 	mux.HandleFunc(pathToken, p.handleToken)
 	mux.HandleFunc(pathAuthorize, p.handleAuthorize)
+	mux.HandleFunc(pathAuthorizePoll, p.handleAuthorizePoll)
+	mux.HandleFunc(pathAuthnNonce, p.handleAuthnNonce)
+	mux.HandleFunc(pathAuthnExchange, p.handleAuthnExchange)
+	mux.HandleFunc(pathAuthnConsume, p.handleAuthnConsume)
+	mux.HandleFunc(pathAuthnApprove, p.handleAuthnApprove)
 	return mux
 }
 
@@ -206,6 +213,7 @@ type discoveryDocument struct {
 	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported"`
 	GrantTypesSupported              []string `json:"grant_types_supported"`
 	TokenEndpointAuthMethodsSupp     []string `json:"token_endpoint_auth_methods_supported"`
+	CodeChallengeMethodsSupported    []string `json:"code_challenge_methods_supported"`
 }
 
 func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
@@ -217,8 +225,9 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		ResponseTypesSupported:           []string{"code", "token"},
 		SubjectTypesSupported:            []string{"public"},
 		IDTokenSigningAlgValuesSupported: []string{string(signingAlgorithm)},
-		GrantTypesSupported:              []string{grantTypeSSHKey, "authorization_code"},
+		GrantTypesSupported:              []string{grantTypeSSHKey, grantTypeAuthCode},
 		TokenEndpointAuthMethodsSupp:     []string{"none", "client_secret_post"},
+		CodeChallengeMethodsSupported:    []string{"S256", "plain"},
 	}
 	writeJSON(w, http.StatusOK, doc)
 }
@@ -242,12 +251,12 @@ type tokenResponse struct {
 	Subject     string `json:"sub,omitempty"`
 }
 
-// handleToken implements the MVP token endpoint. It accepts the custom
-// grant_type=urn:bladerunner:params:oauth:grant-type:ssh-key plus a
-// "fingerprint" parameter, and returns a JWT if the fingerprint is registered.
+// handleToken implements the OAuth2 token endpoint. It dispatches on grant_type:
 //
-// The browser-based authorization_code grant is intentionally not implemented
-// in this PR — see issue #43 follow-up.
+//   - urn:bladerunner:params:oauth:grant-type:ssh-key — the custom CLI grant that
+//     exchanges a registered SSH-key fingerprint directly for a JWT.
+//   - authorization_code — the standard browser grant used by the Incus web UI,
+//     redeeming a code minted by handleAuthorize (see sso.go).
 func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
@@ -259,12 +268,19 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grantType := r.PostForm.Get(formFieldGrantType)
-	if grantType != grantTypeSSHKey {
-		writeError(w, http.StatusBadRequest, "unsupported_grant_type", "only "+grantTypeSSHKey+" is implemented")
-		return
+	switch r.PostForm.Get(formFieldGrantType) {
+	case grantTypeSSHKey:
+		p.handleSSHKeyGrant(w, r)
+	case grantTypeAuthCode:
+		p.handleAuthCodeGrant(w, r)
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported_grant_type", "supported grants: "+grantTypeSSHKey+", "+grantTypeAuthCode)
 	}
+}
 
+// handleSSHKeyGrant exchanges a registered fingerprint for a JWT. r.PostForm is
+// already parsed by handleToken.
+func (p *Provider) handleSSHKeyGrant(w http.ResponseWriter, r *http.Request) {
 	fingerprint := strings.TrimSpace(r.PostForm.Get("fingerprint"))
 	if fingerprint == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "fingerprint is required")
@@ -292,11 +308,6 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 		Subject:     claims.Subject,
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// handleAuthorize is a placeholder for the future browser-based code+PKCE flow.
-func (p *Provider) handleAuthorize(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "authorization code flow not implemented in this MVP")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

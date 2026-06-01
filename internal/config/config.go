@@ -128,8 +128,11 @@ type Config struct {
 	// cloud-init bootstrap script. Requires br-agent to be present in the
 	// guest image (see #45) or installed via cloud-init user override.
 	UseGuestAgent bool
-	// OIDCIssuerURL is the issuer URL Incus sees from inside the VM.
-	// Defaults to http://127.0.0.1:<VsockOIDCPort>.
+	// OIDCIssuerURL is the issuer URL advertised in discovery and tokens. It uses
+	// the host provider's loopback port (LocalOIDCPort) so it resolves identically
+	// from inside the VM (Incus, via the guest→host vsock bridge) and on the host
+	// (the browser, direct) — which the browser authorization-code redirect needs.
+	// Defaults to http://127.0.0.1:<LocalOIDCPort>.
 	OIDCIssuerURL string
 	// OIDCClientID is the OAuth2 client_id Incus uses (and that this provider expects).
 	OIDCClientID string
@@ -296,7 +299,7 @@ func Default(baseDir string) (*Config, error) {
 		VsockOIDCPort:       DefaultVsockOIDCPort,
 		AgentVsockPort:      DefaultAgentVsockPort,
 		UseGuestAgent:       false,
-		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultVsockOIDCPort),
+		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultLocalOIDCPort),
 		OIDCClientID:        DefaultOIDCClientID,
 		OIDCAudience:        DefaultOIDCAudience,
 		OIDCStateDir:        filepath.Join(baseDir, "oidc"),
