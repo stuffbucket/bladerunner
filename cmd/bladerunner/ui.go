@@ -1,9 +1,6 @@
 package main
 
 import (
-	"fmt"
-
-	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/ui"
@@ -20,16 +17,18 @@ var (
 	command = ui.Command
 )
 
-// sshConfigFromControl retrieves the SSH config path from the running bladerunner instance.
+// sshConfigFromControl retrieves the SSH config path from the running bladerunner
+// instance, offering to start the VM first when one is needed (see requireRunningVM).
 func sshConfigFromControl() (string, error) {
-	stateDir := config.DefaultStateDir()
-	client := control.NewClient(stateDir)
-
+	client, err := requireRunningVM()
+	if err != nil {
+		return "", err
+	}
 	configPath, err := client.GetConfig(control.ConfigKeySSHConfigPath)
 	if err != nil {
-		logging.L().Error("VM not running or not configured")
-		logging.L().Info("start it with", "command", "br start")
-		return "", fmt.Errorf("VM not configured: %w", err)
+		// Keep the raw control-socket error out of the terminal; log it instead.
+		logging.L().Debug("get ssh config path failed", "err", err)
+		return "", errVMNotRunning
 	}
 	return configPath, nil
 }
