@@ -85,6 +85,11 @@ jobs:
           exit-code: '1'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          # This is the production gate for the shipped Go binary + OS packages.
+          # The ./site landing page is a separate static sub-project whose npm
+          # deps are build-time tooling only (nothing ships at runtime); they are
+          # validated by the pages.yml build job, so exclude its lockfile here.
+          skip-files: 'site/package-lock.json'
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
