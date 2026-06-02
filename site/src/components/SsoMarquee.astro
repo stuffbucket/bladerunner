@@ -1,0 +1,55 @@
+---
+import Eyebrow from './Eyebrow.astro';
+import BrowserFrame from './BrowserFrame.astro';
+import Terminal from './Terminal.astro';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const shot = `${base}/incus-ui-shot.png`;
+
+const callout = `<span class="tprompt">$ runner</span><span class="targ"> web</span>
+<span class="tcomment"># no password · no cert prompt · no OIDC</span>`;
+---
+<section id="sso" class="section band-subtle sso">
+  <div class="wrap sso-grid">
+    <div class="sso-shot reveal">
+      <BrowserFrame
+        src={shot}
+        url="127.0.0.1:18443/ui/"
+        alt="Incus web UI, logged in via SSH-key single sign-on"
+      />
+    </div>
+
+    <div class="sso-copy reveal">
+      <Eyebrow text="The marquee feature" />
+      <h2 class="h2">Open the dashboard already logged in.</h2>
+      <p class="sso-body">
+        <code class="chip"><span class="cmd">runner</span> web</code> opens the Incus dashboard and
+        you land already logged in — no password, no client-cert prompt, no OIDC setup. bladerunner
+        proves possession of the same SSH key you use for
+        <code class="chip"><span class="cmd">runner</span> ssh</code> and hands the browser a
+        session. (Approving from another terminal?
+        <code class="chip"><span class="cmd">runner</span> web approve</code> works too.)
+      </p>
+
+      <div class="sso-callout">
+        <Terminal label="runner — zsh" ariaLabel="runner web command"><Fragment set:html={callout} /></Terminal>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .sso-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 64px;
+    align-items: center;
+  }
+  .sso-body { margin-top: var(--s-6); font-size: var(--t-body); color: var(--body); }
+  .sso-callout { margin-top: var(--s-8); max-width: 420px; }
+
+  @media (max-width: 1023px) {
+    .sso-grid { grid-template-columns: 1fr; gap: 44px; }
+    .sso-callout { max-width: none; }
+  }
+</style>

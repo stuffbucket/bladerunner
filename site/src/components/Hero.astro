@@ -1,0 +1,169 @@
+---
+import Eyebrow from './Eyebrow.astro';
+import Button from './Button.astro';
+import Terminal from './Terminal.astro';
+
+const INSTALL = 'brew install stuffbucket/tap/bladerunner';
+const GH = 'https://github.com/stuffbucket/bladerunner';
+
+const heroBody = `<span class="line"><span class="tprompt">$ brew</span><span class="targ"> install stuffbucket/tap/bladerunner</span></span>
+<span class="line"><span class="tok">✔</span> signed with Virtualization entitlement</span>
+<span class="line"> </span>
+<span class="line"><span class="tprompt">$ runner</span><span class="targ"> start</span></span>
+<span class="line"><span class="spin">⠙</span> booting Debian 13 (trixie)…</span>
+<span class="line"><span class="spin">⠹</span> cloud-init: installing incus…</span>
+<span class="line"><span class="tok">✔</span> Incus ready · <span class="tstring">https://127.0.0.1:18443</span></span>
+<span class="line"><span class="tok">✔</span> SSH        · <span class="tstring">127.0.0.1:6022</span></span>
+<span class="line"> </span>
+<span class="line"><span class="tprompt">$ runner</span><span class="targ"> web</span></span>
+<span class="line">→ opening dashboard, signed in with your SSH key <span class="tok">✓</span></span>`;
+---
+<header id="top" class="section band-bg hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy reveal">
+      <Eyebrow text="Native Incus for Apple Silicon" />
+      <h1 class="h1">Incus on your Mac, the <span class="accent-text">native way</span>.</h1>
+      <p class="subhead hero-sub">
+        bladerunner runs a full Incus daemon in a Debian 13 VM built directly on Apple’s
+        Virtualization.framework — no Lima, no Colima, no QEMU layer in between.
+        <code class="chip"><span class="cmd">brew</span> install</code>,
+        <code class="chip"><span class="cmd">runner</span> start</code>, and you’re running
+        containers and VMs on Apple Silicon. Then
+        <code class="chip"><span class="cmd">runner</span> web</code> opens the Incus dashboard
+        already signed in with your SSH key.
+      </p>
+
+      <div class="hero-actions">
+        <Button variant="primary" copy={INSTALL} copyLabel={INSTALL} class="hero-install" />
+        <Button variant="outline" href={GH} external>View on GitHub →</Button>
+      </div>
+
+      <p class="hero-micro">Apple Silicon · macOS 13+ · M1–M4</p>
+    </div>
+
+    <div class="hero-term reveal">
+      <Terminal
+        label="runner — zsh — 80×24"
+        autotype={true}
+        ariaLabel="Terminal demo: brew install, runner start, runner web"
+      ><Fragment set:html={heroBody} /></Terminal>
+    </div>
+  </div>
+</header>
+
+<style>
+  .hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.1fr);
+    gap: 56px;
+    align-items: center;
+  }
+  .hero-sub { margin-top: var(--s-6); max-width: 38ch; }
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-4);
+    margin-top: var(--s-8);
+  }
+  .hero-install :global(.copy-label) {
+    font-size: 16px;
+  }
+  .hero-micro {
+    margin-top: var(--s-6);
+    font-family: var(--font-mono);
+    font-size: var(--t-small);
+    color: var(--muted);
+  }
+
+  @media (max-width: 1023px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 40px; }
+    .hero-sub { max-width: none; }
+  }
+  @media (max-width: 600px) {
+    .hero-actions { flex-direction: column; align-items: stretch; }
+    .hero-actions :global(.btn) { width: 100%; }
+  }
+</style>
+
+<style is:global>
+  /* hero terminal extras: spinner color */
+  .hero-term .terminal-body .spin { color: var(--term-string); }
+</style>
+
+<script>
+  // ---- Hero terminal auto-type ----
+  const term = document.querySelector<HTMLElement>('.hero-term .terminal[data-autotype="true"] .terminal-body');
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  if (term) {
+    const finalHTML = term.innerHTML;
+    if (reduce) {
+      // leave final state in place, just append a static caret
+      const caret = document.createElement('span');
+      caret.className = 'caret';
+      caret.textContent = '▌';
+      term.appendChild(caret);
+    } else {
+      // Build a flat list of {text, className} tokens from the line spans,
+      // then reveal character by character preserving markup.
+      const tmpl = document.createElement('div');
+      tmpl.innerHTML = finalHTML;
+      type Tok = { text: string; cls: string | null; newlineAfter: boolean };
+      const tokens: Tok[] = [];
+      tmpl.querySelectorAll('.line').forEach((line) => {
+        line.childNodes.forEach((n) => {
+          if (n.nodeType === Node.TEXT_NODE) {
+            tokens.push({ text: n.textContent || '', cls: null, newlineAfter: false });
+          } else if (n instanceof HTMLElement) {
+            tokens.push({ text: n.textContent || '', cls: n.className, newlineAfter: false });
+          }
+        });
+        tokens.push({ text: '', cls: null, newlineAfter: true });
+      });
+
+      term.innerHTML = '';
+      const caret = document.createElement('span');
+      caret.className = 'caret';
+      caret.textContent = '▌';
+      term.appendChild(caret);
+
+      let ti = 0;
+      let ci = 0;
+      let current: HTMLElement | null = null;
+
+      const SPEED = 28;
+      function step() {
+        if (ti >= tokens.length) return;
+        const tok = tokens[ti];
+        if (tok.newlineAfter) {
+          term!.insertBefore(document.createTextNode('\n'), caret);
+          current = null;
+          ti++; ci = 0;
+          setTimeout(step, 4);
+          return;
+        }
+        if (ci === 0) {
+          if (tok.cls) {
+            current = document.createElement('span');
+            current.className = tok.cls;
+            term!.insertBefore(current, caret);
+          } else {
+            current = null;
+          }
+        }
+        if (ci < tok.text.length) {
+          const ch = tok.text[ci];
+          if (current) current.textContent += ch;
+          else term!.insertBefore(document.createTextNode(ch), caret);
+          ci++;
+          setTimeout(step, SPEED);
+        } else {
+          ti++; ci = 0;
+          setTimeout(step, 6);
+        }
+      }
+      // small initial delay so fonts settle
+      setTimeout(step, 350);
+    }
+  }
+</script>

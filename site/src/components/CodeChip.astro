@@ -1,0 +1,7 @@
+---
+// Inline mono chip. `cmd` = the command-name portion (rendered --accent),
+// `rest` = trailing args/flags rendered in body color.
+interface Props { cmd: string; rest?: string; }
+const { cmd, rest = '' } = Astro.props;
+---
+<code class="chip"><span class="cmd">{cmd}</span>{rest ? ` ${rest}` : ''}</code>

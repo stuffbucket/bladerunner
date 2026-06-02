@@ -1,0 +1,43 @@
+---
+interface Props {
+  variant?: 'primary' | 'outline' | 'inverted';
+  href?: string;
+  copy?: string;          // if set → click-to-copy button
+  copyLabel?: string;     // visible label when copy variant (defaults to copy value)
+  external?: boolean;
+  class?: string;
+  size?: 'normal' | 'sm';
+}
+const {
+  variant = 'primary',
+  href,
+  copy,
+  copyLabel,
+  external = false,
+  class: cls = '',
+  size = 'normal',
+} = Astro.props;
+
+const classes = `btn btn-${variant} ${copy ? 'btn-copy' : ''} ${size === 'sm' ? 'btn-sm' : ''} ${cls}`;
+const rel = external ? 'noopener noreferrer' : undefined;
+const target = external ? '_blank' : undefined;
+---
+{copy ? (
+  <button
+    type="button"
+    class={classes}
+    data-copy={copy}
+    aria-label={`Copy command: ${copy}`}
+  >
+    <span class="copy-label">{copyLabel ?? copy}</span>
+    <span class="copy-glyph" aria-hidden="true">⧉</span>
+  </button>
+) : (
+  <a class={classes} href={href} target={target} rel={rel}>
+    <slot />
+  </a>
+)}
+
+<style>
+  .btn-sm { font-size: 15.3px; padding: 9px 16px; min-height: 38px; }
+</style>

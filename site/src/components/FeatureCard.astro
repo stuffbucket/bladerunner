@@ -1,0 +1,87 @@
+---
+interface Props {
+  icon: string;       // key into the icon set
+  title: string;
+  span?: boolean;     // span 2 columns
+  href?: string;      // optional anchor link (card #1 → #sso)
+}
+const { icon, title, span = false, href } = Astro.props;
+
+// 28px line icons, stroke 1.75, currentColor
+const icons: Record<string, string> = {
+  key: '<path d="M15.5 7.5a4.5 4.5 0 1 0-3.2 4.3L17 16l2-2 2 2 2.5-2.5-7.2-7.2c.2-.4.4-.6.4-.8Z"/><circle cx="11" cy="7.5" r="1"/>',
+  chip: '<rect x="6" y="6" width="16" height="16" rx="2.5"/><rect x="10.5" y="10.5" width="7" height="7" rx="1"/><path d="M11 2.5v3M17 2.5v3M11 22.5v3M17 22.5v3M2.5 11h3M2.5 17h3M22.5 11h3M22.5 17h3"/>',
+  boot: '<path d="M14 3v9"/><path d="M19 6.3a8 8 0 1 1-10 0"/>',
+  vsock: '<rect x="3" y="9" width="10" height="10" rx="2"/><rect x="15" y="3.5" width="10" height="10" rx="2"/><path d="M13 13h2M19 13.5v.5"/><path d="M13.5 14.5 18 10"/>',
+  save: '<rect x="4.5" y="4.5" width="19" height="19" rx="2.5"/><path d="M9 4.5v6h7v-6"/><path d="M9 19.5h10"/>',
+  net: '<circle cx="14" cy="14" r="3"/><circle cx="14" cy="14" r="9.5"/><path d="M4.5 14h4.5M19 14h4.5M14 4.5V9M14 19v4.5"/>',
+  tui: '<rect x="3.5" y="5" width="21" height="18" rx="2.5"/><path d="M8 11l3 3-3 3M14 17h6"/>',
+};
+const Tag = href ? 'a' : 'article';
+---
+<Tag class={`fcard reveal ${span ? 'fcard-span' : ''}`} href={href}>
+  <span class="fcard-line" aria-hidden="true"></span>
+  <span class="fcard-icon" aria-hidden="true">
+    <svg viewBox="0 0 28 28" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" set:html={icons[icon] ?? ''}></svg>
+  </span>
+  <h3 class="fcard-title">{title}{href ? <span class="fcard-anchor" aria-hidden="true"> ↑</span> : null}</h3>
+  <div class="fcard-body"><slot /></div>
+</Tag>
+
+<style>
+  .fcard {
+    position: relative;
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    padding: 28px;
+    text-decoration: none;
+    color: var(--body);
+    overflow: hidden;
+    transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
+  }
+  .fcard-line {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--accent);
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform var(--dur) var(--ease);
+  }
+  .fcard:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-2px);
+  }
+  .fcard:hover .fcard-line { transform: scaleX(1); }
+  .fcard:hover .fcard-icon { color: var(--accent); }
+
+  .fcard-icon {
+    display: inline-flex;
+    color: var(--ink);
+    margin-bottom: var(--s-4);
+    transition: color var(--dur) var(--ease);
+  }
+  .fcard-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: var(--t-card);
+    line-height: 1.25;
+    color: var(--ink);
+    margin-bottom: var(--s-3);
+  }
+  .fcard-anchor { color: var(--accent-text); font-weight: 700; }
+  .fcard-body {
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    color: var(--body);
+  }
+  .fcard-body :global(.chip) { white-space: normal; }
+
+  a.fcard:hover .fcard-anchor { text-decoration: underline; }
+
+  @media (hover: none) {
+    .fcard-line { transform: scaleX(1); opacity: 0.5; }
+  }
+</style>

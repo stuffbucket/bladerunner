@@ -1,0 +1,97 @@
+---
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import Hero from '../components/Hero.astro';
+import SsoMarquee from '../components/SsoMarquee.astro';
+import FeatureGrid from '../components/FeatureGrid.astro';
+import Quickstart from '../components/Quickstart.astro';
+import Why from '../components/Why.astro';
+import FinalCta from '../components/FinalCta.astro';
+import Footer from '../components/Footer.astro';
+---
+<Base>
+  <Nav />
+  <main>
+    <Hero />
+    <SsoMarquee />
+    <FeatureGrid />
+    <Quickstart />
+    <Why />
+    <FinalCta />
+  </main>
+  <Footer />
+
+  <!-- aria-live region for copy success -->
+  <div id="copy-live" class="sr-only" aria-live="polite"></div>
+</Base>
+
+<script>
+  // ============================================================
+  // Global: click-to-copy (buttons w/ data-copy) + scroll reveal
+  // ============================================================
+  const live = document.getElementById('copy-live');
+
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fallback
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch { ok = false; }
+      document.body.removeChild(ta);
+      return ok;
+    }
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) => {
+    const text = btn.getAttribute('data-copy') || '';
+    const labelEl = btn.querySelector<HTMLElement>('.copy-label, .copy-text');
+    const glyphEl = btn.querySelector<HTMLElement>('.copy-glyph');
+    const original = labelEl?.textContent ?? '';
+    let timer: number | undefined;
+
+    btn.addEventListener('click', async () => {
+      const ok = await copyText(text);
+      if (!ok) return;
+      btn.classList.add('is-copied');
+      if (labelEl) labelEl.textContent = 'copied ✓';
+      if (glyphEl) glyphEl.style.display = 'none';
+      if (live) live.textContent = `Copied: ${text}`;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        btn.classList.remove('is-copied');
+        if (labelEl) labelEl.textContent = original;
+        if (glyphEl) glyphEl.style.display = '';
+        if (live) live.textContent = '';
+      }, 1400);
+    });
+  });
+
+  // ---- scroll reveal ----
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const reveals = Array.from(document.querySelectorAll<HTMLElement>('.reveal'));
+  if (reduce) {
+    reveals.forEach((el) => el.classList.add('is-in'));
+  } else {
+    const io = new IntersectionObserver(
+      (entries, obs) => {
+        entries.forEach((e, i) => {
+          if (e.isIntersecting) {
+            const el = e.target as HTMLElement;
+            window.setTimeout(() => el.classList.add('is-in'), (i % 3) * 60);
+            obs.unobserve(el);
+          }
+        });
+      },
+      { rootMargin: '0px 0px -8% 0px', threshold: 0.05 }
+    );
+    reveals.forEach((el) => io.observe(el));
+  }
+</script>

@@ -1,0 +1,84 @@
+---
+import Button from './Button.astro';
+import CopyButton from './CopyButton.astro';
+const INSTALL = 'brew install stuffbucket/tap/bladerunner';
+const GH = 'https://github.com/stuffbucket/bladerunner';
+---
+<section id="install" class="section cta">
+  <div class="cta-glow" aria-hidden="true"></div>
+  <div class="wrap cta-inner reveal">
+    <h2 class="cta-title">Run Incus on your Mac. One command.</h2>
+
+    <div class="cta-cmd">
+      <code class="cta-code"><span class="tprompt">$</span> brew install stuffbucket/tap/bladerunner</code>
+      <CopyButton copy={INSTALL} />
+    </div>
+
+    <div class="cta-actions">
+      <Button variant="primary" copy={INSTALL} copyLabel="Copy install command" />
+      <Button variant="inverted" href={GH} external>GitHub ↗</Button>
+    </div>
+  </div>
+</section>
+
+<style>
+  .cta {
+    position: relative;
+    background: var(--term-bg);
+    overflow: hidden;
+    text-align: center;
+  }
+  .cta-glow {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 700px; height: 360px;
+    transform: translate(-50%, -50%);
+    background: var(--accent-ring);
+    filter: blur(120px);
+    opacity: 0.5;
+    pointer-events: none;
+  }
+  .cta-inner { position: relative; z-index: 1; }
+  .cta-title {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: var(--t-h2);
+    color: #fff;
+    line-height: 1.1;
+    max-width: 18ch;
+    margin-inline: auto;
+  }
+  .cta-cmd {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: var(--s-8);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--term-border);
+    border-radius: var(--r-card);
+    padding: 12px 12px 12px 20px;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .cta-code {
+    font-family: var(--font-mono);
+    font-size: 1.0625rem;
+    color: var(--term-text);
+    white-space: nowrap;
+    font-feature-settings: "liga" 0;
+  }
+  .cta-code .tprompt { color: var(--term-prompt); }
+  .cta-actions {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: var(--s-4);
+    margin-top: var(--s-8);
+  }
+
+  @media (max-width: 560px) {
+    .cta-cmd { width: 100%; }
+    .cta-actions { flex-direction: column; align-items: stretch; }
+    .cta-actions :global(.btn) { width: 100%; }
+  }
+</style>

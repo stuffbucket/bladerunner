@@ -1,0 +1,209 @@
+---
+import Eyebrow from './Eyebrow.astro';
+import Terminal from './Terminal.astro';
+import Callout from './Callout.astro';
+import CopyButton from './CopyButton.astro';
+
+const steps = [
+  {
+    n: '01',
+    title: 'Install',
+    caption: 'The binary is automatically code-signed with the required Virtualization entitlement during install.',
+    copy: 'brew install stuffbucket/tap/bladerunner',
+    body: `<span class="tprompt">$ brew</span><span class="targ"> install stuffbucket/tap/bladerunner</span>`,
+  },
+  {
+    n: '02',
+    title: 'Start the VM',
+    caption: 'First boot takes a few minutes while cloud-init installs and configures Incus. A startup report is printed and saved to ~/.local/state/bladerunner/startup-report.json.',
+    copy: 'runner start',
+    body: `<span class="tprompt">$ runner</span><span class="targ"> start</span>`,
+  },
+  {
+    n: '03',
+    title: 'Open the web UI — already signed in',
+    caption: 'Lands you in the Incus dashboard authenticated with your SSH key.',
+    copy: 'runner web',
+    body: `<span class="tprompt">$ runner</span><span class="targ"> web</span>`,
+  },
+  {
+    n: '04',
+    title: 'SSH in',
+    caption: 'Show connection details, or connect directly on the forwarded port.',
+    copy: 'ssh -p 6022 incus@127.0.0.1',
+    body: `<span class="tprompt">$ runner</span><span class="targ"> ssh</span>        <span class="tcomment"># show connection details</span>
+<span class="tprompt">$ ssh</span><span class="targ"> -p 6022 incus@127.0.0.1</span>`,
+  },
+  {
+    n: '05',
+    title: 'Snapshot and resume',
+    caption: 'Pause and snapshot the machine state, then bring it right back.',
+    copy: 'runner save',
+    body: `<span class="tprompt">$ runner</span><span class="targ"> save</span>       <span class="tcomment"># pause, snapshot machine state, resume</span>
+<span class="tprompt">$ runner</span><span class="targ"> restore</span>    <span class="tcomment"># bring the VM back from saved state</span>`,
+  },
+];
+---
+<section id="quickstart" class="section band-subtle">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <Eyebrow text="From zero" />
+      <h2 class="h2">From zero to Incus in five steps.</h2>
+    </div>
+
+    <div class="qs-grid">
+      <aside class="qs-stepper" aria-hidden="true">
+        <ol>
+          {steps.map((s) => (
+            <li data-step={s.n}>
+              <span class="qs-node">{s.n}</span>
+              <span class="qs-node-label">{s.title}</span>
+            </li>
+          ))}
+        </ol>
+      </aside>
+
+      <ol class="qs-blocks">
+        {steps.map((s) => (
+          <li class="qs-block reveal" data-step={s.n}>
+            <div class="qs-block-head">
+              <span class="qs-inline-num">{s.n}</span>
+              <p class="qs-caption"><strong>{s.title}.</strong> <span set:html={s.caption} /></p>
+            </div>
+            <div class="qs-term">
+              <Terminal label="runner — zsh" ariaLabel={`Step ${s.n}: ${s.title}`}>
+                <Fragment set:html={s.body} />
+              </Terminal>
+              <div class="qs-copy"><CopyButton copy={s.copy} /></div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+
+    <div class="qs-req reveal">
+      <Callout label="Requirements">
+        Apple Silicon (M1–M4), macOS 13+ (Ventura or later). Save/restore needs macOS 14+. Intel Macs
+        are not supported.
+      </Callout>
+    </div>
+  </div>
+</section>
+
+<style>
+  .section-head { margin-bottom: var(--s-12); }
+
+  .qs-grid {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 48px;
+    align-items: start;
+  }
+
+  /* stepper */
+  .qs-stepper { position: sticky; top: 96px; }
+  .qs-stepper ol { list-style: none; padding: 0; margin: 0; }
+  .qs-stepper li {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding-block: 14px;
+  }
+  .qs-stepper li::before {
+    content: '';
+    position: absolute;
+    left: 17px; top: 38px; bottom: -14px;
+    width: 1px;
+    background: var(--border-strong);
+  }
+  .qs-stepper li:last-child::before { display: none; }
+  .qs-node {
+    flex: none;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-strong);
+    display: grid;
+    place-items: center;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--muted);
+    background: var(--bg-subtle);
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+                border-color var(--dur) var(--ease);
+  }
+  .qs-node-label {
+    font-family: var(--font-ui);
+    font-weight: 500;
+    font-size: 0.9375rem;
+    color: var(--muted);
+    transition: color var(--dur) var(--ease);
+  }
+  .qs-stepper li.is-active .qs-node {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .qs-stepper li.is-active .qs-node-label { color: var(--ink); }
+
+  /* blocks */
+  .qs-blocks { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--s-12); }
+  .qs-block-head { display: flex; gap: 12px; margin-bottom: var(--s-4); }
+  .qs-inline-num {
+    display: none;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .qs-caption {
+    font-size: var(--t-body);
+    line-height: 1.5;
+    color: var(--body);
+  }
+  .qs-caption :global(code), .qs-caption strong { color: var(--ink); }
+  .qs-term { position: relative; }
+  .qs-copy {
+    position: absolute;
+    top: 12px; right: 12px;
+    z-index: 2;
+  }
+
+  .qs-req { margin-top: var(--s-16); max-width: 760px; }
+
+  @media (max-width: 1023px) {
+    .qs-grid { grid-template-columns: 1fr; gap: 0; }
+    .qs-stepper { display: none; }
+    .qs-inline-num { display: inline; }
+  }
+  @media (hover: none) {
+    .qs-copy { top: 10px; right: 10px; }
+  }
+</style>
+
+<script>
+  // ---- Stepper scroll-sync ----
+  const blocks = Array.from(document.querySelectorAll<HTMLElement>('.qs-block'));
+  const stepLis = Array.from(document.querySelectorAll<HTMLElement>('.qs-stepper li'));
+  if (blocks.length && stepLis.length) {
+    const byStep = new Map(stepLis.map((li) => [li.dataset.step, li]));
+    const setActive = (step?: string) => {
+      stepLis.forEach((li) => li.classList.toggle('is-active', li.dataset.step === step));
+    };
+    const io = new IntersectionObserver(
+      (entries) => {
+        // pick the entry whose top is nearest the 40% line
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]) {
+          const step = (visible[0].target as HTMLElement).dataset.step;
+          setActive(step);
+        }
+      },
+      { rootMargin: '-40% 0px -55% 0px', threshold: 0 }
+    );
+    blocks.forEach((b) => io.observe(b));
+    setActive(blocks[0].dataset.step);
+  }
+</script>

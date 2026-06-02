@@ -1,0 +1,134 @@
+---
+interface Props {
+  src: string;
+  url: string;
+  alt: string;
+}
+const { src, url, alt } = Astro.props;
+---
+<figure class="bframe">
+  <div class="bframe-glow" aria-hidden="true"></div>
+  <div class="bframe-glow-cool" aria-hidden="true"></div>
+  <div class="bframe-window">
+    <div class="bframe-bar">
+      <div class="bframe-dots" aria-hidden="true">
+        <span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span>
+      </div>
+      <div class="bframe-url" aria-hidden="true">
+        <span class="lock">🔒</span><span class="url-text">{url}</span>
+      </div>
+    </div>
+    <img
+      src={src}
+      alt={alt}
+      width="1440"
+      height="900"
+      loading="eager"
+      decoding="async"
+    />
+    <div class="bframe-pin" aria-hidden="true">
+      <span class="pin-dot"></span>
+      <span class="pin-label">signed in with your SSH key.</span>
+    </div>
+  </div>
+</figure>
+
+<style>
+  .bframe { position: relative; margin: 0; }
+
+  .bframe-glow,
+  .bframe-glow-cool {
+    position: absolute;
+    inset: -10% -8%;
+    z-index: 0;
+    border-radius: 50%;
+    filter: blur(120px);
+    pointer-events: none;
+  }
+  .bframe-glow {
+    background: var(--accent-ring);
+    animation: breathe 8s ease-in-out infinite;
+  }
+  .bframe-glow-cool {
+    inset: 10% 30% -10% -6%;
+    background: rgba(31, 140, 182, 0.12);
+    filter: blur(110px);
+  }
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.04); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bframe-glow { animation: none; }
+  }
+
+  .bframe-window {
+    position: relative;
+    z-index: 1;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-frame);
+    overflow: hidden;
+    background: var(--surface);
+    box-shadow: var(--shadow-frame);
+  }
+  .bframe-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--s-4);
+    padding: 10px 14px;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--border);
+  }
+  .bframe-dots { display: flex; gap: 8px; }
+  .bframe-dots span { width: 11px; height: 11px; border-radius: 50%; }
+  .bframe-url {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    color: var(--muted);
+    max-width: 420px;
+  }
+  .bframe-url .lock { font-size: 0.75rem; }
+  .bframe-window img {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+
+  .bframe-pin {
+    position: absolute;
+    left: 4%;
+    bottom: 12%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--term-bg);
+    color: var(--term-text);
+    border: 1px solid var(--term-border);
+    border-radius: var(--r-card);
+    padding: 8px 14px 8px 12px;
+    font-family: var(--font-ui);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    box-shadow: 0 12px 30px -12px rgba(13, 21, 24, 0.5);
+  }
+  .pin-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-ring);
+    flex: none;
+  }
+
+  @media (max-width: 560px) {
+    .bframe-url { max-width: none; }
+    .bframe-pin { font-size: 0.8125rem; left: 3%; bottom: 6%; padding: 7px 11px; }
+  }
+</style>

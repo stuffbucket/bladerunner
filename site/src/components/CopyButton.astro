@@ -1,0 +1,36 @@
+---
+// Ghost copy glyph used on terminal code blocks.
+interface Props { copy: string; }
+const { copy } = Astro.props;
+---
+<button type="button" class="copy-btn" data-copy={copy} aria-label="Copy command">
+  <span class="copy-glyph" aria-hidden="true">⧉</span>
+  <span class="copy-text">copy</span>
+</button>
+
+<style>
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(214, 226, 228, 0.06);
+    border: 1px solid var(--term-border);
+    color: var(--term-arg);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    padding: 6px 10px;
+    border-radius: var(--r-chip);
+    cursor: pointer;
+    min-height: 32px;
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+                border-color var(--dur) var(--ease);
+  }
+  .copy-btn:hover { color: var(--term-text); border-color: var(--accent); }
+  .copy-btn.is-copied { color: var(--accent); border-color: var(--accent); }
+  .copy-glyph { font-size: 1rem; line-height: 1; }
+
+  @media (hover: none) {
+    .copy-btn { padding: 8px 12px; min-height: 44px; }
+  }
+</style>

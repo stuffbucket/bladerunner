@@ -1,0 +1,81 @@
+---
+import Eyebrow from './Eyebrow.astro';
+import FeatureCard from './FeatureCard.astro';
+---
+<section id="features" class="section band-bg">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <Eyebrow text="What you get" />
+      <h2 class="h2">Fewer moving parts. More Incus.</h2>
+    </div>
+
+    <div class="fgrid">
+      <FeatureCard icon="key" title="Browser sign-on with your SSH key" span href="#sso">
+        <code class="chip"><span class="cmd">runner</span> web</code> opens the Incus dashboard and you
+        land already logged in — no password, no client-cert prompt, no OIDC setup. bladerunner proves
+        possession of the same SSH key you use for
+        <code class="chip"><span class="cmd">runner</span> ssh</code> and hands the browser a session.
+        (Approving from another terminal?
+        <code class="chip"><span class="cmd">runner</span> web approve</code> works too.)
+      </FeatureCard>
+
+      <FeatureCard icon="chip" title="Native Apple Virtualization.framework">
+        Built straight on Apple’s <code class="chip">Virtualization.framework</code> via Code-Hex/vz — no
+        nested Lima/Colima orchestration, no QEMU translation overhead. The binary is auto-signed with
+        the Virtualization entitlement when you install from Homebrew.
+      </FeatureCard>
+
+      <FeatureCard icon="boot" title="Debian 13 guest, Incus bootstrapped for you">
+        Boots a Debian 13 (trixie) genericcloud image and brings up the Incus daemon via cloud-init.
+        <code class="chip">incus</code> and <code class="chip">incus-client</code> ship in trixie main, so
+        there are no third-party apt repos to trust. Ubuntu and other cloud images are reachable with
+        <code class="chip"><span class="cmd">--image-url</span></code>.
+      </FeatureCard>
+
+      <FeatureCard icon="vsock" title="Localhost everything, over vsock">
+        SSH and the Incus HTTPS API are forwarded to localhost through virtio-vsock — SSH on
+        <code class="chip">127.0.0.1:6022</code>, the Incus API and UI on
+        <code class="chip">https://127.0.0.1:18443</code>. No bridge to configure, no firewall holes to
+        poke.
+      </FeatureCard>
+
+      <FeatureCard icon="save" title="Save, restore, and auto-start">
+        <code class="chip"><span class="cmd">runner</span> save</code> pauses the guest, snapshots its
+        machine state to disk, and resumes;
+        <code class="chip"><span class="cmd">runner</span> restore</code> brings it right back. Commands
+        offer to boot the VM when it isn’t running, so you rarely have to think about lifecycle. Nested
+        virtualization is on by default, so Incus VMs work out of the box.
+      </FeatureCard>
+
+      <FeatureCard icon="net" title="Optional bridged L2 networking">
+        Want the VM to have a real presence on your network? Run with
+        <code class="chip"><span class="cmd">--network-mode</span> bridged <span class="cmd">--bridge-interface</span> en0</code>
+        for transparent layer-2 networking (requires the additional VM networking entitlement).
+      </FeatureCard>
+
+      <FeatureCard icon="tui" title="A terminal UI that respects your terminal">
+        Live progress for long-running steps, rotating structured logs with stage-level observability,
+        and a startup report with all your VM, network, and access details — rendered with a clean
+        charm/lipgloss interface.
+      </FeatureCard>
+    </div>
+  </div>
+</section>
+
+<style>
+  .section-head { margin-bottom: var(--s-12); }
+  .fgrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--grid-gap);
+  }
+  /* first card spans 2 cols on the top row at desktop */
+  @media (min-width: 1024px) {
+    .fgrid { grid-template-columns: repeat(3, 1fr); }
+    .fgrid > :global(.fcard-span) { grid-column: span 2; }
+  }
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .fgrid { grid-template-columns: repeat(2, 1fr); }
+    .fgrid > :global(.fcard-span) { grid-column: span 2; }
+  }
+</style>

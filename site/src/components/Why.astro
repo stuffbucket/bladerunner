@@ -1,0 +1,38 @@
+---
+import Eyebrow from './Eyebrow.astro';
+import StackDiagram from './StackDiagram.astro';
+---
+<section id="why" class="section band-bg">
+  <div class="wrap">
+    <div class="why-head reveal">
+      <Eyebrow text="How it differs" />
+      <h2 class="h2">Without the Lima/Colima layer underneath.</h2>
+    </div>
+
+    <p class="why-prose reveal">
+      bladerunner gives you the core of a <code class="chip"><span class="cmd">colima</span> --runtime incus</code>
+      setup without the Lima/Colima orchestration layer underneath. Instead of stacking a VM manager on
+      top of QEMU on top of your Mac, it talks to Apple’s Virtualization.framework directly:
+      architecture-aware Debian defaults, Incus bootstrapped via cloud-init, and SSH + the Incus API
+      forwarded to localhost over vsock. The result is fewer moving parts, a faster path to a working
+      Incus, and one extra trick neither tool offers — opening the Incus web dashboard already
+      authenticated with your SSH key.
+    </p>
+
+    <div class="reveal"><StackDiagram /></div>
+  </div>
+</section>
+
+<style>
+  .why-head { margin-bottom: var(--s-8); text-align: center; }
+  .why-head :global(.eyebrow) { text-align: center; }
+  .why-prose {
+    max-width: 68ch;
+    margin-inline: auto;
+    text-align: center;
+    font-size: var(--t-body);
+    line-height: 1.6;
+    color: var(--body);
+  }
+  .why-prose :global(.chip) { white-space: normal; }
+</style>
