@@ -6,6 +6,11 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/pages.yml'
+  # Validate the site build on PRs that touch it (the deploy job is gated to main).
+  pull_request:
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -48,6 +53,8 @@ jobs:
 
   deploy:
     needs: build
+    # Deploy only from main; on PRs the build job above just validates the site.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
