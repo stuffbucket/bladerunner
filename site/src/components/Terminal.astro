@@ -1,0 +1,32 @@
+---
+// macOS terminal panel.
+// - label: title-bar text
+// - autotype: if true, the body lines auto-type once on load (hero)
+// - ariaLabel: summary for screen readers
+// Body content is passed via the default slot as pre-formatted HTML
+// using .tprompt/.targ/.tcomment/.tstring spans.
+interface Props {
+  label?: string;
+  autotype?: boolean;
+  ariaLabel?: string;
+  class?: string;
+}
+const {
+  label = 'runner — zsh',
+  autotype = false,
+  ariaLabel = 'Terminal session',
+  class: cls = '',
+} = Astro.props;
+---
+<div class={`terminal ${cls}`} data-autotype={autotype ? 'true' : undefined}>
+  <div class="terminal-bar">
+    <div class="terminal-dots" aria-hidden="true">
+      <span class="dot-r"></span>
+      <span class="dot-y"></span>
+      <span class="dot-g"></span>
+    </div>
+    <div class="terminal-label">{label}</div>
+    <div></div>
+  </div>
+  <div class="terminal-body" role="group" aria-label={ariaLabel}><slot /></div>
+</div>

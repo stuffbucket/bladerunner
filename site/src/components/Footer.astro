@@ -1,0 +1,145 @@
+---
+const GH = 'https://github.com/stuffbucket/bladerunner';
+const cols = [
+  {
+    head: 'Project',
+    links: [
+      { label: 'Features', href: '#features' },
+      { label: 'Quickstart', href: '#quickstart' },
+      { label: 'Why', href: '#why' },
+      { label: 'Docs', href: `${GH}#readme`, ext: true },
+    ],
+  },
+  {
+    head: 'Get it',
+    links: [
+      { label: 'Homebrew tap', href: 'https://github.com/stuffbucket/homebrew-tap', ext: true },
+      { label: 'Releases', href: `${GH}/releases`, ext: true },
+      { label: 'README', href: `${GH}#readme`, ext: true },
+    ],
+  },
+  {
+    head: 'Community',
+    links: [
+      { label: 'GitHub', href: GH, ext: true },
+      { label: 'Discussions', href: `${GH}/discussions`, ext: true },
+      { label: 'Issues', href: `${GH}/issues`, ext: true },
+    ],
+  },
+];
+---
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-cols">
+      {cols.map((col) => (
+        <div class="footer-col">
+          <p class="footer-head">{col.head}</p>
+          <ul>
+            {col.links.map((l) => (
+              <li>
+                <a
+                  href={l.href}
+                  target={l.ext ? '_blank' : undefined}
+                  rel={l.ext ? 'noopener noreferrer' : undefined}
+                >{l.label}</a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      <div class="footer-col">
+        <p class="footer-head">More</p>
+        <ul>
+          <li class="footer-mono">
+            License &amp; notices —
+            <code class="chip"><span class="cmd">runner</span> notice</code>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <a class="footer-wordmark" href="#top">
+        <span class="wm-name">bladerunner</span>
+        <span class="wm-glyph" aria-hidden="true">&gt;_</span>
+      </a>
+      <p class="footer-copy">© 2026 stuffbucket · Built on Apple Virtualization.framework</p>
+      <span class="footer-badge">made for Apple Silicon</span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    padding-block: var(--s-16) var(--s-12);
+  }
+  .footer-cols {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--s-8);
+    margin-bottom: var(--s-16);
+  }
+  .footer-head {
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-bottom: var(--s-4);
+  }
+  .footer-col ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  .footer-col a {
+    color: var(--body);
+    text-decoration: none;
+    font-size: 1rem;
+    transition: color var(--dur) var(--ease);
+    border-bottom: 1px solid transparent;
+    padding-bottom: 1px;
+  }
+  .footer-col a:hover { color: var(--accent-text); border-bottom-color: var(--accent); }
+  .footer-mono { font-size: 0.9375rem; color: var(--muted); line-height: 1.6; }
+
+  .footer-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--s-4);
+    padding-top: var(--s-8);
+    border-top: 1px solid var(--border);
+  }
+  .footer-wordmark {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    text-decoration: none;
+  }
+  .footer-wordmark .wm-name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.0625rem;
+    color: var(--ink);
+  }
+  .footer-wordmark .wm-glyph {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .footer-copy { font-size: var(--t-small); color: var(--muted); }
+  .footer-badge {
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: var(--r-chip);
+    padding: 4px 10px;
+  }
+
+  @media (max-width: 767px) {
+    .footer-cols { grid-template-columns: repeat(2, 1fr); gap: var(--s-8) var(--s-6); }
+    .footer-bottom { justify-content: flex-start; }
+  }
+</style>
