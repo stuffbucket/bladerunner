@@ -96,7 +96,7 @@ jobs:
           sudo chown "$(id -u):$(id -g)" "${OUT}" "${OUT}.sha256"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bladerunner-guest-${{ matrix.arch }}${{ steps.agent.outputs.suffix }}
           path: |
@@ -116,7 +116,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
 
