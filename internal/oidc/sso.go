@@ -445,8 +445,8 @@ func (p *Provider) handleAuthnConsume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
-	//nolint:gosec // G124: the provider serves plain HTTP on loopback; setting
-	// Secure would stop the cookie from ever being sent. HttpOnly+SameSite are set.
+	// The provider serves plain HTTP on loopback; setting Secure would stop the
+	// cookie from ever being sent. HttpOnly+SameSite are set.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    sid,
@@ -455,7 +455,7 @@ func (p *Provider) handleAuthnConsume(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(sessionTTL),
 	})
-	//nolint:gosec // G710: sanitizeNext restricts the target to loopback/relative URLs.
+	// sanitizeNext restricts the target to loopback/relative URLs.
 	http.Redirect(w, r, sanitizeNext(r.URL.Query().Get("next")), http.StatusFound)
 }
 
@@ -535,7 +535,7 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if respType != "" && respType != responseTypeCode {
-		//nolint:gosec // G710: redirectURI is validated as loopback above before any redirect.
+		// redirectURI is validated as loopback above before any redirect.
 		http.Redirect(w, r, buildErrorRedirect(redirectURI, "unsupported_response_type", state), http.StatusFound)
 		return
 	}
@@ -548,7 +548,7 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "server_error", cerr.Error())
 				return
 			}
-			//nolint:gosec // G710: redirectURI is validated as loopback above before any redirect.
+			// redirectURI is validated as loopback above before any redirect.
 			http.Redirect(w, r, buildCodeRedirect(redirectURI, code, state), http.StatusFound)
 			return
 		}
