@@ -350,8 +350,11 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	var workingCopy string
 	if filepath.Ext(path) == cartridge.DMGExt {
 		// Materialize a writable working copy next to the DMG so the shipped,
-		// read-only artifact is never mutated.
+		// read-only artifact is never mutated. Clear any stale copy first (a prior
+		// boot that crashed before detach could have left one; hdiutil convert
+		// refuses to overwrite), so re-booting a .dmg always works.
 		work := trimCartridgeExt(path)
+		_ = os.Remove(work + cartridge.SparseExt)
 		converted, err := cartridge.ConvertToSparse(path, work)
 		if err != nil {
 			return jsonOrError(fmt.Errorf("convert cartridge dmg to working copy: %w", err))
@@ -442,6 +445,7 @@ func applyBootCartridge(cfg *config.Config) {
 	// The RW host<->guest share lives inside the cartridge.
 	cfg.ShareDir = filepath.Join(mp, cartridgeShareDir)
 	cfg.ShareTag = manifestShareTag(m)
+	cfg.ShareGuestPath = manifestShareGuestPath(m)
 }
 
 // detachBootCartridge releases the cartridge image the foreground boot owned. It

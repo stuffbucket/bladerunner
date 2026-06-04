@@ -189,6 +189,11 @@ type Config struct {
 	// ShareTag is the VirtioFS device tag the guest mounts. Defaults to
 	// DefaultShareTag. Only meaningful when ShareDir is set.
 	ShareTag string
+	// ShareGuestPath is where the share is mounted inside the guest. Defaults to
+	// DefaultShareGuestPath. Only meaningful when ShareDir is set; set from a
+	// cartridge manifest's Share.GuestPath so a non-default path actually mounts
+	// there (not just reported).
+	ShareGuestPath string
 }
 
 // DefaultBaseImageURL returns the default base image URL for the given GOARCH.

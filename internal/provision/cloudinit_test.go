@@ -170,6 +170,33 @@ func TestBuildCloudInit_ShareAutomountWhenEnabled(t *testing.T) {
 	}
 }
 
+// TestBuildCloudInit_ShareHonorsGuestPath verifies a non-default Share.GuestPath
+// actually drives the emitted mount (the unit filename, Where=, and fstab line),
+// not just the pack report.
+func TestBuildCloudInit_ShareHonorsGuestPath(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.ShareDir = "/some/host/dir"
+	cfg.ShareTag = config.DefaultShareTag
+	cfg.ShareGuestPath = "/srv/data"
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"Where=/srv/data",
+		"srv-data.mount", // escaped unit filename for /srv/data
+		config.DefaultShareTag + " /srv/data virtiofs",
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data did not honor custom guest path %q\n---\n%s\n---", want, userData)
+		}
+	}
+	if strings.Contains(userData, "mnt-share.mount") {
+		t.Error("expected the custom guest path to replace the default /mnt/share unit")
+	}
+}
+
 // TestBuildCloudInit_NoShareWhenDisabled verifies that with no share configured
 // (the default for plain start/boot) none of the share/ACPI machinery is emitted,
 // so non-cartridge boots are unchanged.

@@ -465,7 +465,10 @@ func renderShareSetup(cfg *config.Config) string {
 	if tag == "" {
 		tag = config.DefaultShareTag
 	}
-	guestPath := config.DefaultShareGuestPath
+	guestPath := cfg.ShareGuestPath
+	if guestPath == "" {
+		guestPath = config.DefaultShareGuestPath
+	}
 	// The systemd .mount unit filename MUST be the escaped mount path
 	// (/mnt/share -> mnt-share.mount) or systemd rejects it.
 	unitName := strings.ReplaceAll(strings.TrimPrefix(guestPath, "/"), "/", "-") + ".mount"
