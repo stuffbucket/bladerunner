@@ -20,6 +20,7 @@ BIN="$PROJECT_ROOT/bin/runner"
 
 DISK="${SMOKE_DISK:-debian-trixie-gui}"
 READY_TIMEOUT="${SMOKE_READY_TIMEOUT:-600}"
+SHARE_TIMEOUT="${SMOKE_SHARE_TIMEOUT:-300}"  # the runcmd configures the share after SSH is up
 NAME="smoke-cartridge"
 WORK="$(mktemp -d)"
 CART="$WORK/${NAME}.sparseimage"
@@ -108,21 +109,59 @@ ok "guest is up and reachable"
 [[ -d "$SHARE" ]] || fail "share dir not present at $SHARE"
 
 note "RW VirtioFS share round-trip (host <-> guest)"
+printf '    host share dir: %s\n' "$SHARE"
+ls -ld "$SHARE" 2>&1 || true
+
+# SSH comes up early (break-glass), but the cloud-init runcmd configures the
+# virtiofs share a bit later in the same boot. Poll the guest until the mount
+# actually appears (up to SHARE_TIMEOUT) before asserting the round-trip.
 HOST_MSG="host-to-guest-$$-$RANDOM"
-printf '%s\n' "$HOST_MSG" > "$SHARE/from-host.txt"
+if ! printf '%s\n' "$HOST_MSG" > "$SHARE/from-host.txt" 2>/tmp/share-write.err; then
+  fail "host could not write to the share dir $SHARE: $(cat /tmp/share-write.err 2>/dev/null)"
+fi
+ok "host wrote a file into the cartridge share/"
+share_deadline=$(( SECONDS + SHARE_TIMEOUT ))
 got=""
-for _ in 1 2 3 4 5 6; do  # the guest mount may settle a beat after SSH
-  got="$(BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- cat /mnt/share/from-host.txt 2>/dev/null | tr -d '\r\n')"
+while (( SECONDS < share_deadline )); do
+  if ! kill -0 "$BOOT_PID" 2>/dev/null; then fail "boot process exited while waiting for the share — see $WORK/boot.log"; fi
+  got="$(BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- cat /mnt/share/from-host.txt 2>/dev/null | tr -d '\r\n' || true)"
   [[ "$got" == "$HOST_MSG" ]] && break
-  sleep 5
+  printf '    waiting for guest virtiofs mount… (%ds left)\n' "$(( share_deadline - SECONDS ))"
+  sleep 10
 done
-[[ "$got" == "$HOST_MSG" ]] || fail "guest did not see host file (got: '$got', want: '$HOST_MSG')"
+if [[ "$got" != "$HOST_MSG" ]]; then
+  note "guest virtiofs diagnostics (share never appeared)"
+  # Pipe one script to the guest's sh via stdin (avoids per-arg SSH quoting and
+  # the stdin-consumption trap of running ssh inside a read loop).
+  # shellcheck disable=SC2016  # intentional: this script body runs in the guest, not here
+  printf '%s\n' '
+set +e
+echo "## uname"; uname -a
+echo "## virtio modules"; lsmod | grep -i virtio || echo "(none)"
+echo "## virtio devices"; ls -l /sys/bus/virtio/devices/ 2>&1
+echo "## virtiofs tags"; for f in /sys/bus/virtio/devices/*/; do [ -e "$f/features" ] && echo "$f"; done; cat /sys/fs/*/tag 2>/dev/null
+echo "## mount unit file"; cat /etc/systemd/system/mnt-share.mount 2>&1 || echo "(MISSING)"
+echo "## mount unit status"; systemctl status mnt-share.mount --no-pager 2>&1 | head -30
+echo "## fstab"; cat /etc/fstab
+echo "## manual mount attempt"; mount -t virtiofs bladerunner-share /mnt/share 2>&1; echo "rc=$?"; mount | grep -i virtiofs || echo "(still no virtiofs mount)"
+echo "## cloud-init"; cloud-init status --long 2>&1 || echo "(na)"
+' | BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- sh 2>&1 | sed 's/^/      /' || true
+  fail "guest did not see host file — virtiofs share not mounted (see diagnostics above)"
+fi
 ok "guest read the host-written file over VirtioFS"
 
+# guest -> host (pipe the content to the guest's tee via stdin — avoids the
+# SSH arg-quoting that mangles `sh -c "printf ..."`).
 GUEST_MSG="guest-to-host-$$-$RANDOM"
-BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- sh -c "printf '%s\n' '$GUEST_MSG' > /mnt/share/from-guest.txt"
-sleep 2
-grep -q "$GUEST_MSG" "$SHARE/from-guest.txt" 2>/dev/null || fail "host did not see guest-written file"
+printf '%s\n' "$GUEST_MSG" | BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- tee /mnt/share/from-guest.txt >/dev/null \
+  || fail "guest could not write to /mnt/share"
+got2=""
+for _ in 1 2 3 4; do
+  got2="$(cat "$SHARE/from-guest.txt" 2>/dev/null | tr -d '\r\n' || true)"
+  [[ "$got2" == "$GUEST_MSG" ]] && break
+  sleep 3
+done
+[[ "$got2" == "$GUEST_MSG" ]] || fail "host did not see guest-written file (got: '$got2')"
 ok "host read the guest-written file over VirtioFS (RW both ways)"
 
 note "Ejecting (ACPI graceful shutdown, then detach)"
