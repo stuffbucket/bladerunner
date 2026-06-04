@@ -338,6 +338,7 @@ systemctl daemon-reload
 systemctl enable --now bladerunner-vsock-ssh.service || true
 systemctl enable --now bladerunner-vsock-incus.service || true
 systemctl enable --now bladerunner-vsock-oidc.service || true
+%s
 
 # --- Best-effort incus provisioning. Everything below is non-fatal: if it
 #     fails, host<->guest SSH (configured above) still works, so the VM stays
@@ -437,8 +438,92 @@ date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 		// connects over vsock to the host provider on VsockOIDCPort. (TCP-LISTEN
 		// port = LocalOIDCPort, VSOCK-CONNECT port = VsockOIDCPort.)
 		cfg.LocalOIDCPort, cfg.VsockOIDCPort,
+		// VirtioFS share automount + ACPI poweroff pin, emitted only when a share
+		// is enabled (empty otherwise, so plain start/boot is byte-identical).
+		renderShareSetup(cfg),
 		cfg.SSHUser,
 		cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCAudience,
+	)
+}
+
+// renderShareSetup returns the guest-side bootstrap fragment that mounts the
+// VirtioFS host<->guest share and pins ACPI poweroff so `runner eject` triggers
+// a deterministic clean shutdown. It returns "" when sharing is disabled
+// (cfg.ShareDir == ""), so a non-cartridge boot emits no extra commands and is
+// unchanged. The mount tag must match the host-side VirtioFS device tag
+// (configureShare uses cfg.ShareTag, defaulting to config.DefaultShareTag).
+//
+// VirtioFS uid mapping: VZ mounts the share as the mounting context (root), so
+// files default to root-owned. We chown the mountpoint to cfg.SSHUser so the
+// default user can read+write the share. nofail keeps boot resilient if the
+// share device is absent (e.g. a stripped image booted without a cartridge).
+func renderShareSetup(cfg *config.Config) string {
+	if cfg.ShareDir == "" {
+		return ""
+	}
+	tag := cfg.ShareTag
+	if tag == "" {
+		tag = config.DefaultShareTag
+	}
+	guestPath := config.DefaultShareGuestPath
+	// The systemd .mount unit filename MUST be the escaped mount path
+	// (/mnt/share -> mnt-share.mount) or systemd rejects it.
+	unitName := strings.ReplaceAll(strings.TrimPrefix(guestPath, "/"), "/", "-") + ".mount"
+
+	return fmt.Sprintf(`
+# --- VirtioFS host<->guest share automount + ACPI poweroff pin (cartridge) ---
+# The virtiofs kernel module is built in on Debian trixie genericcloud; load it
+# best-effort for other images. nofail keeps boot resilient if the share device
+# is absent (image booted without a cartridge).
+modprobe virtiofs 2>/dev/null || true
+mkdir -p %s
+
+cat >/etc/systemd/system/%s <<'MOUNTUNIT'
+[Unit]
+Description=Bladerunner virtiofs host<->guest share
+After=local-fs.target
+
+[Mount]
+What=%s
+Where=%s
+Type=virtiofs
+Options=defaults,nofail,_netdev
+
+[Install]
+WantedBy=multi-user.target
+MOUNTUNIT
+
+# Belt-and-suspenders fstab line (same tag) so the share also mounts if the unit
+# is ever masked; nofail so a missing device never blocks boot.
+if ! grep -q '%s %s virtiofs' /etc/fstab 2>/dev/null; then
+  echo '%s %s virtiofs defaults,nofail,_netdev 0 0' >> /etc/fstab
+fi
+
+systemctl daemon-reload
+systemctl enable --now %s || true
+
+# Make the share usable by the default SSH user (VirtioFS maps host files to the
+# guest mounting context, i.e. root, so chown after the mount).
+chown %s:%s %s 2>/dev/null || true
+
+# Pin ACPI poweroff so the VZ ACPI power button (runner eject -> RequestStop)
+# deterministically powers the guest off cleanly. Debian genericcloud + logind
+# default to HandlePowerKey=poweroff already; make it explicit and robust.
+mkdir -p /etc/systemd/logind.conf.d
+cat >/etc/systemd/logind.conf.d/90-bladerunner.conf <<'LOGIND'
+[Login]
+HandlePowerKey=poweroff
+HandlePowerKeyLongPress=poweroff
+LOGIND
+systemctl restart systemd-logind 2>/dev/null || true
+`,
+		guestPath,
+		unitName,
+		tag, guestPath,
+		tag, guestPath,
+		tag, guestPath,
+		unitName,
+		cfg.SSHUser, cfg.SSHUser, guestPath,
 	)
 }
 

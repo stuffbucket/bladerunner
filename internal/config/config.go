@@ -39,6 +39,17 @@ const (
 	DefaultOIDCClientID = "bladerunner"
 	DefaultOIDCAudience = "bladerunner"
 
+	// DefaultShareTag is the VirtioFS device tag used for the host<->guest
+	// shared folder (the cartridge RW share). The guest mounts this tag at
+	// DefaultShareGuestPath. It must match the tag the guest fstab/mount unit
+	// references; an empty tag is invalid for a VirtioFS device.
+	DefaultShareTag = "bladerunner-share"
+
+	// DefaultShareGuestPath is where the VirtioFS share is mounted inside the
+	// guest. Documented and used by the cloud-init automount when sharing is
+	// enabled.
+	DefaultShareGuestPath = "/mnt/share"
+
 	// HostedGuestImageTag is the GitHub Release tag bladerunner pulls pre-baked
 	// guest images from when UseHostedGuestImage is enabled. The "latest" tag is
 	// maintained as a moving pointer by the build-guest-image workflow.
@@ -170,6 +181,14 @@ type Config struct {
 	// VM ("enabled", "unsupported", or "disabled"), set by the runner at start
 	// for status/UI reporting. Empty before the VM is configured.
 	NestedVirt string
+	// ShareDir is the host directory exposed to the guest over VirtioFS as a
+	// read-WRITE host<->guest share (the cartridge share folder). Empty => no
+	// directory-sharing device is added (no regression to plain start/boot).
+	// When set, ShareTag must also be non-empty.
+	ShareDir string
+	// ShareTag is the VirtioFS device tag the guest mounts. Defaults to
+	// DefaultShareTag. Only meaningful when ShareDir is set.
+	ShareTag string
 }
 
 // DefaultBaseImageURL returns the default base image URL for the given GOARCH.
@@ -348,6 +367,9 @@ func (c *Config) Validate() error {
 	}
 	if c.WaitForIncus < time.Second {
 		return errors.New("wait-for-incus must be at least 1s")
+	}
+	if c.ShareDir != "" && c.ShareTag == "" {
+		return errors.New("share tag must be set when a share directory is configured")
 	}
 	return nil
 }

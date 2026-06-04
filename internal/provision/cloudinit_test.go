@@ -141,6 +141,57 @@ func TestBuildCloudInit_AptUpdateResilient(t *testing.T) {
 	}
 }
 
+// TestBuildCloudInit_ShareAutomountWhenEnabled verifies that, with a share
+// configured, the bootstrap emits the VirtioFS mount (matching tag), the nofail
+// option (boot survives an absent share), and the ACPI poweroff pin that makes
+// `runner eject` a deterministic clean shutdown.
+func TestBuildCloudInit_ShareAutomountWhenEnabled(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.ShareDir = "/some/host/dir"
+	cfg.ShareTag = config.DefaultShareTag
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"Type=virtiofs",                  // mount unit type
+		"What=" + config.DefaultShareTag, // mounts the configured tag
+		"Where=" + config.DefaultShareGuestPath,
+		"mnt-share.mount", // escaped unit filename
+		"nofail",          // boot survives an absent share
+		config.DefaultShareTag + " " + config.DefaultShareGuestPath + " virtiofs", // fstab line
+		"HandlePowerKey=poweroff", // ACPI poweroff pin for deterministic eject
+		"modprobe virtiofs",       // module load best-effort
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing share snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
+// TestBuildCloudInit_NoShareWhenDisabled verifies that with no share configured
+// (the default for plain start/boot) none of the share/ACPI machinery is emitted,
+// so non-cartridge boots are unchanged.
+func TestBuildCloudInit_NoShareWhenDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig() // ShareDir empty
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	unwanted := []string{
+		"Type=virtiofs",
+		"mnt-share.mount",
+		"HandlePowerKey=poweroff",
+		"modprobe virtiofs",
+	}
+	for _, bad := range unwanted {
+		if strings.Contains(userData, bad) {
+			t.Errorf("user-data unexpectedly contains share snippet %q when sharing is disabled\n---\n%s\n---", bad, userData)
+		}
+	}
+}
+
 // TestBuildCloudInit_UpdateGrubStillRuns ensures bootcmd still regenerates
 // /boot/grub/grub.cfg so the drop-in is picked up before the sentinel reboot.
 func TestBuildCloudInit_UpdateGrubStillRuns(t *testing.T) {

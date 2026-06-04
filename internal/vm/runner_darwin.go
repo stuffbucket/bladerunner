@@ -117,7 +117,7 @@ func (r *Runner) SaveState(path string) error {
 	// Record the snapshot's hardware config + disk stamp alongside the file so
 	// restore can rebuild a matching configuration and detect a changed disk.
 	// Written while paused (disk frozen). Non-fatal: the save itself succeeded.
-	if err := writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.GUI, r.cfg.DiskPath); err != nil {
+	if err := writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.GUI, r.cfg.DiskPath, r.effectiveShareTag()); err != nil {
 		logging.L().Warn("could not write saved-state metadata sidecar", "err", err)
 	}
 	return nil
@@ -159,6 +159,15 @@ func (r *Runner) prepareRestore() error {
 	// A sidecar without the field (nil, an older save) skips the check.
 	if meta.GUI != nil && *meta.GUI != r.cfg.GUI {
 		return fmt.Errorf("refusing restore: saved state is %s but boot requested %s; re-boot with the matching mode", guiModeLabel(*meta.GUI), guiModeLabel(r.cfg.GUI))
+	}
+	// The VirtioFS directory-sharing topology is fixed when the VZ configuration
+	// is built, exactly like graphics, so a share present-vs-absent or a different
+	// tag between the snapshot and this boot would fail deep inside VZ. Refuse
+	// early with an actionable message. An empty recorded tag (a sidecar from
+	// before this field, or a snapshot with no share) only matches a boot with no
+	// share, so an older sidecar restored against a no-share boot still passes.
+	if meta.ShareTag != r.effectiveShareTag() {
+		return fmt.Errorf("refusing restore: saved state share is %q but boot share is %q; re-boot with the matching share configuration", meta.ShareTag, r.effectiveShareTag())
 	}
 	if err := meta.VerifyDisk(); err != nil {
 		return fmt.Errorf("refusing restore: %w", err)
