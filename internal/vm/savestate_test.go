@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,7 +16,7 @@ func TestSaveMetadataRoundTripAndVerify(t *testing.T) {
 	}
 	savePath := filepath.Join(dir, "saved-state.bin")
 
-	if err := writeSaveMetadata(savePath, 4, 8, 64, true, diskPath); err != nil {
+	if err := writeSaveMetadata(savePath, 4, 8, 64, true, diskPath, "bladerunner-share"); err != nil {
 		t.Fatalf("writeSaveMetadata: %v", err)
 	}
 
@@ -28,6 +29,9 @@ func TestSaveMetadataRoundTripAndVerify(t *testing.T) {
 	}
 	if meta.GUI == nil || !*meta.GUI {
 		t.Errorf("GUI not round-tripped: %+v", meta.GUI)
+	}
+	if meta.ShareTag != "bladerunner-share" {
+		t.Errorf("ShareTag not round-tripped: %q", meta.ShareTag)
 	}
 
 	// Unchanged disk verifies cleanly.
@@ -59,6 +63,35 @@ func TestLoadSaveMetadataOldSidecarHasNilGUI(t *testing.T) {
 	}
 	if meta.GUI != nil {
 		t.Errorf("expected nil GUI for a pre-field sidecar, got %v", *meta.GUI)
+	}
+}
+
+func TestSaveMetadataNoShareOmitsTag(t *testing.T) {
+	// A save with no share device records an empty tag, which must be omitted
+	// from the JSON (omitempty) so an older no-share sidecar and a fresh no-share
+	// sidecar are indistinguishable and both pass the no-share restore parity.
+	dir := t.TempDir()
+	diskPath := filepath.Join(dir, "disk.raw")
+	if err := os.WriteFile(diskPath, []byte("d"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	savePath := filepath.Join(dir, "saved-state.bin")
+	if err := writeSaveMetadata(savePath, 4, 8, 64, false, diskPath, ""); err != nil {
+		t.Fatalf("writeSaveMetadata: %v", err)
+	}
+	b, err := os.ReadFile(SaveMetadataPath(savePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "share_tag") {
+		t.Errorf("empty share tag should be omitted from sidecar JSON, got:\n%s", b)
+	}
+	meta, err := LoadSaveMetadata(savePath)
+	if err != nil {
+		t.Fatalf("LoadSaveMetadata: %v", err)
+	}
+	if meta.ShareTag != "" {
+		t.Errorf("expected empty ShareTag, got %q", meta.ShareTag)
 	}
 }
 

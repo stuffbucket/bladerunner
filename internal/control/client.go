@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -198,6 +199,26 @@ func (c *Client) SaveState(keepPaused bool) (string, error) {
 		return "", fmt.Errorf("save error: %s", resp.Error)
 	}
 	return resp.Response, nil
+}
+
+// Eject asks the running server to gracefully ACPI-shut-down the guest (waiting
+// up to timeoutSeconds for it to power off, then forcing the stop) and exit,
+// releasing and detaching any attached cartridge. The server initiates its own
+// shutdown after replying, so the caller should wait for the control socket to
+// disappear (see waitForSocketGone) rather than additionally sending a stop.
+func (c *Client) Eject(force bool, timeoutSeconds int) error {
+	args := []string{strconv.Itoa(timeoutSeconds)}
+	if force {
+		args = append(args, EjectModeForce)
+	}
+	resp, err := c.sendCommand(BuildCommand(CmdEject, args...), saveCommandTimeout)
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("eject error: %s", resp.Error)
+	}
+	return nil
 }
 
 // Controller interface adapter

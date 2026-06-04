@@ -5,6 +5,7 @@ package vm
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/agent"
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -43,6 +44,10 @@ func (r *Runner) SetRestoreFrom(string)            {}
 func (r *Runner) SupportsSaveRestore() error       { return errors.New("unsupported platform") }
 func (r *Runner) SaveState(string) error           { return errors.New("unsupported platform") }
 func (r *Runner) ResumeVM() error                  { return errors.New("unsupported platform") }
+
+func (r *Runner) Eject(context.Context, time.Duration, bool) error {
+	return errors.New("unsupported platform")
+}
 
 // NestedVirtualizationSupported is always false off darwin.
 func NestedVirtualizationSupported() bool { return false }

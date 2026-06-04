@@ -172,6 +172,7 @@ linters:
           - gocognit
           - funlen
           - dupl          # Test cases often repeat patterns
+          - goconst       # Test fixtures repeat literals (paths, tags) by design
           - nestif        # Test setup can be nested
           - forcetypeassert # Test assertions often type-assert
           - containedctx  # Test helpers may store context

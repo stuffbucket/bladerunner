@@ -43,6 +43,11 @@ func (r *Runner) newVMConfiguration() (*vz.VirtualMachineConfiguration, error) {
 			return nil, err
 		}
 	}
+	if r.cfg.ShareDir != "" {
+		if err := r.configureShare(cfg); err != nil {
+			return nil, err
+		}
+	}
 	if err := r.configureSerial(cfg); err != nil {
 		return nil, err
 	}
@@ -196,6 +201,48 @@ func (r *Runner) configureGraphics(cfg *vz.VirtualMachineConfiguration) error {
 	cfg.SetPointingDevicesVirtualMachineConfiguration([]vz.PointingDeviceConfiguration{pointing})
 	cfg.SetKeyboardsVirtualMachineConfiguration([]vz.KeyboardConfiguration{keyboard})
 
+	return nil
+}
+
+// configureShare adds a VirtioFS directory-sharing device exposing
+// r.cfg.ShareDir to the guest under r.cfg.ShareTag as a read-WRITE share (the
+// cartridge host<->guest folder). Called only when r.cfg.ShareDir != "" so plain
+// start/boot — which leaves ShareDir empty — adds no device and is unchanged.
+// The directory-sharing topology is fixed at config-build time like graphics, so
+// a non-empty tag is required (VZ rejects an empty tag); the cartridge boot path
+// ensures the share dir exists before start so VZ validation passes.
+// effectiveShareTag returns the VirtioFS tag a directory-sharing device would be
+// built with, or "" when no share device is attached (ShareDir empty). It is the
+// single source of truth used both by configureShare and the save-sidecar parity
+// guard, so the recorded tag matches the device that was actually configured.
+func (r *Runner) effectiveShareTag() string {
+	if r.cfg.ShareDir == "" {
+		return ""
+	}
+	if r.cfg.ShareTag == "" {
+		return config.DefaultShareTag
+	}
+	return r.cfg.ShareTag
+}
+
+func (r *Runner) configureShare(cfg *vz.VirtualMachineConfiguration) error {
+	tag := r.effectiveShareTag()
+
+	sharedDir, err := vz.NewSharedDirectory(r.cfg.ShareDir, false) // readOnly=false => RW both ways
+	if err != nil {
+		return fmt.Errorf("create shared directory %s: %w", r.cfg.ShareDir, err)
+	}
+	share, err := vz.NewSingleDirectoryShare(sharedDir)
+	if err != nil {
+		return fmt.Errorf("create single directory share: %w", err)
+	}
+	fsDevice, err := vz.NewVirtioFileSystemDeviceConfiguration(tag)
+	if err != nil {
+		return fmt.Errorf("create virtio file system device for tag %s: %w", tag, err)
+	}
+	fsDevice.SetDirectoryShare(share)
+
+	cfg.SetDirectorySharingDevicesVirtualMachineConfiguration([]vz.DirectorySharingDeviceConfiguration{fsDevice})
 	return nil
 }
 

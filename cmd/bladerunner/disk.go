@@ -81,31 +81,53 @@ func runDisks(_ *cobra.Command, _ []string) error {
 		})
 	}
 
+	cartridges := listAttachedCartridges()
+
 	if jsonOutput {
-		return emitJSON(reports)
+		return emitJSON(map[string]any{
+			"disks":      reports,
+			"cartridges": cartridges,
+		})
 	}
 
-	if len(reports) == 0 {
+	if len(reports) == 0 && len(cartridges) == 0 {
 		fmt.Println(subtle("No disks available."))
 		fmt.Printf("Create one with %s\n", command("runner disk new <name>"))
 		return nil
 	}
 
-	fmt.Println(title("Disk Shelf"))
-	fmt.Println()
-	for _, r := range reports {
-		state := subtle("fresh")
-		if r.HasSavedState {
-			state = success("saved")
+	if len(reports) > 0 {
+		fmt.Println(title("Disk Shelf"))
+		fmt.Println()
+		for _, r := range reports {
+			state := subtle("fresh")
+			if r.HasSavedState {
+				state = success("saved")
+			}
+			fmt.Printf("  %s  %s\n", value(r.Name), state)
+			if r.Description != "" {
+				fmt.Printf("    %s %s\n", key("about:"), r.Description)
+			}
+			fmt.Printf("    %s  %s   %s %s\n", key("mode:"), r.Mode, key("origin:"), r.Origin)
 		}
-		fmt.Printf("  %s  %s\n", value(r.Name), state)
-		if r.Description != "" {
-			fmt.Printf("    %s %s\n", key("about:"), r.Description)
-		}
-		fmt.Printf("    %s  %s   %s %s\n", key("mode:"), r.Mode, key("origin:"), r.Origin)
+		fmt.Println()
 	}
-	fmt.Println()
-	fmt.Printf("Boot one with %s\n", command("runner boot <name>"))
+
+	if len(cartridges) > 0 {
+		fmt.Println(title("Attached Cartridges"))
+		fmt.Println()
+		for _, c := range cartridges {
+			state := subtle("ejected")
+			if c.Booted {
+				state = success("booted")
+			}
+			fmt.Printf("  %s  %s\n", value(c.Name), state)
+			fmt.Printf("    %s %s\n", key("mount:"), subtle(c.Mountpoint))
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("Boot one with %s\n", command("runner boot <name|cartridge>"))
 	return nil
 }
 

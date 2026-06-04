@@ -89,7 +89,22 @@ const (
 	// CmdServerVersion reports the running server's build version string, so a
 	// client can detect that a newer binary should take over (runner upgrade).
 	CmdServerVersion = "version"
+	// CmdEject performs a clean ACPI shutdown of the guest (RequestStop loop until
+	// the VM reaches the stopped state, with a timeout that escalates to a forced
+	// stop), then unblocks the foreground runner so it exits — releasing any
+	// attached cartridge image, which the foreground process detaches on the way
+	// out. Positional arg 0 is the timeout in seconds; arg 1 is EjectModeForce
+	// when a forced stop was explicitly requested. The response body is RespOK.
+	CmdEject = "eject"
 )
+
+// EjectModeForce is the CmdEject argument that forces a stop without waiting the
+// full graceful timeout for the guest to power off via ACPI.
+const EjectModeForce = "force"
+
+// DefaultEjectTimeoutSeconds is the default graceful-shutdown budget (seconds)
+// for CmdEject before it escalates to a forced stop.
+const DefaultEjectTimeoutSeconds = 60
 
 // SaveModePause is the CmdSave argument that leaves the guest paused after
 // saving instead of resuming it.

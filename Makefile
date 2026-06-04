@@ -94,6 +94,9 @@ sign: build ## Codesign binary with virtualization entitlements
 	@codesign --entitlements "$(ENTITLEMENTS)" -s "$(CODESIGN_IDENTITY)" "$(BIN_PATH)"
 	@echo "Signed $(BIN_PATH) with $(ENTITLEMENTS)"
 
+smoke-cartridge: ## Live end-to-end cartridge smoke (pack -> boot -> RW share -> ACPI eject); needs codesign+network, ~5-10min
+	@./scripts/smoke-cartridge.sh
+
 check: fmt-check vet lint test ## Run fast checks (format, vet, lint, test)
 
 lint: ## Run golangci-lint

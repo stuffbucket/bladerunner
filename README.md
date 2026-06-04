@@ -134,12 +134,18 @@ bake`) is materialized once into a shared content-addressed cache and reused
 across slots; the digest is verified before use.
 
 ```bash
-runner disks                 # list the shelf (builtins + your disks)
+runner disks                 # list the shelf (builtins + your disks) and attached cartridges
 runner boot <name|url|path>  # power on a disk (restores saved RAM if present)
-runner eject                 # pause + save the running disk back into its slot
+runner eject                 # cleanly power off the running VM (ACPI shutdown)
 runner disk new <name>       # scaffold a new user disk manifest
 runner disk bake <name>      # build its qcow2 and record the image SHA-256
+runner disk pack <name>      # pack a disk into an AirDrop-able cartridge
 ```
+
+`runner eject` performs a clean ACPI shutdown (it loops the power button and
+waits for the guest to power off, then forces the stop after `--timeout`). For a
+same-host RAM resume use `runner save` + `runner restore` instead — eject is a
+clean cold-stop by design.
 
 Two disks ship built in:
 
@@ -163,6 +169,61 @@ Layout:
 host-side developer action: it requires `bash`, `qemu-img`, and the script's
 build dependencies (`libguestfs-tools`, likely `sudo`). Builtin disks are
 read-only — fork one with `runner disk new <name> --from <builtin>` first.
+
+## Cartridges
+
+A *cartridge* is a single, self-contained, AirDrop-able macOS disk image holding
+a complete bootable VM: the disk manifest, the root disk, EFI + cloud-init state,
+and a read-**write** host↔guest share folder. Because `runner eject` always
+powers the guest off cleanly via ACPI, a cartridge is **always** in a consistent
+cold-boot state — so you can AirDrop the file to any Mac running bladerunner and
+`runner boot <file>` just works (a clean cold boot). The clean-shutdown invariant
+is what makes AirDrop safe: no dirty filesystem, no host-bound RAM snapshot.
+
+The honest tradeoff: the **disk** is portable (cold-boot on any Mac), while
+same-host **RAM resume** is intentionally out of scope — we shut down cleanly
+instead of carrying a machine-bound memory image around.
+
+```bash
+runner disk pack incus                 # build ./incus.sparseimage (runnable)
+runner disk pack incus --ship          # also build ./incus.dmg (compressed AirDrop artifact)
+runner boot ./incus.sparseimage        # mount + cold-boot the cartridge
+runner boot ./incus.dmg                # materialize a working copy, then boot it
+runner eject                           # clean ACPI shutdown, then detach the cartridge
+runner disks                           # also lists attached cartridges (booted/ejected)
+```
+
+`runner disk pack <name>` resolves a catalog/user disk, creates an APFS sparse
+image sized to the disk plus headroom (override with `--size`), attaches it, writes
+`disk.json`, materializes the bootable `root.img` (via the same image cache /
+`qemu-img` path boot uses), and creates `state/` and `share/`. `--out` overrides
+the output path; `--ship` additionally produces a compressed read-only `.dmg`
+(the AirDrop artifact). `--arch` selects the root image's architecture.
+
+`runner boot <cartridge>` mounts the image privately at
+`~/.local/state/bladerunner/mnt/<name>/`, roots the VM inside it
+(`root.img`, state under `state/`, the RW share at `share/`), and **owns** the
+mount — detaching it on exit. A `.dmg` is first converted to a working
+`.sparseimage` so the shipped read-only artifact stays pristine.
+
+The **RW share** is exposed to the guest over VirtioFS (tag `bladerunner-share`)
+and mounted at `/mnt/share` by a generated systemd `.mount` unit (with an fstab
+fallback). VirtioFS maps host files to the guest's mounting context (root), so
+the bootstrap `chown`s `/mnt/share` to the SSH user — drop files in `share/` on
+the host and read/write them at `/mnt/share` in the guest, and vice versa.
+
+Cartridge layout (at the mountpoint):
+
+```
+disk.json            the Manifest (image source is THIS cartridge: root.img)
+root.img             the bootable raw disk (sparse on APFS)
+state/efi-vars.bin   EFI variable store
+state/cloud-init/    cloud-init seed
+share/               RW host↔guest VirtioFS folder
+```
+
+Cartridges require macOS (they are backed by `hdiutil` + APFS sparse images);
+packing also needs `qemu-img`.
 
 ## Notes
 
