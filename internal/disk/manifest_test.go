@@ -8,6 +8,14 @@ import (
 	"testing"
 )
 
+// Shared test literals (kept as constants to satisfy goconst).
+const (
+	tArchARM64        = "arm64"
+	errBadName        = "invalid disk name"
+	errMultiImageSrc  = "multiple image sources"
+	errBadSHA256Field = "sha256 must be"
+)
+
 func TestManifestParseValidate(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -47,25 +55,25 @@ func TestManifestParseValidate(t *testing.T) {
 			name:            "name with slash",
 			jsonInput:       `{"name":"a/b","image":{"hosted":true},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "invalid disk name",
+			wantErrContains: errBadName,
 		},
 		{
 			name:            "name with dotdot",
 			jsonInput:       `{"name":"..","image":{"hosted":true},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "invalid disk name",
+			wantErrContains: errBadName,
 		},
 		{
 			name:            "name uppercase",
 			jsonInput:       `{"name":"Incus","image":{"hosted":true},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "invalid disk name",
+			wantErrContains: errBadName,
 		},
 		{
 			name:            "name with space",
 			jsonInput:       `{"name":"a b","image":{"hosted":true},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "invalid disk name",
+			wantErrContains: errBadName,
 		},
 		{
 			name:            "empty boot mode",
@@ -89,19 +97,19 @@ func TestManifestParseValidate(t *testing.T) {
 			name:            "hosted plus arches",
 			jsonInput:       `{"name":"x","image":{"hosted":true,"arches":{"arm64":{"url":"https://x"}}},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "multiple image sources",
+			wantErrContains: errMultiImageSrc,
 		},
 		{
 			name:            "hosted plus path",
 			jsonInput:       `{"name":"x","image":{"hosted":true,"path":"/tmp/x"},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "multiple image sources",
+			wantErrContains: errMultiImageSrc,
 		},
 		{
 			name:            "arches plus path",
 			jsonInput:       `{"name":"x","image":{"path":"/tmp/x","arches":{"arm64":{"url":"https://x"}}},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "multiple image sources",
+			wantErrContains: errMultiImageSrc,
 		},
 		{
 			name:            "arches empty url",
@@ -113,19 +121,19 @@ func TestManifestParseValidate(t *testing.T) {
 			name:            "sha256 too short",
 			jsonInput:       `{"name":"x","image":{"arches":{"arm64":{"url":"https://x","sha256":"abcd"}}},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "sha256 must be",
+			wantErrContains: errBadSHA256Field,
 		},
 		{
 			name:            "sha256 uppercase",
 			jsonInput:       `{"name":"x","image":{"arches":{"arm64":{"url":"https://x","sha256":"` + strings.Repeat("A", 64) + `"}}},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "sha256 must be",
+			wantErrContains: errBadSHA256Field,
 		},
 		{
 			name:            "sha256 non-hex",
 			jsonInput:       `{"name":"x","image":{"arches":{"arm64":{"url":"https://x","sha256":"` + strings.Repeat("g", 64) + `"}}},"boot":{"mode":"headless"}}`,
 			wantErr:         true,
-			wantErrContains: "sha256 must be",
+			wantErrContains: errBadSHA256Field,
 		},
 	}
 
@@ -241,17 +249,17 @@ func TestValidSHA256(t *testing.T) {
 func TestClone(t *testing.T) {
 	orig := &Manifest{
 		Name:  "src",
-		Image: ImageSpec{Arches: map[string]ArchImage{"arm64": {URL: "https://x/a.qcow2"}}},
+		Image: ImageSpec{Arches: map[string]ArchImage{tArchARM64: {URL: "https://x/a.qcow2"}}},
 		Boot:  BootSpec{Mode: BootModeHeadless},
 	}
 	cp := orig.Clone()
 	cp.Name = "dst"
-	cp.Image.Arches["arm64"] = ArchImage{URL: "https://y/b.qcow2", SHA256: strings.Repeat("a", 64)}
+	cp.Image.Arches[tArchARM64] = ArchImage{URL: "https://y/b.qcow2", SHA256: strings.Repeat("a", 64)}
 
 	if orig.Name != "src" {
 		t.Errorf("Clone aliased Name: orig.Name = %q", orig.Name)
 	}
-	if orig.Image.Arches["arm64"].URL != "https://x/a.qcow2" {
-		t.Errorf("Clone aliased Arches map: %q", orig.Image.Arches["arm64"].URL)
+	if orig.Image.Arches[tArchARM64].URL != "https://x/a.qcow2" {
+		t.Errorf("Clone aliased Arches map: %q", orig.Image.Arches[tArchARM64].URL)
 	}
 }

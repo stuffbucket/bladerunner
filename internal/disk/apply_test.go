@@ -60,8 +60,8 @@ func TestApplyTo(t *testing.T) {
 
 	t.Run("arches missing goarch", func(t *testing.T) {
 		cfg := mustDefault(t)
-		other := "arm64"
-		if runtime.GOARCH == "arm64" {
+		other := tArchARM64
+		if runtime.GOARCH == tArchARM64 {
 			other = "amd64"
 		}
 		m := &Manifest{

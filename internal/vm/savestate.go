@@ -103,11 +103,3 @@ func (m *SaveMetadata) VerifyDisk() error {
 	}
 	return nil
 }
-
-// guiModeLabel renders a boot mode for operator-facing messages.
-func guiModeLabel(gui bool) string {
-	if gui {
-		return "gui"
-	}
-	return "headless"
-}

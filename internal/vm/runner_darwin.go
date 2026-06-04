@@ -123,6 +123,14 @@ func (r *Runner) SaveState(path string) error {
 	return nil
 }
 
+// guiModeLabel renders a boot mode for operator-facing messages.
+func guiModeLabel(gui bool) string {
+	if gui {
+		return "gui"
+	}
+	return "headless"
+}
+
 // prepareRestore loads the saved-state sidecar (when present), applies the
 // snapshot's hardware configuration so the VZ config matches, and refuses the
 // restore if the disk has changed since the snapshot. A missing sidecar (an
