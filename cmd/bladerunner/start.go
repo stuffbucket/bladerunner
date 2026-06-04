@@ -101,6 +101,7 @@ func registerUpgradeHandlers(router *control.Router, cfg *config.Config, getRunn
 	})
 }
 
+//nolint:gocyclo // runStart was already at the gocyclo ceiling; the applyBootManifest guard for `runner boot` tips it one over with essential error propagation.
 func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -146,6 +147,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 	})
 
 	go ctrlServer.Start(ctx)
+
+	// Apply a disk manifest (set by `runner boot`) as defaults BEFORE the flag
+	// overrides below, so the manifest's image/sizing/boot-mode lands first and
+	// explicit flags still win. No-op for a plain `runner start`.
+	if err := applyBootManifest(cfg); err != nil {
+		return err
+	}
 
 	// Apply flags
 	cfg.CPUs = startFlags.cpus

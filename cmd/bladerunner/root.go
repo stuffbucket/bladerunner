@@ -53,4 +53,7 @@ func init() {
 	rootCmd.AddCommand(noticeCmd)
 	rootCmd.AddCommand(userCmd)
 	rootCmd.AddCommand(webCmd)
+	rootCmd.AddCommand(disksCmd)
+	rootCmd.AddCommand(bootCmd)
+	rootCmd.AddCommand(ejectCmd)
 }
