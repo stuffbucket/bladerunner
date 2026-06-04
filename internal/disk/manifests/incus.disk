@@ -1,0 +1,8 @@
+{
+  "name": "incus",
+  "description": "Headless Incus host (pre-baked bladerunner guest image).",
+  "version": "guest-image-latest",
+  "image": { "hosted": true },
+  "vm": { "cpus": 4, "memory_gib": 8, "disk_size_gib": 64 },
+  "boot": { "mode": "headless" }
+}

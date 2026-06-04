@@ -1,0 +1,19 @@
+{
+  "name": "debian-trixie-gui",
+  "description": "Debian Trixie desktop in a VZ window (the monitor turns on).",
+  "version": "20260525-2489",
+  "image": {
+    "arches": {
+      "arm64": {
+        "url": "https://cloud.debian.org/images/cloud/trixie/20260525-2489/debian-13-genericcloud-arm64-20260525-2489.qcow2",
+        "sha256": ""
+      },
+      "amd64": {
+        "url": "https://cloud.debian.org/images/cloud/trixie/20260525-2489/debian-13-genericcloud-amd64-20260525-2489.qcow2",
+        "sha256": ""
+      }
+    }
+  },
+  "vm": { "cpus": 4, "memory_gib": 8, "disk_size_gib": 64 },
+  "boot": { "mode": "gui", "autologin": true }
+}

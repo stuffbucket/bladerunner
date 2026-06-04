@@ -95,29 +95,34 @@ type Config struct {
 	// BaseImageSHA512 is the expected SHA-512 of the downloaded base image. Set
 	// for the pinned Debian default; empty for a custom --image-url (which falls
 	// back to sidecar verification) or a local --image-path.
-	BaseImageSHA512   string
-	BaseImagePath     string
-	MachineIDPath     string
-	EFIVarsPath       string
-	CloudInitISO      string
-	CloudInitDir      string
-	ConsoleLogPath    string
-	LogPath           string
-	ReportPath        string
-	MetadataPath      string
-	SSHUser           string
-	SSHPublicKey      string
-	SSHPrivateKeyPath string
-	SSHConfigPath     string
-	ClientCertPath    string
-	ClientKeyPath     string
-	TrustPassword     string
-	LocalSSHPort      int
-	LocalAPIPort      int
-	LocalOIDCPort     int
-	VsockSSHPort      uint32
-	VsockAPIPort      uint32
-	VsockOIDCPort     uint32
+	BaseImageSHA512 string
+	// BaseImageExpectedSHA256 is an explicit expected SHA-256 of the downloaded
+	// base image artifact, set by a disk manifest's image.arches[arch].sha256.
+	// Distinct from BaseImageSHA512 (the pinned Debian default) and from the
+	// --image-url path (which clears verification). Empty => sidecar fallback.
+	BaseImageExpectedSHA256 string
+	BaseImagePath           string
+	MachineIDPath           string
+	EFIVarsPath             string
+	CloudInitISO            string
+	CloudInitDir            string
+	ConsoleLogPath          string
+	LogPath                 string
+	ReportPath              string
+	MetadataPath            string
+	SSHUser                 string
+	SSHPublicKey            string
+	SSHPrivateKeyPath       string
+	SSHConfigPath           string
+	ClientCertPath          string
+	ClientKeyPath           string
+	TrustPassword           string
+	LocalSSHPort            int
+	LocalAPIPort            int
+	LocalOIDCPort           int
+	VsockSSHPort            uint32
+	VsockAPIPort            uint32
+	VsockOIDCPort           uint32
 	// AgentVsockPort is the host vsock port that br-agent (inside the guest)
 	// dials to participate in the configuration handshake. Default 19001.
 	AgentVsockPort uint32
@@ -443,6 +448,22 @@ func DefaultStateDir() string {
 		return filepath.Join(".", xdgLocalDir, xdgStateSubdir, appName)
 	}
 	return filepath.Join(home, xdgLocalDir, xdgStateSubdir, appName)
+}
+
+// ImageCacheDir returns the shared, content-addressed base-image cache:
+// <DefaultStateDir>/cache/images. The cache is shared across disks/slots (NOT
+// per-VMDir), so the same qcow2 is downloaded and converted once and reused
+// instantly by every slot. This is the single source of truth for the cache
+// location; internal/disk wraps it.
+func ImageCacheDir() string {
+	return filepath.Join(DefaultStateDir(), "cache", "images")
+}
+
+// ImageCachePath returns the content-addressed slot for a given
+// downloaded-artifact SHA-256: <ImageCacheDir>/<sha256>.raw (the
+// post-conversion raw image).
+func ImageCachePath(sha256hex string) string {
+	return filepath.Join(ImageCacheDir(), sha256hex+".raw")
 }
 
 // defaultIdentityDir returns the XDG-compliant directory of registered identity .pub files.
