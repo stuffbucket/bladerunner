@@ -167,6 +167,13 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		return cfg.BaseImagePath, nil
 	}
 
+	// When a disk manifest pins an explicit SHA-256 of the downloaded artifact,
+	// materialize the base image once into the shared content-addressed cache and
+	// reuse it across every disk slot.
+	if cfg.BaseImageExpectedSHA256 != "" {
+		return ensureCachedBaseImage(ctx, cfg)
+	}
+
 	path := filepath.Join(cfg.VMDir, "base-image.raw")
 	if util.FileExists(path) {
 		if err := ensureRawDiskImage(path); err != nil {
@@ -197,6 +204,71 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 
 	logging.L().Info("downloaded base image", "path", path)
 	return path, nil
+}
+
+// ensureCachedBaseImage materializes the base image into the shared,
+// content-addressed cache (<stateDir>/cache/images/<sha256>.raw) and returns its
+// path, so the same image is downloaded and converted once and reused instantly
+// by every disk slot. The manifest's pinned SHA-256 is verified against the
+// downloaded artifact BEFORE the in-place qcow2->raw conversion (the published
+// digest is of the qcow2, not the raw). A sibling ".ok" stamp, written only
+// after a verified download+convert, marks a trustworthy entry — the converted
+// raw's own digest necessarily differs from the qcow2 digest, so it cannot be
+// re-verified on reuse, and re-hashing a multi-GB raw on every boot would be
+// wasteful.
+func ensureCachedBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
+	cachePath := config.ImageCachePath(cfg.BaseImageExpectedSHA256)
+	okStamp := cachePath + ".ok"
+	if util.FileExists(cachePath) && util.FileExists(okStamp) {
+		logging.L().Info("using cached base image (content-addressed)", "path", cachePath, "sha256", cfg.BaseImageExpectedSHA256)
+		return cachePath, nil
+	}
+
+	if cfg.BaseImageURL == "" {
+		return "", fmt.Errorf("base image url is empty")
+	}
+	if err := os.MkdirAll(config.ImageCacheDir(), 0o755); err != nil {
+		return "", fmt.Errorf("create image cache dir: %w", err)
+	}
+
+	// A prior interrupted attempt may have left an unverified entry; clear it.
+	_ = os.Remove(cachePath)
+	_ = os.Remove(okStamp)
+
+	dlPath := cachePath + ".dl"
+	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", cachePath, "sha256", cfg.BaseImageExpectedSHA256)
+	if err := downloadFile(ctx, cfg.BaseImageURL, dlPath); err != nil {
+		_ = os.Remove(dlPath)
+		return "", err
+	}
+
+	// Verify the downloaded artifact against the manifest's pinned digest BEFORE
+	// converting, so the comparison matches the published qcow2 SHA-256.
+	got, err := fileSHA256(dlPath)
+	if err != nil {
+		_ = os.Remove(dlPath)
+		return "", err
+	}
+	if !strings.EqualFold(got, cfg.BaseImageExpectedSHA256) {
+		_ = os.Remove(dlPath)
+		return "", fmt.Errorf("base image SHA-256 mismatch: got %s, want %s", got, cfg.BaseImageExpectedSHA256)
+	}
+	logging.L().Info("base image SHA-256 verified (pinned by disk)", "sha256", got)
+
+	if err := ensureRawDiskImage(dlPath); err != nil {
+		_ = os.Remove(dlPath)
+		return "", err
+	}
+	if err := os.Rename(dlPath, cachePath); err != nil {
+		_ = os.Remove(dlPath)
+		return "", fmt.Errorf("finalize cached base image: %w", err)
+	}
+	if err := os.WriteFile(okStamp, nil, 0o644); err != nil {
+		return "", fmt.Errorf("write cache stamp: %w", err)
+	}
+
+	logging.L().Info("cached base image", "path", cachePath)
+	return cachePath, nil
 }
 
 func ensureMainDisk(cfg *config.Config, baseImagePath string) error {

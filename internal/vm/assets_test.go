@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 func TestIsGitHubReleaseURL(t *testing.T) {
@@ -200,6 +203,71 @@ func TestVerifyImageChecksum_MissingSidecar_GitHub_Tolerant(t *testing.T) {
 	// the function should treat the missing sidecar as a warning, not error.
 	if err := verifyImageChecksum(context.Background(), url, "", path); err != nil {
 		t.Errorf("expected nil error for GitHub Release with missing sidecar, got %v", err)
+	}
+}
+
+func TestEnsureCachedBaseImage_DownloadVerifyAndHit(t *testing.T) {
+	data := []byte("trixie genericcloud not-actually-qcow2")
+	digest := sha256Hex(data)
+	srv := fakeServer(t, data, "404")
+	defer srv.Close()
+
+	state := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", state)
+
+	cfg := &config.Config{
+		BaseImageURL:            srv.URL + "/image",
+		BaseImageExpectedSHA256: digest,
+	}
+
+	// Miss: downloads, verifies the pinned digest, and populates the cache.
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage (miss): %v", err)
+	}
+	want := config.ImageCachePath(digest)
+	if got != want {
+		t.Fatalf("cache path = %q, want %q", got, want)
+	}
+	if !util.FileExists(want) || !util.FileExists(want+".ok") {
+		t.Fatal("expected cache file and .ok stamp to be written")
+	}
+
+	// Hit: the same content-addressed path is returned without the server.
+	srv.Close()
+	got2, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage (hit): %v", err)
+	}
+	if got2 != want {
+		t.Fatalf("hit path = %q, want %q", got2, want)
+	}
+}
+
+func TestEnsureCachedBaseImage_DigestMismatch(t *testing.T) {
+	data := []byte("trixie genericcloud")
+	srv := fakeServer(t, data, "404")
+	defer srv.Close()
+
+	state := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", state)
+
+	wrong := strings.Repeat("0", 64)
+	cfg := &config.Config{
+		BaseImageURL:            srv.URL + "/image",
+		BaseImageExpectedSHA256: wrong,
+	}
+
+	_, err := ensureBaseImage(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected SHA-256 mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("expected mismatch error, got %v", err)
+	}
+	// A mismatched download must not leave a usable cache entry.
+	if util.FileExists(config.ImageCachePath(wrong) + ".ok") {
+		t.Error("mismatched download must not write a .ok stamp")
 	}
 }
 

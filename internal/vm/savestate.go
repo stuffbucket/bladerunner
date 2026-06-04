@@ -18,6 +18,13 @@ type SaveMetadata struct {
 	DiskSizeGiB int    `json:"disk_size_gib"`
 	DiskPath    string `json:"disk_path"`
 
+	// GUI records whether the snapshot was taken with a graphics device attached.
+	// Graphics devices are fixed at VZ-config-build time, so restoring with a
+	// different mode yields a mismatched device topology and a confusing VZ
+	// failure; the restore path refuses it with an actionable error instead. A
+	// pointer so a sidecar written before this field (nil) skips the check.
+	GUI *bool `json:"gui,omitempty"`
+
 	// Disk identity stamp. A full hash of a multi-GB image would be far too
 	// slow; the disk only changes while the VM runs, so size+mtime+inode is an
 	// instant, reliable "has it changed since the (paused) save?" check.
@@ -32,7 +39,7 @@ func SaveMetadataPath(savePath string) string { return savePath + ".json" }
 // writeSaveMetadata captures the hardware config and current disk stamp and
 // writes the sidecar next to savePath. Call it while the guest is paused, so
 // the disk is frozen and the stamp is consistent with the saved RAM.
-func writeSaveMetadata(savePath string, cpus uint, memGiB uint64, diskGiB int, diskPath string) error {
+func writeSaveMetadata(savePath string, cpus uint, memGiB uint64, diskGiB int, gui bool, diskPath string) error {
 	m, err := diskStamp(diskPath)
 	if err != nil {
 		return err
@@ -40,6 +47,7 @@ func writeSaveMetadata(savePath string, cpus uint, memGiB uint64, diskGiB int, d
 	m.CPUs = cpus
 	m.MemoryGiB = memGiB
 	m.DiskSizeGiB = diskGiB
+	m.GUI = &gui
 	m.DiskPath = diskPath
 
 	b, err := json.MarshalIndent(&m, "", "  ")

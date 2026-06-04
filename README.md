@@ -123,6 +123,47 @@ Example REST call:
 curl --cert ~/.local/state/bladerunner/client.crt --key ~/.local/state/bladerunner/client.key -k https://127.0.0.1:18443/1.0
 ```
 
+## Disks
+
+A *disk* is a `.disk` JSON manifest that bundles an image identity, VM sizing
+recommendations, and a boot mode (headless or GUI) — think of it as a labeled
+floppy you slide in and power on. Booting a disk materializes its image, applies
+sizing, and runs the VM in an isolated per-disk state slot, restoring saved guest
+RAM when present. A disk that pins its image SHA-256 (e.g. after `runner disk
+bake`) is materialized once into a shared content-addressed cache and reused
+across slots; the digest is verified before use.
+
+```bash
+runner disks                 # list the shelf (builtins + your disks)
+runner boot <name|url|path>  # power on a disk (restores saved RAM if present)
+runner eject                 # pause + save the running disk back into its slot
+runner disk new <name>       # scaffold a new user disk manifest
+runner disk bake <name>      # build its qcow2 and record the image SHA-256
+```
+
+Two disks ship built in:
+
+- **`incus`** — headless Incus host using the pre-baked bladerunner guest image
+  (the `guest-image-latest` release; this is the classic `runner start` setup).
+- **`debian-trixie-gui`** — a Debian Trixie desktop that opens in a VZ window.
+
+`runner boot <name>` resolves a catalog disk; `runner boot <url>` boots a one-off
+headless image by URL; `runner boot ./my.disk` boots a manifest file directly.
+`--cpus`/`--memory`/`--disk` override the manifest's sizing, and
+`--gui`/`--headless` override its boot mode. `--no-restore` forces a cold boot.
+
+Layout:
+
+- User disks: `~/.config/bladerunner/disks/*.disk`
+- Per-disk state slots: `~/.local/state/bladerunner/disks/<name>/` (each slot has
+  its own `disk.raw`, `saved-state.bin`, console log, EFI vars, and cloud-init)
+- Shared image cache (SHA-256-pinned disks only): `~/.local/state/bladerunner/cache/images/<sha256>.raw`
+
+`runner disk bake` shells out to `scripts/build-guest-image.sh` and is a
+host-side developer action: it requires `bash`, `qemu-img`, and the script's
+build dependencies (`libguestfs-tools`, likely `sudo`). Builtin disks are
+read-only — fork one with `runner disk new <name> --from <builtin>` first.
+
 ## Notes
 
 - The default base image is the Debian 13 (trixie) genericcloud qcow2 (`incus` and `incus-client` ship in trixie main, so no third-party apt repos are needed). Override with `--image-url` or `BLADERUNNER_BASE_IMAGE_URL` to use Ubuntu 24.04 or another distribution.
