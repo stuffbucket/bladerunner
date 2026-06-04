@@ -62,6 +62,19 @@ const (
 	formatUDSP = "UDSP" // read-write sparse (.sparseimage, runnable)
 )
 
+// hdiutil subcommands and flags referenced in more than one place (arg vectors
+// and error labels), hoisted to constants.
+const (
+	cmdCreate  = "create"
+	cmdAttach  = "attach"
+	cmdDetach  = "detach"
+	cmdConvert = "convert"
+	cmdCompact = "compact"
+	flagFormat = "-format"
+	flagQuiet  = "-quiet"
+	flagForce  = "-force"
+)
+
 // Detach busy-retry tuning. hdiutil fails with exit 16 / "Resource busy" while a
 // process still holds the volume; we retry a few times with backoff, then fall
 // back to `hdiutil detach -force`.
@@ -136,13 +149,13 @@ func VolumeName(name string) string {
 // double-append is observed) and confirm the real output path from stdout.
 func createArgs(path, name string, sizeGiB int) []string {
 	return []string{
-		"create",
+		cmdCreate,
 		"-type", "SPARSE",
 		"-fs", "APFS",
 		"-volname", VolumeName(name),
 		"-size", fmt.Sprintf("%dg", sizeGiB),
 		"-nospotlight",
-		"-quiet",
+		flagQuiet,
 		path,
 	}
 }
@@ -151,7 +164,7 @@ func createArgs(path, name string, sizeGiB int) []string {
 // mountpoint, avoiding the need to parse a plist.
 func attachArgs(path, mountpoint string) []string {
 	return []string{
-		"attach", path,
+		cmdAttach, path,
 		"-mountpoint", mountpoint,
 		"-nobrowse",
 		"-owners", "on",
@@ -162,9 +175,9 @@ func attachArgs(path, mountpoint string) []string {
 // detachArgs builds the `hdiutil detach` argument vector for a mountpoint. When
 // force is true the -force flag is appended.
 func detachArgs(mountpoint string, force bool) []string {
-	args := []string{"detach", mountpoint}
+	args := []string{cmdDetach, mountpoint}
 	if force {
-		args = append(args, "-force")
+		args = append(args, flagForce)
 	}
 	return args
 }
@@ -172,12 +185,12 @@ func detachArgs(mountpoint string, force bool) []string {
 // convertArgs builds the `hdiutil convert` argument vector to format with the
 // given destination stem. hdiutil appends the format extension.
 func convertArgs(src, format, dst string) []string {
-	return []string{"convert", src, "-format", format, "-o", dst, "-quiet"}
+	return []string{cmdConvert, src, flagFormat, format, "-o", dst, flagQuiet}
 }
 
 // compactArgs builds the `hdiutil compact` argument vector.
 func compactArgs(path string) []string {
-	return []string{"compact", path, "-quiet"}
+	return []string{cmdCompact, path, flagQuiet}
 }
 
 // create provisions a new sparse cartridge image and returns the actual output
@@ -186,7 +199,7 @@ func compactArgs(path string) []string {
 func create(ctx context.Context, r commandRunner, path, name string, sizeGiB int) (string, error) {
 	out, errOut, err := r.run(ctx, hdiutil, createArgs(path, name, sizeGiB)...)
 	if err != nil {
-		return "", wrapHdiutil("create", err, errOut)
+		return "", wrapHdiutil(cmdCreate, err, errOut)
 	}
 	return resolveOutputPath(out, path, SparseExt), nil
 }
@@ -199,7 +212,7 @@ func attach(ctx context.Context, r commandRunner, path, mountpoint string) (*Mou
 	}
 	_, errOut, err := r.run(ctx, hdiutil, attachArgs(path, mountpoint)...)
 	if err != nil {
-		return nil, wrapHdiutil("attach", err, errOut)
+		return nil, wrapHdiutil(cmdAttach, err, errOut)
 	}
 	return &Mount{Path: path, Mountpoint: resolvePath(mountpoint)}, nil
 }
@@ -223,7 +236,7 @@ func detachWithBackoff(ctx context.Context, r commandRunner, mountpoint string, 
 		if isAlreadyDetached(errOut) {
 			return nil
 		}
-		lastErr = wrapHdiutil("detach", err, errOut)
+		lastErr = wrapHdiutil(cmdDetach, err, errOut)
 		if !isBusy(errOut) {
 			// A non-busy failure won't be cured by a force eject; surface it.
 			return lastErr
@@ -238,14 +251,14 @@ func detachWithBackoff(ctx context.Context, r commandRunner, mountpoint string, 
 	if err == nil || isAlreadyDetached(errOut) {
 		return nil
 	}
-	return fmt.Errorf("force %w", wrapHdiutil("detach", err, errOut))
+	return fmt.Errorf("force %w", wrapHdiutil(cmdDetach, err, errOut))
 }
 
 // compact reclaims unused space in a (detached) sparse image.
 func compact(ctx context.Context, r commandRunner, path string) error {
 	_, errOut, err := r.run(ctx, hdiutil, compactArgs(path)...)
 	if err != nil {
-		return wrapHdiutil("compact", err, errOut)
+		return wrapHdiutil(cmdCompact, err, errOut)
 	}
 	return nil
 }
@@ -265,7 +278,7 @@ func convertToSparse(ctx context.Context, r commandRunner, src, dst string) (str
 func convert(ctx context.Context, r commandRunner, src, format, dst, wantExt string) (string, error) {
 	out, errOut, err := r.run(ctx, hdiutil, convertArgs(src, format, dst)...)
 	if err != nil {
-		return "", wrapHdiutil("convert", err, errOut)
+		return "", wrapHdiutil(cmdConvert, err, errOut)
 	}
 	return resolveOutputPath(out, dst, wantExt), nil
 }
