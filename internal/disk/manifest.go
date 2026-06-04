@@ -9,6 +9,7 @@ package disk
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"regexp"
 )
@@ -131,6 +132,31 @@ func (i *ImageSpec) validate() error {
 		}
 	}
 	return nil
+}
+
+// Clone returns a deep copy of the manifest, duplicating the per-arch image map
+// so callers (e.g. `disk new --from`) can mutate the copy without aliasing the
+// catalog's shared manifest.
+func (m *Manifest) Clone() *Manifest {
+	cp := *m
+	if m.Image.Arches != nil {
+		cp.Image.Arches = make(map[string]ArchImage, len(m.Image.Arches))
+		maps.Copy(cp.Image.Arches, m.Image.Arches)
+	}
+	return &cp
+}
+
+// ValidName reports whether name is a legal disk/slot name (matches nameRe:
+// lowercase, no path separators). Used by `disk new` to reject bad names early.
+func ValidName(name string) bool {
+	return nameRe.MatchString(name)
+}
+
+// ValidSHA256 reports whether s is a 64-character lowercase hex digest. Used by
+// `disk bake` to validate the digest emitted by build-guest-image.sh before
+// writing it into a manifest.
+func ValidSHA256(s string) bool {
+	return sha256Re.MatchString(s)
 }
 
 // Parse decodes and validates a manifest from bytes (used for embedded builtins).

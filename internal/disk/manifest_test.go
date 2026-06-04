@@ -200,3 +200,58 @@ func TestLoad(t *testing.T) {
 		t.Fatalf("Load nonexistent: expected error")
 	}
 }
+
+func TestValidName(t *testing.T) {
+	cases := map[string]bool{
+		"incus":             true,
+		"debian-trixie-gui": true,
+		"a1":                true,
+		"":                  false,
+		"-leading":          false,
+		"Upper":             false,
+		"has space":         false,
+		"has/slash":         false,
+		"..":                false,
+		"dot.name":          false,
+	}
+	for in, want := range cases {
+		if got := ValidName(in); got != want {
+			t.Errorf("ValidName(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestValidSHA256(t *testing.T) {
+	good := "ab" + strings.Repeat("0", 62)
+	cases := map[string]bool{
+		good:                           true,
+		"":                             false,
+		strings.Repeat("a", 63):        false, // too short
+		strings.Repeat("a", 65):        false, // too long
+		"AB" + strings.Repeat("0", 62): false, // uppercase
+		"zz" + strings.Repeat("0", 62): false, // non-hex
+	}
+	for in, want := range cases {
+		if got := ValidSHA256(in); got != want {
+			t.Errorf("ValidSHA256(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestClone(t *testing.T) {
+	orig := &Manifest{
+		Name:  "src",
+		Image: ImageSpec{Arches: map[string]ArchImage{"arm64": {URL: "https://x/a.qcow2"}}},
+		Boot:  BootSpec{Mode: BootModeHeadless},
+	}
+	cp := orig.Clone()
+	cp.Name = "dst"
+	cp.Image.Arches["arm64"] = ArchImage{URL: "https://y/b.qcow2", SHA256: strings.Repeat("a", 64)}
+
+	if orig.Name != "src" {
+		t.Errorf("Clone aliased Name: orig.Name = %q", orig.Name)
+	}
+	if orig.Image.Arches["arm64"].URL != "https://x/a.qcow2" {
+		t.Errorf("Clone aliased Arches map: %q", orig.Image.Arches["arm64"].URL)
+	}
+}
