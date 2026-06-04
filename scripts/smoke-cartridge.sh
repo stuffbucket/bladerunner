@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BIN="$PROJECT_ROOT/bin/bladerunner"
+BIN="$PROJECT_ROOT/bin/runner"
 
 DISK="${SMOKE_DISK:-debian-trixie-gui}"
 READY_TIMEOUT="${SMOKE_READY_TIMEOUT:-600}"
@@ -47,11 +47,14 @@ cleanup() {
   fi
   # Belt-and-suspenders: detach the cartridge if anything left it mounted.
   hdiutil detach "$MNT" -force >/dev/null 2>&1
-  rm -rf "$WORK"
   if [[ "$PASS" -eq 1 && "$rc" -eq 0 ]]; then
+    rm -rf "$WORK"
     printf '\n\033[1;32m==> SMOKE PASSED\033[0m\n'
   else
-    printf '\n\033[1;31m==> SMOKE FAILED (see above; boot log: %s)\033[0m\n' "$WORK/boot.log" >&2
+    # Preserve the work dir (incl. boot.log) for diagnosis on failure.
+    printf '\n\033[1;31m==> SMOKE FAILED (see above)\033[0m\n' >&2
+    printf '    work dir kept for diagnosis: %s\n' "$WORK" >&2
+    [[ -f "$WORK/boot.log" ]] && printf '    boot log tail:\n' >&2 && tail -n 25 "$WORK/boot.log" >&2
   fi
 }
 trap cleanup EXIT
@@ -60,6 +63,15 @@ note "Building + codesigning bladerunner"
 make -C "$PROJECT_ROOT" sign >/dev/null
 [[ -x "$BIN" ]] || fail "binary not built at $BIN"
 ok "signed binary ready"
+
+note "Preflight: required local ports must be free (bladerunner uses fixed ports — one VM at a time)"
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&-; return 0; } || return 1; }
+for p in 6022 18443; do
+  if port_in_use "$p"; then
+    fail "port $p is in use — another bladerunner VM is running. Stop it ('runner stop') first; the cartridge boot needs these ports."
+  fi
+done
+ok "local ports free"
 
 note "Packing a cartridge from '$DISK' (downloads image, bakes root.img, real hdiutil) + --ship"
 "$BIN" disk pack "$DISK" --out "$CART" --ship
