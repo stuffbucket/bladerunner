@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/disk"
@@ -81,6 +82,8 @@ const (
 	bootTargetURL bootTargetKind = iota
 	bootTargetFile
 	bootTargetName
+	// bootTargetCartridge is a self-contained .sparseimage/.dmg cartridge image.
+	bootTargetCartridge
 )
 
 // bootTarget is the classified boot argument plus the slot name derived for the
@@ -98,11 +101,20 @@ func classifyBootArg(arg string, fileExists func(string) bool) bootTarget {
 	switch {
 	case strings.Contains(arg, "://"):
 		return bootTarget{kind: bootTargetURL, arg: arg}
+	case isCartridgeArg(arg) && fileExists(arg):
+		return bootTarget{kind: bootTargetCartridge, arg: arg}
 	case strings.HasSuffix(arg, disk.ManifestExt) && fileExists(arg):
 		return bootTarget{kind: bootTargetFile, arg: arg}
 	default:
 		return bootTarget{kind: bootTargetName, arg: arg}
 	}
+}
+
+// isCartridgeArg reports whether arg names a cartridge image by extension
+// (.sparseimage runnable form or .dmg ship form). A non-existent path with such
+// an extension still falls through to the catalog lookup in classifyBootArg.
+func isCartridgeArg(arg string) bool {
+	return strings.HasSuffix(arg, cartridge.SparseExt) || strings.HasSuffix(arg, cartridge.DMGExt)
 }
 
 // slotNameFromURL derives a sanitized disk/slot name from a URL's basename by
@@ -188,12 +200,17 @@ func runBoot(cmd *cobra.Command, args []string) error {
 		return jsonOrError(fmt.Errorf("--gui and --headless are mutually exclusive"))
 	}
 
+	target := classifyBootArg(args[0], util.FileExists)
+	if target.kind == bootTargetCartridge {
+		return runBootCartridge(cmd, args, target.arg)
+	}
+
 	cat, err := disk.LoadCatalog()
 	if err != nil {
 		return jsonOrError(fmt.Errorf("load disk catalog: %w", err))
 	}
 
-	m, err := resolveBootManifest(classifyBootArg(args[0], util.FileExists), cat)
+	m, err := resolveBootManifest(target, cat)
 	if err != nil {
 		return jsonOrError(err)
 	}

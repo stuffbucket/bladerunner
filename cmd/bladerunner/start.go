@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -77,10 +78,14 @@ func nestedVirtBanner() string {
 	}
 }
 
-// registerUpgradeHandlers registers the control commands that back `runner upgrade`:
-// reporting the server's build version, and pausing+saving the guest state.
-// getRunner returns the active runner once StartVM has created it (nil before).
-func registerUpgradeHandlers(router *control.Router, cfg *config.Config, getRunner func() *vm.Runner) {
+// registerUpgradeHandlers registers the control commands that back `runner
+// upgrade` and `runner eject`: reporting the server's build version,
+// pausing+saving the guest state, and the clean ACPI shutdown. getRunner returns
+// the active runner once StartVM has created it (nil before). cancel unblocks the
+// foreground runStart so the process exits after a graceful eject — the deferred
+// runner.Stop() then tears the VMM down and the deferred cartridge detach (if
+// any) runs last.
+func registerUpgradeHandlers(router *control.Router, cfg *config.Config, getRunner func() *vm.Runner, cancel context.CancelFunc) {
 	router.HandleFunc(control.CmdServerVersion, func(_ context.Context, _ *control.Request) *control.Message {
 		return &control.Message{Response: version}
 	})
@@ -99,12 +104,51 @@ func registerUpgradeHandlers(router *control.Router, cfg *config.Config, getRunn
 		}
 		return &control.Message{Response: cfg.SavedStatePath}
 	})
+	router.HandleFunc(control.CmdEject, func(ctx context.Context, req *control.Request) *control.Message {
+		r := getRunner()
+		if r == nil {
+			return &control.Message{Error: "VM is not started yet"}
+		}
+		timeout := ejectTimeoutFromArgs(req)
+		force := ejectForceFromArgs(req)
+		// Gracefully (ACPI) shut the guest down and wait for it to stop. Detach of
+		// any cartridge is NOT done here: the VMM still holds root.img until the
+		// deferred runner.Stop() runs after the foreground unblocks. We only stop
+		// the guest, then cancel to unblock runStart so its deferred Stop() +
+		// cartridge detach run in the right order.
+		if err := r.Eject(ctx, timeout, force); err != nil {
+			return &control.Message{Error: err.Error()}
+		}
+		cancel()
+		return &control.Message{Response: control.RespOK}
+	})
+}
+
+// ejectTimeoutFromArgs parses the positional timeout (seconds) from an eject
+// request, falling back to the default when absent or unparseable.
+func ejectTimeoutFromArgs(req *control.Request) time.Duration {
+	if v, ok := req.Args["0"]; ok {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return control.DefaultEjectTimeoutSeconds * time.Second
+}
+
+// ejectForceFromArgs reports whether the eject request asked for a forced stop.
+func ejectForceFromArgs(req *control.Request) bool {
+	return req.Args["1"] == control.EjectModeForce
 }
 
 //nolint:gocyclo // runStart was already at the gocyclo ceiling; the applyBootManifest guard for `runner boot` tips it one over with essential error propagation.
 func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// A cartridge boot OWNS the mounted image: detach it on the way out. This
+	// defer is registered first so, running LIFO, it executes LAST — after the
+	// deferred runner.Stop() below tears the VMM down and releases root.img.
+	defer detachBootCartridge()
 
 	// Build config
 	cfg, err := config.Default(startFlags.stateDir)
@@ -144,7 +188,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		runnerMu.Lock()
 		defer runnerMu.Unlock()
 		return activeRunner
-	})
+	}, cancel)
 
 	go ctrlServer.Start(ctx)
 
@@ -173,6 +217,11 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if startFlags.imagePath != "" {
 		cfg.BaseImagePath = startFlags.imagePath
 	}
+
+	// A cartridge boot roots every per-VM path inside the mounted image and wires
+	// the RW share. This must land AFTER the manifest/flag overrides so the
+	// cartridge's own root.img / state / share win. No-op for a non-cartridge boot.
+	applyBootCartridge(cfg)
 
 	// Setup logging
 	if err := logging.Init(cfg.LogPath); err != nil {

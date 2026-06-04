@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"regexp"
+	"strings"
 )
 
 const (
@@ -48,6 +49,26 @@ type Manifest struct {
 	Image ImageSpec `json:"image"`
 	VM    VMSpec    `json:"vm"`
 	Boot  BootSpec  `json:"boot"`
+	// Share, when set, configures a read-WRITE host<->guest VirtioFS folder. It
+	// is optional: a plain disk has no share (nil), and cartridges default to a
+	// RW share. The host exposes a directory under Tag; the guest mounts it at
+	// GuestPath. See cartridge pack/boot.
+	Share *ShareSpec `json:"share,omitempty"`
+}
+
+// ShareSpec configures the host<->guest VirtioFS share a cartridge carries.
+// Cartridges default to a read-write share with Tag DefaultShareTag mounted at
+// DefaultShareGuestPath inside the guest.
+type ShareSpec struct {
+	// Tag is the VirtioFS device tag the guest mounts. Defaults to
+	// config.DefaultShareTag ("bladerunner-share") when empty.
+	Tag string `json:"tag,omitempty"`
+	// ReadOnly makes the share read-only from the guest. Cartridges default to
+	// read-write (false).
+	ReadOnly bool `json:"read_only,omitempty"`
+	// GuestPath is where the guest mounts the share. Defaults to
+	// config.DefaultShareGuestPath ("/mnt/share") when empty.
+	GuestPath string `json:"guest_path,omitempty"`
 }
 
 // ImageSpec identifies the qcow2 to materialize. Exactly one of (per-arch URL+SHA),
@@ -100,6 +121,15 @@ func (m *Manifest) Validate() error {
 		return fmt.Errorf("invalid boot mode %q: must be %q or %q", m.Boot.Mode, BootModeHeadless, BootModeGUI)
 	}
 
+	if m.Share != nil {
+		if m.Share.GuestPath != "" && !strings.HasPrefix(m.Share.GuestPath, "/") {
+			return fmt.Errorf("share.guest_path %q must be an absolute path", m.Share.GuestPath)
+		}
+		if m.Share.Tag != "" && strings.ContainsAny(m.Share.Tag, " \t/") {
+			return fmt.Errorf("share.tag %q must not contain whitespace or path separators", m.Share.Tag)
+		}
+	}
+
 	return m.Image.validate()
 }
 
@@ -142,6 +172,10 @@ func (m *Manifest) Clone() *Manifest {
 	if m.Image.Arches != nil {
 		cp.Image.Arches = make(map[string]ArchImage, len(m.Image.Arches))
 		maps.Copy(cp.Image.Arches, m.Image.Arches)
+	}
+	if m.Share != nil {
+		share := *m.Share
+		cp.Share = &share
 	}
 	return &cp
 }

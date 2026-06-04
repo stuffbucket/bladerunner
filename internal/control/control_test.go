@@ -92,6 +92,64 @@ func testServerAndClient(t *testing.T, format WireFormat) {
 	})
 }
 
+// TestClientEject verifies the Eject client builds the right CmdEject request
+// (timeout + optional force) and that the server can read those positional args.
+func TestClientEject(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ctrl-eject-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	server, err := NewListenerWithConfig(ListenerConfig{
+		StateDir:   tmpDir,
+		Controller: ControllerFunc{},
+	})
+	if err != nil {
+		t.Fatalf("NewListenerWithConfig: %v", err)
+	}
+	defer func() { _ = server.Close() }()
+
+	gotArgs := make(chan map[string]string, 1)
+	server.Router().HandleFunc(CmdEject, func(_ context.Context, req *Request) *Message {
+		gotArgs <- req.Args
+		return &Message{Response: RespOK}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go server.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	client := NewClient(tmpDir)
+
+	t.Run("with force", func(t *testing.T) {
+		if err := client.Eject(true, 45); err != nil {
+			t.Fatalf("Eject: %v", err)
+		}
+		args := <-gotArgs
+		if args["0"] != "45" {
+			t.Errorf("timeout arg = %q, want 45", args["0"])
+		}
+		if args["1"] != EjectModeForce {
+			t.Errorf("force arg = %q, want %q", args["1"], EjectModeForce)
+		}
+	})
+
+	t.Run("without force", func(t *testing.T) {
+		if err := client.Eject(false, 60); err != nil {
+			t.Fatalf("Eject: %v", err)
+		}
+		args := <-gotArgs
+		if args["0"] != "60" {
+			t.Errorf("timeout arg = %q, want 60", args["0"])
+		}
+		if _, ok := args["1"]; ok {
+			t.Errorf("force arg should be absent, got %q", args["1"])
+		}
+	})
+}
+
 func TestClientNotRunning(t *testing.T) {
 	tmpDir := t.TempDir()
 	client := NewClient(tmpDir)

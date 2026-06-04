@@ -263,3 +263,53 @@ func TestClone(t *testing.T) {
 		t.Errorf("Clone aliased Arches map: %q", orig.Image.Arches[tArchARM64].URL)
 	}
 }
+
+func TestCloneIsolatesShare(t *testing.T) {
+	orig := &Manifest{
+		Name:  "src",
+		Image: ImageSpec{Path: "/x/root.img"},
+		Boot:  BootSpec{Mode: BootModeHeadless},
+		Share: &ShareSpec{Tag: "bladerunner-share", GuestPath: "/mnt/share"},
+	}
+	cp := orig.Clone()
+	cp.Share.Tag = "other"
+	if orig.Share.Tag != "bladerunner-share" {
+		t.Errorf("Clone aliased Share pointer: orig.Share.Tag = %q", orig.Share.Tag)
+	}
+}
+
+func TestManifestShareValidation(t *testing.T) {
+	base := func() *Manifest {
+		return &Manifest{
+			Name:  "demo",
+			Image: ImageSpec{Path: "/x/root.img"},
+			Boot:  BootSpec{Mode: BootModeHeadless},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		share   *ShareSpec
+		wantErr bool
+	}{
+		{"no share is valid", nil, false},
+		{"default RW share is valid", &ShareSpec{Tag: "bladerunner-share", GuestPath: "/mnt/share"}, false},
+		{"empty share defaults later, still valid", &ShareSpec{}, false},
+		{"relative guest path rejected", &ShareSpec{GuestPath: "mnt/share"}, true},
+		{"tag with slash rejected", &ShareSpec{Tag: "bad/tag"}, true},
+		{"tag with space rejected", &ShareSpec{Tag: "bad tag"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base()
+			m.Share = tc.share
+			err := m.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected validation error for %+v", tc.share)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}

@@ -154,9 +154,10 @@ func (l *Listener) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 
 	req := NewRequest(msg.Command)
-	// Saving a VM's RAM state can take many seconds (multi-GB write); give that
-	// command a much longer deadline than the default request timeout.
-	if req.Command == CmdSave {
+	// Saving a VM's RAM state (multi-GB write) and ejecting (a graceful ACPI
+	// shutdown that waits for the guest to power off) can both take many seconds;
+	// give them a much longer deadline than the default request timeout.
+	if req.Command == CmdSave || req.Command == CmdEject {
 		_ = conn.SetDeadline(time.Now().Add(saveCommandTimeout))
 	}
 	resp := l.router.Dispatch(ctx, req)

@@ -24,6 +24,16 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
+// Eject tuning.
+const (
+	// ejectRequestStopAttempts is how many ACPI power-button requests Eject
+	// issues before relying on the wait/timeout to escalate.
+	ejectRequestStopAttempts = 3
+	// ejectForceStopGrace bounds the wait for the VM to reach stopped after a
+	// forced stop.
+	ejectForceStopGrace = 10 * time.Second
+)
+
 type Runner struct {
 	cfg *config.Config
 
@@ -173,6 +183,73 @@ func (r *Runner) prepareRestore() error {
 		return fmt.Errorf("refusing restore: %w", err)
 	}
 	return nil
+}
+
+// Eject performs the cartridge clean-shutdown lifecycle: it issues ACPI power
+// requests (RequestStop) and waits up to timeout for the guest to reach the
+// stopped state. If the guest does not power off in time, or force is set, it
+// escalates to a forced stop. It returns nil once the VM is stopped (or was
+// never running). The caller is then free to detach the cartridge image, which
+// the VMM has released. This composes the existing stop primitives rather than
+// reusing Stop() (which is sync.Once-guarded and combines graceful+force
+// unconditionally); a later deferred Stop() remains safe and idempotent.
+func (r *Runner) Eject(ctx context.Context, timeout time.Duration, force bool) error {
+	if r.vm == nil {
+		return errors.New("vm not started")
+	}
+	log := logging.L()
+
+	if force {
+		r.forceStopVMIfNeeded(log)
+		return r.waitForStopped(ctx, timeout)
+	}
+
+	// Issue the ACPI power button a few times; the guest's logind powers off.
+	for i := 0; i < ejectRequestStopAttempts && r.vm.CanRequestStop(); i++ {
+		ok, err := r.vm.RequestStop()
+		log.Info("eject: sent ACPI stop request", "attempt", i+1, "accepted", ok, "err", err)
+		if err != nil {
+			break
+		}
+	}
+
+	if err := r.waitForStopped(ctx, timeout); err != nil {
+		// The guest did not power off in time (e.g. ACPI ignored / hung). Force it
+		// down so the cartridge can be detached.
+		log.Warn("eject: guest did not power off gracefully; forcing stop", "err", err)
+		r.forceStopVMIfNeeded(log)
+		return r.waitForStopped(ctx, ejectForceStopGrace)
+	}
+	return nil
+}
+
+// waitForStopped blocks until the VM reaches the stopped state, the timeout
+// elapses, or the VM enters the error state. It returns nil once stopped.
+func (r *Runner) waitForStopped(ctx context.Context, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		switch r.vm.State() {
+		case vz.VirtualMachineStateStopped:
+			return nil
+		case vz.VirtualMachineStateError:
+			return errors.New("vm entered error state during eject")
+		default:
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("vm did not stop within %s: %w", timeout, waitCtx.Err())
+		case st := <-r.vm.StateChangedNotify():
+			logging.L().Info("eject: vm state changed", "state", st.String())
+			switch st {
+			case vz.VirtualMachineStateStopped:
+				return nil
+			case vz.VirtualMachineStateError:
+				return errors.New("vm entered error state during eject")
+			default:
+			}
+		}
+	}
 }
 
 // ResumeVM resumes a paused guest (e.g. after a live snapshot save).

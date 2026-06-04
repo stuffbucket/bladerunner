@@ -155,6 +155,52 @@ func ensureVMDir(cfg *config.Config) error {
 	return nil
 }
 
+// EnsureBaseImage resolves cfg's image source to a local RAW disk image,
+// downloading and caching/converting as needed, and returns its path. It is the
+// exported entry point used by `runner disk pack` to materialize a cartridge's
+// root.img without starting a VM; it shares the exact same cache/convert path as
+// boot, so a disk packed and a disk booted resolve the identical bytes.
+func EnsureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
+	return ensureBaseImage(ctx, cfg)
+}
+
+// MaterializeRawDisk copies a resolved RAW base image to dst and resizes it to
+// diskSizeGiB via qemu-img (which correctly rewrites the GPT backup header).
+// Used by `runner disk pack` to write the cartridge's root.img. srcRaw must
+// already be raw (EnsureBaseImage guarantees this).
+func MaterializeRawDisk(srcRaw, dst string, diskSizeGiB int) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create root.img parent: %w", err)
+	}
+	in, err := os.Open(srcRaw)
+	if err != nil {
+		return fmt.Errorf("open base image: %w", err)
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create root.img: %w", err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copy base image into cartridge: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close root.img: %w", err)
+	}
+
+	if _, err := exec.LookPath("qemu-img"); err != nil {
+		return fmt.Errorf("qemu-img not found in PATH (install with: brew install qemu): %w", err)
+	}
+	targetSize := fmt.Sprintf("%dG", diskSizeGiB)
+	cmd := exec.Command("qemu-img", "resize", "-f", "raw", dst, targetSize)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img resize failed: %w: %s", err, string(output))
+	}
+	return nil
+}
+
 func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	if cfg.BaseImagePath != "" {
 		if !util.FileExists(cfg.BaseImagePath) {
