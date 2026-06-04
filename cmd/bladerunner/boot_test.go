@@ -61,17 +61,21 @@ func TestDiskSlotDir(t *testing.T) {
 	_ = config.DefaultStateDir // ensure config import is exercised
 }
 
-func TestEffectiveOverrides(t *testing.T) {
-	if effectiveUint(0, 4) != 4 {
-		t.Fatal("zero override should fall back to default")
+func TestSizingPrecedence(t *testing.T) {
+	// flag > manifest > default.
+	if got := pickCPUs(8, 6); got != 8 {
+		t.Errorf("flag should win: got %d", got)
 	}
-	if effectiveUint(8, 4) != 8 {
-		t.Fatal("non-zero override should win")
+	if got := pickCPUs(0, 6); got != 6 {
+		t.Errorf("manifest should win when no flag: got %d", got)
 	}
-	if effectiveInt(0, 64) != 64 || effectiveInt(32, 64) != 32 {
-		t.Fatal("effectiveInt wrong")
+	if got := pickCPUs(0, 0); got != config.DefaultCPUs {
+		t.Errorf("default should win when neither set: got %d", got)
 	}
-	if effectiveUint64(0, 8) != 8 || effectiveUint64(16, 8) != 16 {
-		t.Fatal("effectiveUint64 wrong")
+	if pickDiskGiB(0, 0) != config.DefaultDiskSizeGiB || pickDiskGiB(0, 32) != 32 || pickDiskGiB(16, 32) != 16 {
+		t.Fatal("pickDiskGiB precedence wrong")
+	}
+	if pickMemoryGiB(0, 0) != config.DefaultMemoryGiB || pickMemoryGiB(0, 16) != 16 || pickMemoryGiB(32, 16) != 32 {
+		t.Fatal("pickMemoryGiB precedence wrong")
 	}
 }

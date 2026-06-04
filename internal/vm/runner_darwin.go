@@ -117,7 +117,7 @@ func (r *Runner) SaveState(path string) error {
 	// Record the snapshot's hardware config + disk stamp alongside the file so
 	// restore can rebuild a matching configuration and detect a changed disk.
 	// Written while paused (disk frozen). Non-fatal: the save itself succeeded.
-	if err := writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.DiskPath); err != nil {
+	if err := writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.GUI, r.cfg.DiskPath); err != nil {
 		logging.L().Warn("could not write saved-state metadata sidecar", "err", err)
 	}
 	return nil
@@ -144,6 +144,13 @@ func (r *Runner) prepareRestore() error {
 	}
 	if meta.DiskSizeGiB > 0 {
 		r.cfg.DiskSizeGiB = meta.DiskSizeGiB
+	}
+	// Graphics devices are fixed when the VZ configuration is built, so a
+	// headless<->gui mismatch between the snapshot and this boot would fail deep
+	// inside VZ with an opaque error. Refuse early with an actionable message.
+	// A sidecar without the field (nil, an older save) skips the check.
+	if meta.GUI != nil && *meta.GUI != r.cfg.GUI {
+		return fmt.Errorf("refusing restore: saved state is %s but boot requested %s; re-boot with the matching mode", guiModeLabel(*meta.GUI), guiModeLabel(r.cfg.GUI))
 	}
 	if err := meta.VerifyDisk(); err != nil {
 		return fmt.Errorf("refusing restore: %w", err)

@@ -219,10 +219,14 @@ func runBoot(cmd *cobra.Command, args []string) error {
 	// slot's baseDir roots every per-VM path; manifest sizing/image is applied
 	// inside runStart via bootManifest, and these explicit overrides land after
 	// it so they win.
+	// Sizing precedence: an explicit boot flag wins, else the disk manifest's
+	// recommendation, else the global default. (start.go later writes these onto
+	// cfg unconditionally, so the manifest value must be folded in here — applying
+	// it to cfg alone would be clobbered.)
 	startFlags.stateDir = baseDir
-	startFlags.cpus = effectiveUint(bootFlags.cpus, config.DefaultCPUs)
-	startFlags.memory = effectiveUint64(bootFlags.memory, config.DefaultMemoryGiB)
-	startFlags.disk = effectiveInt(bootFlags.disk, config.DefaultDiskSizeGiB)
+	startFlags.cpus = pickCPUs(bootFlags.cpus, m.VM.CPUs)
+	startFlags.memory = pickMemoryGiB(bootFlags.memory, m.VM.MemoryGiB)
+	startFlags.disk = pickDiskGiB(bootFlags.disk, m.VM.DiskSizeGiB)
 	startFlags.gui = guiMode
 	startFlags.timeout = bootFlags.timeout
 	startFlags.imageURL = ""
@@ -262,25 +266,38 @@ func modeLabel(gui bool) string {
 	return disk.BootModeHeadless
 }
 
-// effectiveUint returns override when non-zero, else def. boot flags default to
-// 0 ("unset") so a non-zero flag overrides both the manifest and the default.
-func effectiveUint(override, def uint) uint {
-	if override > 0 {
-		return override
+// pickCPUs resolves sizing precedence: the explicit boot flag wins when set
+// (non-zero), else the disk manifest's recommendation when set, else the global
+// default. boot flags and manifest fields both use 0 to mean "unset".
+func pickCPUs(flag, manifest uint) uint {
+	switch {
+	case flag > 0:
+		return flag
+	case manifest > 0:
+		return manifest
+	default:
+		return config.DefaultCPUs
 	}
-	return def
 }
 
-func effectiveUint64(override, def uint64) uint64 {
-	if override > 0 {
-		return override
+func pickMemoryGiB(flag, manifest uint64) uint64 {
+	switch {
+	case flag > 0:
+		return flag
+	case manifest > 0:
+		return manifest
+	default:
+		return config.DefaultMemoryGiB
 	}
-	return def
 }
 
-func effectiveInt(override, def int) int {
-	if override > 0 {
-		return override
+func pickDiskGiB(flag, manifest int) int {
+	switch {
+	case flag > 0:
+		return flag
+	case manifest > 0:
+		return manifest
+	default:
+		return config.DefaultDiskSizeGiB
 	}
-	return def
 }

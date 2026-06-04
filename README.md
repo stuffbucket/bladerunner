@@ -127,9 +127,11 @@ curl --cert ~/.local/state/bladerunner/client.crt --key ~/.local/state/bladerunn
 
 A *disk* is a `.disk` JSON manifest that bundles an image identity, VM sizing
 recommendations, and a boot mode (headless or GUI) — think of it as a labeled
-floppy you slide in and power on. Booting a disk materializes its image into a
-shared content-addressed cache, applies sizing, and runs the VM in an isolated
-per-disk state slot, restoring saved guest RAM when present.
+floppy you slide in and power on. Booting a disk materializes its image, applies
+sizing, and runs the VM in an isolated per-disk state slot, restoring saved guest
+RAM when present. A disk that pins its image SHA-256 (e.g. after `runner disk
+bake`) is materialized once into a shared content-addressed cache and reused
+across slots; the digest is verified before use.
 
 ```bash
 runner disks                 # list the shelf (builtins + your disks)
@@ -155,7 +157,7 @@ Layout:
 - User disks: `~/.config/bladerunner/disks/*.disk`
 - Per-disk state slots: `~/.local/state/bladerunner/disks/<name>/` (each slot has
   its own `disk.raw`, `saved-state.bin`, console log, EFI vars, and cloud-init)
-- Shared image cache: `~/.local/state/bladerunner/cache/images/<sha256>.raw`
+- Shared image cache (SHA-256-pinned disks only): `~/.local/state/bladerunner/cache/images/<sha256>.raw`
 
 `runner disk bake` shells out to `scripts/build-guest-image.sh` and is a
 host-side developer action: it requires `bash`, `qemu-img`, and the script's
