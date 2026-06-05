@@ -41,7 +41,7 @@ cleanup() {
   set +e
   if [[ -n "$BOOT_PID" ]] && kill -0 "$BOOT_PID" 2>/dev/null; then
     note "cleanup: ejecting (force) and stopping the boot process"
-    BLADERUNNER_STATE_DIR="$MNT" "$BIN" eject --force >/dev/null 2>&1
+    "$BIN" eject "$NAME" --force >/dev/null 2>&1
     sleep 3
     kill "$BOOT_PID" 2>/dev/null
     wait "$BOOT_PID" 2>/dev/null
@@ -165,7 +165,10 @@ done
 ok "host read the guest-written file over VirtioFS (RW both ways)"
 
 note "Ejecting (ACPI graceful shutdown, then detach)"
-BLADERUNNER_STATE_DIR="$MNT" "$BIN" eject
+# Eject by cartridge name (no BLADERUNNER_STATE_DIR override): this exercises the
+# real cartridge-scan path and labels the slot by name, rather than treating the
+# overridden state dir as the flat "default" slot.
+"$BIN" eject "$NAME"
 # The foreground boot process powers off, detaches, and exits.
 for _ in $(seq 1 30); do kill -0 "$BOOT_PID" 2>/dev/null || break; sleep 2; done
 if kill -0 "$BOOT_PID" 2>/dev/null; then fail "boot process still running after eject"; fi
