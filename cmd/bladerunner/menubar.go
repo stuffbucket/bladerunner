@@ -17,3 +17,24 @@ Shell — by invoking the same 'runner' commands. The app runs in the foreground
 quit it from its own menu (or Ctrl+C).`,
 	RunE: func(_ *cobra.Command, _ []string) error { return runMenubar() },
 }
+
+var menubarInstallCmd = &cobra.Command{
+	Use:   "install",
+	Short: "Install the menubar as a login agent (a menubar-only app, no dock icon)",
+	Long: `Install bladerunner's menubar as a real macOS agent.
+
+Builds a Bladerunner.app bundle (LSUIElement = menubar-only, no dock icon) in
+~/Applications and registers a per-user LaunchAgent so it starts at login and
+restarts if it crashes. Re-run after upgrading 'runner' to refresh the bundle.`,
+	RunE: func(_ *cobra.Command, _ []string) error { return installMenubarAgent() },
+}
+
+var menubarUninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Remove the menubar login agent and its app bundle",
+	RunE:  func(_ *cobra.Command, _ []string) error { return uninstallMenubarAgent() },
+}
+
+func init() {
+	menubarCmd.AddCommand(menubarInstallCmd, menubarUninstallCmd)
+}
