@@ -34,14 +34,16 @@ func runReconnect(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Steps, in order: push host time so OIDC tokens validate immediately, then
-	// kick NTP for ongoing discipline and bounce the stale Incus/OIDC vsock
-	// forwarders. We deliberately do NOT restart bladerunner-vsock-ssh (we are
-	// connected through it) or systemd-networkd (avoid disrupting containers).
+	// Steps, in order: push host time so OIDC tokens validate immediately (an
+	// absolute UTC epoch — TZ/DST-independent), then restart chrony (now the time
+	// source; timesyncd is masked) and bounce the stale vsock forwarders — incl.
+	// the host-time NTP bridge — so chrony re-disciplines against the host. We
+	// deliberately do NOT restart bladerunner-vsock-ssh (we are connected through
+	// it) or systemd-networkd (avoid disrupting containers).
 	epoch := time.Now().Unix()
 	steps := [][]string{
 		{"sudo", "-n", "date", "-s", fmt.Sprintf("@%d", epoch)},
-		{"sudo", "-n", "systemctl", "restart", "systemd-timesyncd", "bladerunner-vsock-incus", "bladerunner-vsock-oidc"},
+		{"sudo", "-n", "systemctl", "restart", "chrony", "bladerunner-vsock-ntp", "bladerunner-vsock-incus", "bladerunner-vsock-oidc"},
 	}
 
 	for _, step := range steps {
