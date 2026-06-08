@@ -122,8 +122,18 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
     # virt-customize wraps guestfish for declarative image edits. It is
     # idempotent across reruns and handles the initrd regeneration.
     CUSTOMIZE_ARGS=(
-        --install "incus,incus-ui-canonical,socat,jq,openssh-server"
+        --install "incus,incus-ui-canonical,socat,jq,openssh-server,chrony"
         --run-command "systemctl enable incus incus.socket ssh"
+        # chrony swap (suspend-tuned makestep) + guest-local wake-heal watchdog.
+        # Single source of truth: scripts/chrony.conf + scripts/bladerunner-watchdog.{sh,service}.
+        --copy-in     "${SCRIPT_DIR}/chrony.conf:/etc/chrony"
+        --run-command "systemctl enable chrony"
+        # Only mask timesyncd once chrony is the time source (half-removal guard).
+        --run-command "systemctl is-active --quiet chrony && (systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true) || true"
+        --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.sh:/usr/local/sbin"
+        --run-command "chmod 0755 /usr/local/sbin/bladerunner-watchdog.sh"
+        --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.service:/etc/systemd/system"
+        --run-command "systemctl enable bladerunner-watchdog.service"
         --append-line "/etc/initramfs-tools/modules:vmw_vsock_virtio_transport"
         --append-line "/etc/initramfs-tools/modules:vhost_vsock"
         --write       "/etc/bladerunner-image-version:${BUILD_DATE}"
@@ -169,11 +179,27 @@ else
     mount --bind /proc "${MNT}/proc"
     mount --bind /sys  "${MNT}/sys"
 
+    # Watchdog script/unit copied into the chroot BEFORE it runs (their target
+    # dirs already exist in the base image). chrony.conf is written AFTER apt
+    # installs chrony inside the chroot (its /etc/chrony dir is created by the
+    # package), via the single-source-of-truth file staged here.
+    install -m 0755 "${SCRIPT_DIR}/bladerunner-watchdog.sh" "${MNT}/usr/local/sbin/bladerunner-watchdog.sh"
+    install -m 0644 "${SCRIPT_DIR}/bladerunner-watchdog.service" "${MNT}/etc/systemd/system/bladerunner-watchdog.service"
+    install -m 0644 "${SCRIPT_DIR}/chrony.conf" "${MNT}/root/bladerunner-chrony.conf"
+
     chroot "${MNT}" /bin/bash -eu <<EOS
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y incus incus-ui-canonical socat jq openssh-server
+apt-get install -y incus incus-ui-canonical socat jq openssh-server chrony
 systemctl enable incus incus.socket ssh
+# chrony swap: install our suspend-tuned conf (overwriting the package default),
+# enable chrony, then mask timesyncd ONLY if chrony is active (half-removal
+# guard — never leave the guest with zero time sync).
+install -m 0644 /root/bladerunner-chrony.conf /etc/chrony/chrony.conf
+rm -f /root/bladerunner-chrony.conf
+systemctl enable chrony
+if systemctl is-active --quiet chrony; then systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true; fi
+systemctl enable bladerunner-watchdog.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
 update-initramfs -u

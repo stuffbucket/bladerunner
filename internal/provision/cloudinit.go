@@ -234,14 +234,14 @@ native_incus_distro() {
 if command -v apt-get >/dev/null 2>&1; then
   apt_update_retry
   for attempt in 1 2 3; do
-    if apt-get install -y -qq ca-certificates curl gpg openssh-server socat jq; then
+    if apt-get install -y -qq ca-certificates curl gpg openssh-server socat jq chrony; then
       break
     fi
     echo "bladerunner: core package install failed (attempt ${attempt}/3), retrying" >&2
     sleep 3
   done
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q openssh-server socat jq || true
+  dnf install -y -q openssh-server socat jq chrony || true
 fi
 
 systemctl enable --now ssh || true
@@ -338,7 +338,7 @@ systemctl daemon-reload
 systemctl enable --now bladerunner-vsock-ssh.service || true
 systemctl enable --now bladerunner-vsock-incus.service || true
 systemctl enable --now bladerunner-vsock-oidc.service || true
-%s
+%s%s
 
 # --- Best-effort incus provisioning. Everything below is non-fatal: if it
 #     fails, host<->guest SSH (configured above) still works, so the VM stays
@@ -438,12 +438,209 @@ date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 		// connects over vsock to the host provider on VsockOIDCPort. (TCP-LISTEN
 		// port = LocalOIDCPort, VSOCK-CONNECT port = VsockOIDCPort.)
 		cfg.LocalOIDCPort, cfg.VsockOIDCPort,
+		// chrony swap + guest-local wake-heal watchdog. Emitted before the share
+		// fragment and before incus, so the time stack + backstop are in place
+		// regardless of any later incus failure. Self-contained (its own Sprintf
+		// for the port env file), so the positional arg list here is unchanged
+		// apart from this single %s.
+		renderTimeHeal(cfg),
 		// VirtioFS share automount + ACPI poweroff pin, emitted only when a share
 		// is enabled (empty otherwise, so plain start/boot is byte-identical).
 		renderShareSetup(cfg),
 		cfg.SSHUser,
 		cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCAudience,
 	)
+}
+
+// watchdogScript is the guest-local wake-heal watchdog body, kept BYTE-FOR-BYTE
+// in sync with scripts/bladerunner-watchdog.sh (the single source of truth the
+// image-build paths --copy-in). It is a backtick raw string so no fmt verbs are
+// interpreted: every $ and % is literal. Do NOT introduce fmt.Sprintf verbs
+// here — the port values are threaded via the /etc/default env file written by
+// renderTimeHeal, NOT via substitution into this script.
+const watchdogScript = `#!/usr/bin/env bash
+# bladerunner-watchdog.sh — guest-LOCAL wake-heal backstop.
+#
+# SINGLE SOURCE OF TRUTH: this body is kept in sync with
+# scripts/bladerunner-watchdog.sh (the file the image-build paths --copy-in).
+#
+# WHY THIS EXISTS: when the Mac sleeps, VZ pauses the guest vCPUs with no clean
+# ACPI suspend and no paravirt "you were stopped" signal. On wake the guest has
+# NO event telling it that it was suspended. A watchdog CANNOT detect "just woke"
+# by comparing its own monotonic vs wall clock — both freeze and resume together
+# (arch_sys_counter drives both; no kvm-clock, no /dev/ptp). So the only
+# guest-local skew detector is an EXTERNAL reference: chrony's NTP offset (and
+# the RTC, IF it tracks real time — UNKNOWN on VZ, so we only LOG it).
+#
+# CONFIRMED: stale vsock connectivity (no SSH banner) is the more certain
+# symptom. PLAUSIBLE-but-UNCONFIRMED: post-sleep clock skew breaking OIDC JWTs
+# (the wedged VM was restarted before its clock could be measured). This loop
+# LOGS both signals EVERY cycle so the NEXT wedge is DIAGNOSED, not guessed.
+#
+# Heal is conservative: never blanket-restart systemd-networkd (it would disrupt
+# running Incus container bridges); only bounce the stateless socat relays, and
+# only bounce vsock-ssh under a tight gate (sshd up locally but the relay dead).
+set -uo pipefail
+[ -r /etc/default/bladerunner-watchdog ] && . /etc/default/bladerunner-watchdog
+VSOCK_OIDC_LOCAL_PORT="${VSOCK_OIDC_LOCAL_PORT:-15556}"  # the guest TCP listener
+TAG=bladerunner-watchdog
+
+log() { logger -t "$TAG" -- "$*"; }
+
+listening() { ss -tln | grep -q ":$1 "; }
+unit_active() { systemctl is-active --quiet "$1"; }
+unit_restarts() { systemctl show -p NRestarts --value "$1" 2>/dev/null; }
+
+while :; do
+  # --- OBSERVE: clock (chrony) -------------------------------------------
+  tracking="$(chronyc tracking 2>/dev/null)"
+  sys_offset="$(printf '%s\n' "$tracking" | awk -F': ' '/System time/ {print $2}')"
+  leap="$(printf '%s\n' "$tracking" | awk -F': ' '/Leap status/ {print $2}')"
+  refid="$(printf '%s\n' "$tracking" | awk -F': ' '/Reference ID/ {print $2}')"
+  # --- OBSERVE: RTC-vs-realtime delta (empirical test of the VZ-RTC UNKNOWN;
+  #     LOG only, never heal from it until a real sleep proves it advances).
+  rtc_epoch="$(cat /sys/class/rtc/rtc0/since_epoch 2>/dev/null || echo NA)"
+  now_epoch="$(date +%s)"
+  if [ "$rtc_epoch" != NA ]; then rtc_delta=$((rtc_epoch - now_epoch)); else rtc_delta=NA; fi
+  # --- OBSERVE: per-forwarder local health -------------------------------
+  ssh_listen=$(listening 22 && echo up || echo down)
+  api_listen=$(listening 8443 && echo up || echo down)
+  oidc_listen=$(listening "$VSOCK_OIDC_LOCAL_PORT" && echo up || echo down)
+  for u in bladerunner-vsock-ssh bladerunner-vsock-incus bladerunner-vsock-oidc; do
+    st=$(unit_active "$u.service" && echo active || echo inactive)
+    log "fwd $u=$st nrestarts=$(unit_restarts "$u.service")"
+  done
+  log "clock sys_offset=${sys_offset:-NA} leap=${leap:-NA} refid=${refid:-NA} rtc_delta=${rtc_delta}s"
+  log "listen ssh22=$ssh_listen api8443=$api_listen oidc${VSOCK_OIDC_LOCAL_PORT}=$oidc_listen"
+
+  # --- HEAL: clock. makestep does not disturb CLOCK_MONOTONIC; containers safe.
+  if [ "$leap" = "Not synchronised" ]; then
+    log "heal: chronyc makestep (leap=Not synchronised)"
+    chronyc makestep >/dev/null 2>&1 || true
+  fi
+
+  # --- HEAL: stateless socat relays (incus, then oidc). Bounce only when the
+  #     relay itself is inactive; a down BACKEND is the target's problem.
+  if [ "$api_listen" = up ] && ! unit_active bladerunner-vsock-incus.service; then
+    log "heal: restart bladerunner-vsock-incus (backend :8443 up, relay inactive)"
+    systemctl restart bladerunner-vsock-incus.service || true
+  fi
+  if ! unit_active bladerunner-vsock-oidc.service; then
+    log "heal: restart bladerunner-vsock-oidc (relay inactive)"
+    systemctl restart bladerunner-vsock-oidc.service || true
+  fi
+
+  # --- HEAL: vsock-ssh LAST and tightly gated (sshd :22 up AND relay dead).
+  if [ "$ssh_listen" = up ] && ! unit_active bladerunner-vsock-ssh.service; then
+    log "heal: restart bladerunner-vsock-ssh (sshd :22 up, relay inactive)"
+    systemctl restart bladerunner-vsock-ssh.service || true
+  fi
+
+  # NEVER blanket-restart systemd-networkd: it would tear down Incus container
+  # bridges. OIDC probe honesty: a listening :$VSOCK_OIDC_LOCAL_PORT proves only
+  # the guest-side socat listener is up, NOT that the host vsock peer answers
+  # (host is unreachable-by-design from a guest-local probe); the log says
+  # "relay up, host unknown", it does not infer the host is fine.
+  sleep 60
+done
+`
+
+// watchdogUnit is the systemd unit for the watchdog, kept in sync with
+// scripts/bladerunner-watchdog.service. Raw string: no fmt verbs.
+const watchdogUnit = `[Unit]
+Description=Bladerunner guest-local wake-heal watchdog
+After=network.target chrony.service
+Wants=chrony.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/bladerunner-watchdog.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`
+
+// chronyConf is the suspend-tuned chrony.conf written to /etc/chrony/chrony.conf
+// in the cloud-init path, kept in sync with scripts/chrony.conf. Raw string with
+// no fmt verbs (it contains no % so it is safe verbatim). makestep 1.0 -1 steps
+// the clock for ANY offset >1s an UNLIMITED number of times — the guest-local
+// recovery for a host suspend (no paravirt "you were stopped" signal exists).
+const chronyConf = `pool 2.debian.pool.ntp.org iburst
+# makestep 1.0 -1 = step the clock for ANY offset > 1s, an UNLIMITED number of
+# times (the "-1" count). This is the guest-LOCAL recovery for a host suspend:
+# the guest gets no paravirt "you were stopped" signal, so chrony stepping on
+# its first post-resume measurement is the only automatic local fix. The common
+# default "makestep 1.0 3" only steps the first 3 updates and would SLEW a
+# post-sleep jump over many minutes, during which OIDC JWT iat/exp/nbf stay
+# broken. CONFIRMED: a large post-sleep offset needs an immediate step.
+# UNCONFIRMED: the exact magnitude (needs a real Mac-sleep measurement).
+makestep 1.0 -1
+# Keep the RTC disciplined from system time so a future cold boot starts close.
+rtcsync
+# Poll aggressively-ish so a wake is noticed within ~1 min, capped so chrony
+# re-checks at least every ~17 min and notices a post-resume offset reasonably
+# soon. iburst above makes the FIRST sync after resume happen within seconds.
+minpoll 4
+maxpoll 8
+driftfile /var/lib/chrony/chrony.drift
+logdir /var/log/chrony
+`
+
+// renderTimeHeal returns the guest-side bootstrap fragment that (1) swaps
+// systemd-timesyncd for chrony tuned to step the clock immediately after a host
+// suspend, and (2) installs the guest-local wake-heal watchdog (script + unit).
+// It is always emitted (no host/agent dependency). The chrony swap is guarded:
+// timesyncd is only disabled+masked AFTER chrony is verified active, so a
+// transient chrony install failure never strands the guest with zero time sync.
+//
+// The watchdog script body + unit are byte-for-byte copies of the checked-in
+// scripts/bladerunner-watchdog.{sh,service}; the image-build paths --copy-in
+// those same files. The only templated values are the port(s), threaded via the
+// /etc/default/bladerunner-watchdog env file (so the script body needs no
+// substitution and stays identical to the checked-in copy).
+func renderTimeHeal(cfg *config.Config) string {
+	var b strings.Builder
+
+	// chrony.conf (no fmt verbs; safe verbatim). Replace systemd-timesyncd.
+	b.WriteString("\n# --- chrony: replace systemd-timesyncd. Tuned to step the clock immediately\n")
+	b.WriteString("#     after a host suspend (makestep 1.0 -1). The guest gets no paravirt\n")
+	b.WriteString("#     \"you were stopped\" signal, so this guest-local NTP step is the only\n")
+	b.WriteString("#     automatic recovery for post-sleep clock skew. See chrony.conf comments.\n")
+	b.WriteString("cat >/etc/chrony/chrony.conf <<'CHRONY'\n")
+	b.WriteString(chronyConf)
+	b.WriteString("CHRONY\n")
+	b.WriteString("systemctl enable --now chrony || true\n")
+	// Half-removal guard: only disable+mask timesyncd once chrony is ACTIVE.
+	b.WriteString("if systemctl is-active --quiet chrony; then\n")
+	b.WriteString("  systemctl disable --now systemd-timesyncd 2>/dev/null || true\n")
+	b.WriteString("  systemctl mask systemd-timesyncd 2>/dev/null || true\n")
+	b.WriteString("else\n")
+	b.WriteString("  echo \"bladerunner: chrony not active; leaving systemd-timesyncd in place\" >&2\n")
+	b.WriteString("fi\n")
+
+	// Watchdog port env file (the ONE templated piece — uses %d for the OIDC
+	// local listener port the watchdog probes). VSOCK_OIDC_LOCAL_PORT is the
+	// guest-side TCP listener (cfg.LocalOIDCPort); ssh :22 / incus :8443 are
+	// fixed in-guest backends so the script hardcodes those.
+	b.WriteString("\n# --- guest-local wake-heal watchdog: port env file (templated) ---\n")
+	fmt.Fprintf(&b, "cat >/etc/default/bladerunner-watchdog <<EOF\nVSOCK_OIDC_LOCAL_PORT=%d\nEOF\n", cfg.LocalOIDCPort)
+
+	// Watchdog script body (quoted heredoc; byte-for-byte the checked-in file).
+	b.WriteString("cat >/usr/local/sbin/bladerunner-watchdog.sh <<'WATCHDOG'\n")
+	b.WriteString(watchdogScript)
+	b.WriteString("WATCHDOG\n")
+	b.WriteString("chmod 0755 /usr/local/sbin/bladerunner-watchdog.sh\n")
+
+	// Watchdog systemd unit (quoted heredoc).
+	b.WriteString("cat >/etc/systemd/system/bladerunner-watchdog.service <<'WATCHDOGUNIT'\n")
+	b.WriteString(watchdogUnit)
+	b.WriteString("WATCHDOGUNIT\n")
+	b.WriteString("systemctl daemon-reload\n")
+	b.WriteString("systemctl enable --now bladerunner-watchdog.service || true\n")
+
+	return b.String()
 }
 
 // renderShareSetup returns the guest-side bootstrap fragment that mounts the
@@ -535,6 +732,12 @@ systemctl restart systemd-logind 2>/dev/null || true
 // agent must already be present in the guest image (#45) or installed by
 // the user via image bake; cloud-init merely seeds the SSH key and starts
 // the agent.
+//
+// This path provisions NOTHING time-related (no chrony, no watchdog): it relies
+// entirely on the pre-baked image (scripts/build-guest-image.sh, paths B/C) to
+// carry chrony + the guest-local wake-heal watchdog. If you change the chrony /
+// watchdog provisioning, the baked image MUST be rebuilt or this agent path
+// regresses to systemd-timesyncd with no wake-heal backstop.
 func buildMinimalCloudInit(cfg *config.Config) (string, string) {
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
