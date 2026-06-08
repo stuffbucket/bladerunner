@@ -20,7 +20,10 @@ const (
 	DefaultCPUs        = 4
 	DefaultMemoryGiB   = 8
 	DefaultDiskSizeGiB = 64
-	DefaultTimeout     = 5 * time.Minute
+	// DefaultTimeout bounds WaitForIncus. Trixie genericcloud's first-boot
+	// bootstrap (apt install incus + admin init) can exceed 5m on stock M-series
+	// hardware; 10m absorbs that. Dial back with --timeout. (#52)
+	DefaultTimeout = 10 * time.Minute
 
 	// Port assignments (avoid conflicts with common services)
 	DefaultLocalSSHPort  = 6022

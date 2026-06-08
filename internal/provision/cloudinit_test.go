@@ -144,6 +144,30 @@ func TestBuildCloudInit_AptUpdateResilient(t *testing.T) {
 	}
 }
 
+// TestBuildCloudInit_BootBreadcrumbs verifies the bootstrap emits the br_stage
+// console-breadcrumb helper and the milestone calls, so a stuck first boot is
+// triageable from the host-side console.log before SSH is even up. (#52)
+func TestBuildCloudInit_BootBreadcrumbs(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"br_stage() {",   // helper defined
+		">/dev/console",  // writes to the host-captured console
+		"br_stage start", // first milestone
+		"br_stage apt-install-incus",
+		"br_stage incus-ready",
+		"br_stage bootstrap-done", // last milestone
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing boot breadcrumb %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
 // TestBuildCloudInit_ShareAutomountWhenEnabled verifies that, with a share
 // configured, the bootstrap emits the VirtioFS mount (matching tag), the nofail
 // option (boot survives an absent share), and the ACPI poweroff pin that makes
