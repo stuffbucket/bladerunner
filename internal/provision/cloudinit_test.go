@@ -371,6 +371,9 @@ func TestBuildCloudInit_WatchdogEmitted(t *testing.T) {
 	wants := []string{
 		"/usr/local/sbin/bladerunner-watchdog.sh",
 		"/etc/systemd/system/bladerunner-watchdog.service",
+		// burst forces an immediate host re-measurement so the clock heal is
+		// bounded by the watchdog loop, not chrony's autonomous poll.
+		"chronyc burst 4/4",
 		"chronyc makestep",
 		"bladerunner-vsock-incus",
 		"bladerunner-vsock-oidc",
