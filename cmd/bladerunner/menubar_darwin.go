@@ -22,6 +22,11 @@ import (
 
 const menubarRefreshInterval = 3 * time.Second
 
+// wakeGapSeconds: if wall-clock advances far more than the poll interval between
+// two polls, the Mac slept and woke (the agent was frozen meanwhile). On wake we
+// auto-reconnect to heal the guest's clock + vsock forwarders.
+const wakeGapSeconds = 60
+
 // status-dot rendering constants.
 const (
 	iconSize    = 22
@@ -62,6 +67,7 @@ func onMenubarReady() {
 	systray.AddSeparator()
 	mStart := systray.AddMenuItem("Start VM", "Boot the bladerunner VM")
 	mStop := systray.AddMenuItem("Stop VM", "Gracefully stop the VM")
+	mReconnect := systray.AddMenuItem("Reconnect", "Re-sync the guest after sleep (clock + forwarders) without restarting")
 	mRestart := systray.AddMenuItem("Restart VM", "Stop and start the VM (fixes a wedged/unresponsive guest)")
 	systray.AddSeparator()
 	mWeb := systray.AddMenuItem("Open Web UI…", "Open the Incus web UI with single sign-on")
@@ -85,18 +91,26 @@ func onMenubarReady() {
 		healthy := st == vmHealthy
 		setEnabled(mStart, st == vmStopped)
 		setEnabled(mStop, running)
-		setEnabled(mRestart, running) // restart is the fix when wedged
-		setEnabled(mWeb, healthy)     // web/shell only work when the guest answers
+		setEnabled(mReconnect, running) // light heal after sleep
+		setEnabled(mRestart, running)   // restart is the fix when fully wedged
+		setEnabled(mWeb, healthy)       // web/shell only work when the guest answers
 		setEnabled(mShell, healthy)
 	}
 	apply(vmStopped)
 
 	// Poll health off the click loop so a slow probe (a wedged guest) never
-	// blocks the menu from responding.
+	// blocks the menu. The same loop detects host sleep/wake (a big wall-clock
+	// jump between polls) and auto-reconnects to heal the guest.
 	healthCh := make(chan vmState, 1)
 	go func() {
+		lastWall := time.Now().Unix()
 		for {
 			st := vmHealth()
+			now := time.Now().Unix()
+			if st != vmStopped && now-lastWall > int64(menubarRefreshInterval/time.Second)+wakeGapSeconds {
+				go runnerRun("reconnect") // self-heal after a detected wake
+			}
+			lastWall = now
 			select {
 			case healthCh <- st:
 			default:
@@ -116,6 +130,9 @@ func onMenubarReady() {
 			case <-mStop.ClickedCh:
 				mStatus.SetTitle("bladerunner: stopping…")
 				go runnerRun("stop")
+			case <-mReconnect.ClickedCh:
+				mStatus.SetTitle("bladerunner: reconnecting…")
+				go runnerRun("reconnect")
 			case <-mRestart.ClickedCh:
 				mStatus.SetTitle("bladerunner: restarting…")
 				go restartVM()
