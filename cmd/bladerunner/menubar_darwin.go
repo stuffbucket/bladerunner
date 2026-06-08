@@ -28,9 +28,23 @@ const (
 	iconInset   = 3.0
 	pixelCenter = 0.5
 	alphaOpaque = 0xFF
-	// gray (stopped) and green (running) dot colors.
+	// dot colors: gray (stopped), green (running+healthy), amber (running but
+	// the guest is not answering — "wedged" — or status unknown).
 	grayR, grayG, grayB    = 0x9A, 0xA4, 0xA8
 	greenR, greenG, greenB = 0x27, 0xC9, 0x3F
+	amberR, amberG, amberB = 0xFF, 0xBD, 0x2E
+)
+
+// vmState is the menubar's view of the VM: not just up/down, but whether the
+// guest actually answers a liveness probe (so a wedged guest is distinguishable
+// from a healthy one).
+type vmState int
+
+const (
+	vmStopped vmState = iota // host process not running
+	vmHealthy                // running and the guest answers the probe
+	vmWedged                 // host alive but guest unresponsive (the failure mode that breaks web/shell)
+	vmUnknown                // running but status could not be read
 )
 
 func runMenubar() error {
@@ -40,7 +54,7 @@ func runMenubar() error {
 }
 
 func onMenubarReady() {
-	systray.SetIcon(statusIcon(false))
+	systray.SetIcon(statusIcon(vmStopped))
 	systray.SetTooltip("bladerunner")
 
 	mStatus := systray.AddMenuItem("Checking…", "Bladerunner VM status")
@@ -48,40 +62,63 @@ func onMenubarReady() {
 	systray.AddSeparator()
 	mStart := systray.AddMenuItem("Start VM", "Boot the bladerunner VM")
 	mStop := systray.AddMenuItem("Stop VM", "Gracefully stop the VM")
+	mRestart := systray.AddMenuItem("Restart VM", "Stop and start the VM (fixes a wedged/unresponsive guest)")
 	systray.AddSeparator()
 	mWeb := systray.AddMenuItem("Open Web UI…", "Open the Incus web UI with single sign-on")
 	mShell := systray.AddMenuItem("Open Shell…", "Open a Terminal shell inside the VM")
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit the bladerunner menubar")
 
-	refresh := func() {
-		running := vmRunning()
-		systray.SetIcon(statusIcon(running))
-		if running {
-			mStatus.SetTitle("bladerunner: running")
-		} else {
+	apply := func(st vmState) {
+		systray.SetIcon(statusIcon(st))
+		switch st {
+		case vmStopped:
 			mStatus.SetTitle("bladerunner: stopped")
+		case vmHealthy:
+			mStatus.SetTitle("bladerunner: running")
+		case vmWedged:
+			mStatus.SetTitle("bladerunner: running (unresponsive — try Restart)")
+		case vmUnknown:
+			mStatus.SetTitle("bladerunner: running (status unknown)")
 		}
-		setEnabled(mStart, !running)
+		running := st != vmStopped
+		healthy := st == vmHealthy
+		setEnabled(mStart, st == vmStopped)
 		setEnabled(mStop, running)
-		setEnabled(mWeb, running)
-		setEnabled(mShell, running)
+		setEnabled(mRestart, running) // restart is the fix when wedged
+		setEnabled(mWeb, healthy)     // web/shell only work when the guest answers
+		setEnabled(mShell, healthy)
 	}
-	refresh()
+	apply(vmStopped)
+
+	// Poll health off the click loop so a slow probe (a wedged guest) never
+	// blocks the menu from responding.
+	healthCh := make(chan vmState, 1)
+	go func() {
+		for {
+			st := vmHealth()
+			select {
+			case healthCh <- st:
+			default:
+			}
+			time.Sleep(menubarRefreshInterval)
+		}
+	}()
 
 	go func() {
-		ticker := time.NewTicker(menubarRefreshInterval)
-		defer ticker.Stop()
 		for {
 			select {
-			case <-ticker.C:
-				refresh()
+			case st := <-healthCh:
+				apply(st)
 			case <-mStart.ClickedCh:
 				mStatus.SetTitle("bladerunner: starting…")
 				_ = launchDetached("start")
 			case <-mStop.ClickedCh:
 				mStatus.SetTitle("bladerunner: stopping…")
 				go runnerRun("stop")
+			case <-mRestart.ClickedCh:
+				mStatus.SetTitle("bladerunner: restarting…")
+				go restartVM()
 			case <-mWeb.ClickedCh:
 				_ = launchDetached("web")
 			case <-mShell.ClickedCh:
@@ -102,9 +139,35 @@ func setEnabled(m *systray.MenuItem, enabled bool) {
 	}
 }
 
-// vmRunning reports whether the default-state-dir VM's control socket is live.
-func vmRunning() bool {
-	return control.NewClient(config.DefaultStateDir()).IsRunning()
+// vmHealth probes the VM: stopped (no host process), healthy (guest answers the
+// liveness probe), wedged (host alive but guest unresponsive), or unknown. The
+// probe itself runs server-side in the VM process; this is a cheap socket call.
+func vmHealth() vmState {
+	c := control.NewClient(config.DefaultStateDir())
+	if !c.IsRunning() {
+		return vmStopped
+	}
+	status, err := c.GetStatus()
+	if err != nil {
+		return vmUnknown
+	}
+	switch status {
+	case control.StatusRunning:
+		return vmHealthy
+	case control.StatusUnreachable:
+		return vmWedged
+	case control.StatusStopped:
+		return vmStopped
+	default:
+		return vmUnknown
+	}
+}
+
+// restartVM stops the VM (graceful, forcing after a timeout) then starts a fresh
+// one — the fix for a wedged guest.
+func restartVM() {
+	runnerRun("stop")
+	_ = launchDetached("start")
 }
 
 // runnerSelf returns the path to this binary so menu actions invoke the same
@@ -137,13 +200,18 @@ func openShellTerminal() {
 	_ = exec.CommandContext(context.Background(), "osascript", "-e", script).Start()
 }
 
-// statusIcon renders a small filled-circle status dot: green when the VM is
-// running, gray when stopped. Generated in-code so there are no asset files.
-func statusIcon(running bool) []byte {
+// statusIcon renders a small filled-circle status dot colored by VM state.
+// Generated in-code so there are no asset files.
+func statusIcon(state vmState) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
 	dot := color.RGBA{R: grayR, G: grayG, B: grayB, A: alphaOpaque}
-	if running {
+	switch state {
+	case vmHealthy:
 		dot = color.RGBA{R: greenR, G: greenG, B: greenB, A: alphaOpaque}
+	case vmWedged, vmUnknown:
+		dot = color.RGBA{R: amberR, G: amberG, B: amberB, A: alphaOpaque}
+	case vmStopped:
+		// gray (default)
 	}
 	cx, cy := float64(iconSize)/2, float64(iconSize)/2
 	r := float64(iconSize)/2 - iconInset
