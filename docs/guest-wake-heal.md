@@ -7,7 +7,7 @@ Two things can wedge a previously-healthy VM across a host sleep:
 
 1. **Clock skew** — the guest wall clock can be far behind real time, which breaks
    OIDC JWT `iat`/`exp`/`nbf` validation (token exchange fails).
-2. **Stale vsock connectivity** — the socat VSOCK↔TCP relays (`runner shell`,
+2. **Stale vsock connectivity** — the socat VSOCK↔TCP relays (`br shell`,
    the Incus API, the OIDC bridge) can be wedged with no SSH banner.
 
 This change provisions a **guest-local backstop** for both, with no dependency on

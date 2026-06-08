@@ -19,14 +19,14 @@ import (
 //   - the SSH connection fails (VM not ready, network down, key mismatch)
 //   - the file doesn't exist (older base image without pre-baked marker)
 //
-// Callers (e.g. `runner status`) should treat any error as "unknown" and render
+// Callers (e.g. `br status`) should treat any error as "unknown" and render
 // a fallback string; the absence of a version is informational, not fatal.
 func ReadGuestImageVersion(cfg *config.Config) (string, error) {
 	if cfg.SSHConfigPath == "" {
 		return "", fmt.Errorf("ssh config path not set")
 	}
 
-	// Hard cap the SSH probe at 10s so a stuck VM never wedges `runner status`.
+	// Hard cap the SSH probe at 10s so a stuck VM never wedges `br status`.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

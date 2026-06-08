@@ -21,7 +21,7 @@ import (
 // errVMNotRunning is returned, with a clean message that omits the raw
 // control-socket dial failure, when a command needs the VM but it is not running
 // and was not started. The underlying socket error is logged at debug level.
-var errVMNotRunning = errors.New("VM is not running; start it with 'runner start'")
+var errVMNotRunning = errors.New("VM is not running; start it with 'br start'")
 
 // vmStartReadyTimeout bounds how long requireRunningVM waits for an auto-started
 // VM to publish its readiness signal.
@@ -85,7 +85,7 @@ func confirmStartVMFrom(r io.Reader) bool {
 	}
 }
 
-// startVMDetachedAndWait launches `runner start` as a detached background process
+// startVMDetachedAndWait launches `br start` as a detached background process
 // (so it outlives this short-lived command and becomes the VM host) and waits
 // until the VM publishes its SSH config path — the signal that StartVM has
 // returned and the VM is up — or the timeout elapses.
@@ -127,5 +127,5 @@ func startVMDetachedAndWait(stateDir string) error {
 		}
 		time.Sleep(750 * time.Millisecond)
 	}
-	return errors.New("timed out waiting for the VM to start; check 'runner status' and the log")
+	return errors.New("timed out waiting for the VM to start; check 'br status' and the log")
 }

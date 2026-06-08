@@ -157,7 +157,7 @@ func ensureVMDir(cfg *config.Config) error {
 
 // EnsureBaseImage resolves cfg's image source to a local RAW disk image,
 // downloading and caching/converting as needed, and returns its path. It is the
-// exported entry point used by `runner disk pack` to materialize a cartridge's
+// exported entry point used by `br disk pack` to materialize a cartridge's
 // root.img without starting a VM; it shares the exact same cache/convert path as
 // boot, so a disk packed and a disk booted resolve the identical bytes.
 func EnsureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
@@ -166,7 +166,7 @@ func EnsureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 
 // MaterializeRawDisk copies a resolved RAW base image to dst and resizes it to
 // diskSizeGiB via qemu-img (which correctly rewrites the GPT backup header).
-// Used by `runner disk pack` to write the cartridge's root.img. srcRaw must
+// Used by `br disk pack` to write the cartridge's root.img. srcRaw must
 // already be raw (EnsureBaseImage guarantees this).
 func MaterializeRawDisk(srcRaw, dst string, diskSizeGiB int) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {

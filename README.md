@@ -55,8 +55,8 @@ make sign
 Or manually:
 
 ```bash
-go build -o bin/runner ./cmd/bladerunner
-codesign --entitlements vz.entitlements -s - bin/runner
+go build -o bin/br ./cmd/bladerunner
+codesign --entitlements vz.entitlements -s - bin/br
 ```
 
 ## Run
@@ -129,7 +129,7 @@ A *disk* is a `.disk` JSON manifest that bundles an image identity, VM sizing
 recommendations, and a boot mode (headless or GUI) — think of it as a labeled
 floppy you slide in and power on. Booting a disk materializes its image, applies
 sizing, and runs the VM in an isolated per-disk state slot, restoring saved guest
-RAM when present. A disk that pins its image SHA-256 (e.g. after `runner disk
+RAM when present. A disk that pins its image SHA-256 (e.g. after `br disk
 bake`) is materialized once into a shared content-addressed cache and reused
 across slots; the digest is verified before use.
 
@@ -142,19 +142,19 @@ runner disk bake <name>      # build its qcow2 and record the image SHA-256
 runner disk pack <name>      # pack a disk into an AirDrop-able cartridge
 ```
 
-`runner eject` performs a clean ACPI shutdown (it loops the power button and
+`br eject` performs a clean ACPI shutdown (it loops the power button and
 waits for the guest to power off, then forces the stop after `--timeout`). For a
-same-host RAM resume use `runner save` + `runner restore` instead — eject is a
+same-host RAM resume use `br save` + `br restore` instead — eject is a
 clean cold-stop by design.
 
 Two disks ship built in:
 
 - **`incus`** — headless Incus host using the pre-baked bladerunner guest image
-  (the `guest-image-latest` release; this is the classic `runner start` setup).
+  (the `guest-image-latest` release; this is the classic `br start` setup).
 - **`debian-trixie-gui`** — a Debian Trixie desktop that opens in a VZ window.
 
-`runner boot <name>` resolves a catalog disk; `runner boot <url>` boots a one-off
-headless image by URL; `runner boot ./my.disk` boots a manifest file directly.
+`br boot <name>` resolves a catalog disk; `br boot <url>` boots a one-off
+headless image by URL; `br boot ./my.disk` boots a manifest file directly.
 `--cpus`/`--memory`/`--disk` override the manifest's sizing, and
 `--gui`/`--headless` override its boot mode. `--no-restore` forces a cold boot.
 
@@ -165,19 +165,19 @@ Layout:
   its own `disk.raw`, `saved-state.bin`, console log, EFI vars, and cloud-init)
 - Shared image cache (SHA-256-pinned disks only): `~/.local/state/bladerunner/cache/images/<sha256>.raw`
 
-`runner disk bake` shells out to `scripts/build-guest-image.sh` and is a
+`br disk bake` shells out to `scripts/build-guest-image.sh` and is a
 host-side developer action: it requires `bash`, `qemu-img`, and the script's
 build dependencies (`libguestfs-tools`, likely `sudo`). Builtin disks are
-read-only — fork one with `runner disk new <name> --from <builtin>` first.
+read-only — fork one with `br disk new <name> --from <builtin>` first.
 
 ## Cartridges
 
 A *cartridge* is a single, self-contained, AirDrop-able macOS disk image holding
 a complete bootable VM: the disk manifest, the root disk, EFI + cloud-init state,
-and a read-**write** host↔guest share folder. Because `runner eject` always
+and a read-**write** host↔guest share folder. Because `br eject` always
 powers the guest off cleanly via ACPI, a cartridge is **always** in a consistent
 cold-boot state — so you can AirDrop the file to any Mac running bladerunner and
-`runner boot <file>` just works (a clean cold boot). The clean-shutdown invariant
+`br boot <file>` just works (a clean cold boot). The clean-shutdown invariant
 is what makes AirDrop safe: no dirty filesystem, no host-bound RAM snapshot.
 
 The honest tradeoff: the **disk** is portable (cold-boot on any Mac), while
@@ -193,14 +193,14 @@ runner eject                           # clean ACPI shutdown, then detach the ca
 runner disks                           # also lists attached cartridges (booted/ejected)
 ```
 
-`runner disk pack <name>` resolves a catalog/user disk, creates an APFS sparse
+`br disk pack <name>` resolves a catalog/user disk, creates an APFS sparse
 image sized to the disk plus headroom (override with `--size`), attaches it, writes
 `disk.json`, materializes the bootable `root.img` (via the same image cache /
 `qemu-img` path boot uses), and creates `state/` and `share/`. `--out` overrides
 the output path; `--ship` additionally produces a compressed read-only `.dmg`
 (the AirDrop artifact). `--arch` selects the root image's architecture.
 
-`runner boot <cartridge>` mounts the image privately at
+`br boot <cartridge>` mounts the image privately at
 `~/.local/state/bladerunner/mnt/<name>/`, roots the VM inside it
 (`root.img`, state under `state/`, the RW share at `share/`), and **owns** the
 mount — detaching it on exit. A `.dmg` is first converted to a working
@@ -232,6 +232,6 @@ packing also needs `qemu-img`.
 - First boot can take several minutes while cloud-init installs and configures Incus.
 - A pre-baked bladerunner guest image (Debian Trixie + Incus + `br-agent`, built by `scripts/build-guest-image.sh` and published via the `build-guest-image` workflow) is the future default. While that release pipeline is bootstrapping it is opt-in: set `UseHostedGuestImage` (or pass `--image-url` with the GitHub Release URL) to use it. Once `guest-image-latest` is published the default will flip.
 - Downloaded base images are SHA-256 verified against a sidecar `.sha256` file. The check is strict for upstream Debian URLs and tolerant of a missing sidecar for GitHub Release URLs during the bootstrap window.
-- `runner status` surfaces the pre-baked image build date from `/etc/bladerunner-image-version` when present.
+- `br status` surfaces the pre-baked image build date from `/etc/bladerunner-image-version` when present.
 - GUI output is handled by VZ graphics window; serial console is logged at `console.log`.
 - Extended operations (download, VM readiness, Incus readiness) show live progress indicators in terminal.

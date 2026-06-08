@@ -15,7 +15,7 @@ I have all the context I need. This is a self-contained PRD writing task using t
 
 ## 1. Problem & motivation
 
-bladerunner already gives you a long-lived Incus machine (`runner start`) and, via #72, a way to ship a *whole VM* as an AirDrop-able cartridge. But the everyday unit a user actually cares about is not "the whole machine" — it's a single workload: a dev container, a demo environment, a scratch box. Today there is no portable, per-workload artifact:
+bladerunner already gives you a long-lived Incus machine (`br start`) and, via #72, a way to ship a *whole VM* as an AirDrop-able cartridge. But the everyday unit a user actually cares about is not "the whole machine" — it's a single workload: a dev container, a demo environment, a scratch box. Today there is no portable, per-workload artifact:
 
 - The #72 cartridge is the *heavy* case — a whole bootable VM (root.img + EFI + state + share), minutes to cold-boot, and overkill when you just want to hand someone one container.
 - There is no way to snapshot one instance to a file, carry it, hand it to a colleague, or keep a pristine "golden" template of an instance and stamp out copies.
@@ -29,7 +29,7 @@ bladerunner already gives you a long-lived Incus machine (`runner start`) and, v
 
 | Concept | What it is |
 |---|---|
-| **The MACHINE** | The long-lived bladerunner Incus VM (`runner start`). The drive. You rarely pass a whole machine — that's the rare heavy #72 cartridge. |
+| **The MACHINE** | The long-lived bladerunner Incus VM (`br start`). The drive. You rarely pass a whole machine — that's the rare heavy #72 cartridge. |
 | **A FLOPPY** | An Incus **instance** (a system container in v1; a VM later), stored on the host as a **DMG**. The everyday portable unit. |
 | **Files in the instance** | Files and directories *on the floppy*. |
 | **`share/<name>/`** | A **separate** host↔guest data cable (VirtioFS) for live files — **not** where the instance lives. Optional / later phase. |
@@ -84,16 +84,16 @@ Alice ejects `fresco.dmg` mid-afternoon (final flush → detach) while `courier`
 **Persona C — the careful operator.** Wants guarantees that nothing is ever silently lost.
 
 ### J1 — Insert & work
-`runner floppy insert courier.dmg` → bladerunner attaches the DMG, reads the small metadata file, streams the export tarball into the machine's btrfs pool via the SDK (`CreateInstanceFromBackup`), starts the instance. The instance runs from the pool. The DMG remains attached as a savefile target.
+`br floppy insert courier.dmg` → bladerunner attaches the DMG, reads the small metadata file, streams the export tarball into the machine's btrfs pool via the SDK (`CreateInstanceFromBackup`), starts the instance. The instance runs from the pool. The DMG remains attached as a savefile target.
 
 ### J2 — Checkpoint (mostly invisible)
-A periodic checkpoint goroutine snapshots + exports each attached floppy back to its DMG (`CreateInstanceSnapshot` + `CreateInstanceBackup`/stream → atomic write-back). Default cadence keeps the DMG never far behind. The user can also force one: `runner floppy checkpoint courier`.
+A periodic checkpoint goroutine snapshots + exports each attached floppy back to its DMG (`CreateInstanceSnapshot` + `CreateInstanceBackup`/stream → atomic write-back). Default cadence keeps the DMG never far behind. The user can also force one: `br floppy checkpoint courier`.
 
 ### J3 — Eject
-`runner floppy eject courier` → graceful `incus stop` of that one instance → final export → atomic, verified write-back into the still-mounted DMG → detach. The machine and other floppies stay up.
+`br floppy eject courier` → graceful `incus stop` of that one instance → final export → atomic, verified write-back into the still-mounted DMG → detach. The machine and other floppies stay up.
 
 ### J4 — Ship a read-only template
-`runner floppy new --template golden.dmg` (or `floppy seal`) produces a UDZO/UDRO pressed disk. Inserting it and ejecting forces **save-as** to a new writable DMG; the template is never mutated.
+`br floppy new --template golden.dmg` (or `floppy seal`) produces a UDZO/UDRO pressed disk. Inserting it and ejecting forces **save-as** to a new writable DMG; the template is never mutated.
 
 ### J5 — Replace / delete-DMG safety (Persona C)
 - If the DMG was **overwritten** since insert (identity stamp mismatch) → write to `<name>.conflict-<ts>.dmg` and warn; never silently overwrite.
@@ -172,7 +172,7 @@ This design is not speculative — four live spikes anchor it:
 ## 8. Open decisions (with recommendations)
 
 **A. Verb naming.**
-**Recommend a new `runner floppy` noun** with sub-verbs: `floppy insert | eject | list | new | checkpoint | save-as`. Rationale: overloading `disk`/`boot`/`eject` collides with #71 (`.disk` manifests / `boot` a VM) and #72 (`boot <cartridge>` / whole-VM `eject`), and reusing `save` collides with VZ machine-state `save`. A distinct noun keeps the three artifact families (disk / cartridge / floppy) cleanly separated.
+**Recommend a new `br floppy` noun** with sub-verbs: `floppy insert | eject | list | new | checkpoint | save-as`. Rationale: overloading `disk`/`boot`/`eject` collides with #71 (`.disk` manifests / `boot` a VM) and #72 (`boot <cartridge>` / whole-VM `eject`), and reusing `save` collides with VZ machine-state `save`. A distinct noun keeps the three artifact families (disk / cartridge / floppy) cleanly separated.
 
 **B. Checkpoint default cadence + on-by-default.**
 **Recommend on-by-default, every 5 minutes**, configurable via flag/config, with `--no-checkpoint` to opt out per insert. Rationale: spike #3 shows checkpoints are ~4s/GB and non-pausing, so the cost is negligible and the safety win (bounded crash loss) is large. Honest tradeoff: very large floppies on slower storage could see checkpoint overlap — the per-floppy lock + `send -p` incremental mitigate this; expose the cadence so power users can lengthen it.

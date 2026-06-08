@@ -2,7 +2,7 @@ SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 
-APP_NAME ?= runner
+APP_NAME ?= br
 CMD_PKG ?= ./cmd/bladerunner
 BIN_DIR ?= ./bin
 BIN_PATH ?= $(BIN_DIR)/$(APP_NAME)

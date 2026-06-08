@@ -19,7 +19,7 @@ var saveCmd = &cobra.Command{
 	Short: "Snapshot the running VM's state to a file",
 	Long: `Pause the guest, write its machine state to disk, then resume it.
 
-The resulting file can later be restored with 'runner restore'. By default it is
+The resulting file can later be restored with 'br restore'. By default it is
 written to <state-dir>/saved-state.bin; pass --path to choose another location.
 
 Requires a host that supports VZ save/restore (macOS 14+); not all guest

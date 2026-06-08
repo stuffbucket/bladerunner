@@ -28,11 +28,11 @@ var bootFlags struct {
 // bootManifest stashes the resolved disk manifest so runStart can apply it onto
 // the config after config.Default and before the cobra-flag overrides. It is
 // set by runBoot just before delegating to runStart and is nil for plain
-// `runner start`.
+// `br start`.
 var bootManifest *disk.Manifest
 
-// applyBootManifest applies the disk manifest stashed by `runner boot` onto cfg
-// as defaults. It is a no-op (returns nil) for a plain `runner start`, where
+// applyBootManifest applies the disk manifest stashed by `br boot` onto cfg
+// as defaults. It is a no-op (returns nil) for a plain `br start`, where
 // bootManifest is nil. Lives here so start.go's only addition is a single call.
 func applyBootManifest(cfg *config.Config) error {
 	if bootManifest == nil {
@@ -50,13 +50,13 @@ var bootCmd = &cobra.Command{
 	Long: `Resolve a disk, ensure its image is in the shared content-addressed cache,
 apply the disk's recommended sizing, and boot it per its boot.mode (headless or
 GUI) in an isolated per-disk state slot. If the slot holds saved guest RAM (from
-a prior 'runner eject'), the guest is restored where it left off instead of
+a prior 'br eject'), the guest is restored where it left off instead of
 cold-booting (use --no-restore to force a cold boot).
 
 The argument resolves in this order:
   - a URL (contains "://")        — booted as a one-off disk named after its basename
   - a path ending in ".disk"      — loaded as a manifest file
-  - otherwise a catalog disk name — looked up in the shelf ('runner disks')
+  - otherwise a catalog disk name — looked up in the shelf ('br disks')
 
 Sizing and boot-mode flags override the disk's recommendations. The disk carries
 its own image, so there is no --image-url/--image-path here.`,
@@ -154,7 +154,7 @@ func resolveBootManifest(t bootTarget, cat *disk.Catalog) (*disk.Manifest, error
 	case bootTargetURL:
 		name := slotNameFromURL(t.arg)
 		if name == "" {
-			return nil, fmt.Errorf("cannot derive a disk name from URL %q; create a disk first with 'runner disk new <name>'", t.arg)
+			return nil, fmt.Errorf("cannot derive a disk name from URL %q; create a disk first with 'br disk new <name>'", t.arg)
 		}
 		m := &disk.Manifest{
 			Name: name,
@@ -186,7 +186,7 @@ func resolveBootManifest(t bootTarget, cat *disk.Catalog) (*disk.Manifest, error
 func availableDisksHint(cat *disk.Catalog) string {
 	entries := cat.List()
 	if len(entries) == 0 {
-		return "no disks available (create one with 'runner disk new <name>')"
+		return "no disks available (create one with 'br disk new <name>')"
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -220,7 +220,7 @@ func runBoot(cmd *cobra.Command, args []string) error {
 	// Refuse to boot a disk that is already running in its slot (the gate is
 	// per-socket, and each slot has its own control socket via baseDir).
 	if control.NewClient(baseDir).IsRunning() {
-		return jsonOrError(fmt.Errorf("disk %q is already booted (use 'runner eject' first)", m.Name))
+		return jsonOrError(fmt.Errorf("disk %q is already booted (use 'br eject' first)", m.Name))
 	}
 
 	// Resolve the effective boot mode: explicit flags win over the manifest.

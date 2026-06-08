@@ -9,7 +9,7 @@ Phased, PR-by-PR implementation plan for the Instance Floppies PRD, grounded in 
 
 ### Verb naming (resolves Open Decision §8.A)
 
-A new top-level **`runner floppy`** noun with sub-verbs. This keeps the three artifact families cleanly separated and avoids the real collisions the PRD flags:
+A new top-level **`br floppy`** noun with sub-verbs. This keeps the three artifact families cleanly separated and avoids the real collisions the PRD flags:
 
 | Family | Verbs (existing/new) | Artifact |
 |---|---|---|
@@ -17,7 +17,7 @@ A new top-level **`runner floppy`** noun with sub-verbs. This keeps the three ar
 | **cartridge** (#72) | `disk pack --ship`, `boot <cartridge>`, `eject` | whole-VM `.sparseimage`/`.dmg` |
 | **floppy** (NEW) | `floppy insert`/`eject`/`list`/`new`/`checkpoint`/`save-as`/`seal` | one Incus instance as a `.dmg` |
 
-`runner eject` (whole-VM, control-socket slot) is **left untouched**; floppy eject is `runner floppy eject <name>` and operates on an Incus instance inside the running machine, never on a control-socket slot. The word `save` stays reserved for VZ machine-state (`save.go`/`restore.go`); floppy persistence is `checkpoint`/`eject`.
+`br eject` (whole-VM, control-socket slot) is **left untouched**; floppy eject is `br floppy eject <name>` and operates on an Incus instance inside the running machine, never on a control-socket slot. The word `save` stays reserved for VZ machine-state (`save.go`/`restore.go`); floppy persistence is `checkpoint`/`eject`.
 
 ### New packages & types
 

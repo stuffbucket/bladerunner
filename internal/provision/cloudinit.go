@@ -568,7 +568,7 @@ while :; do
 
   # --- HEAL: vsock-ssh LAST and tightly gated. Only when local sshd IS
   #     listening (:22 up, so the in-guest target is healthy) but the relay
-  #     is dead. This avoids racing an operator's live 'runner shell' and
+  #     is dead. This avoids racing an operator's live 'br shell' and
   #     avoids spinning the unit's unbounded ExecStartPre when sshd is down.
   #     The watchdog runs locally, so bouncing the bridge never cuts its own
   #     execution path. (Restart=always already auto-heals a crashed socat,
@@ -716,7 +716,7 @@ func renderTimeHeal(cfg *config.Config) string {
 }
 
 // renderShareSetup returns the guest-side bootstrap fragment that mounts the
-// VirtioFS host<->guest share and pins ACPI poweroff so `runner eject` triggers
+// VirtioFS host<->guest share and pins ACPI poweroff so `br eject` triggers
 // a deterministic clean shutdown. It returns "" when sharing is disabled
 // (cfg.ShareDir == ""), so a non-cartridge boot emits no extra commands and is
 // unchanged. The mount tag must match the host-side VirtioFS device tag
