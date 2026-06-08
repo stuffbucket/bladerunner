@@ -128,8 +128,10 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         # Single source of truth: scripts/chrony.conf + scripts/bladerunner-watchdog.{sh,service}.
         --copy-in     "${SCRIPT_DIR}/chrony.conf:/etc/chrony"
         --run-command "systemctl enable chrony"
-        # Only mask timesyncd once chrony is the time source (half-removal guard).
-        --run-command "systemctl is-active --quiet chrony && (systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true) || true"
+        # Mask timesyncd once chrony is INSTALLED (half-removal guard). Offline
+        # (virt-customize chroot) systemd is not running, so guard on the chronyd
+        # binary, not 'is-active' which would always be false here.
+        --run-command "command -v chronyd >/dev/null 2>&1 && (systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true) || true"
         --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.sh:/usr/local/sbin"
         --run-command "chmod 0755 /usr/local/sbin/bladerunner-watchdog.sh"
         --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.service:/etc/systemd/system"
@@ -198,7 +200,9 @@ systemctl enable incus incus.socket ssh
 install -m 0644 /root/bladerunner-chrony.conf /etc/chrony/chrony.conf
 rm -f /root/bladerunner-chrony.conf
 systemctl enable chrony
-if systemctl is-active --quiet chrony; then systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true; fi
+# Offline chroot: no running systemd, so guard the mask on chrony being INSTALLED
+# (chronyd binary), not 'is-active' which is always false here.
+if command -v chronyd >/dev/null 2>&1; then systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true; fi
 systemctl enable bladerunner-watchdog.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
