@@ -1,0 +1,31 @@
+name: Mutation
+
+# Mutation testing (gremlins) on the high-value pure packages. This is a quality
+# signal, NOT a blocking PR check: it runs on demand and weekly, never on every PR
+# (mutation runs are slow). A red run means a surviving mutant dropped a package
+# below the efficacy threshold — i.e. a test asserts a line without pinning its
+# behavior. See scripts/mutation-test.sh.
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 07:00 UTC (offset from the CI security scan at 09:00).
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  gremlins:
+    name: Mutation testing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run mutation testing
+        run: ./scripts/mutation-test.sh

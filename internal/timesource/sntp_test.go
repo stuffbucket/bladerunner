@@ -3,6 +3,7 @@ package timesource
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -96,6 +97,53 @@ func TestResponder_DeterministicStamp(t *testing.T) {
 		if got != want {
 			t.Errorf("timestamp at offset %d = %#x, want %#x", off, got, want)
 		}
+	}
+}
+
+// TestResponder_PartialRequestNoReply sends fewer than 48 bytes and asserts the
+// server does NOT send a reply: serveOne's io.ReadFull must block on the short
+// read rather than respond. This exercises the SetDeadline path (sntpConnTimeout).
+// If the timeout were mutated to ~0 (e.g. 5*time.Second -> 5/time.Second == 0),
+// the deadline would fire immediately and the server would close right away;
+// here we assert no 48-byte reply arrives while the (real) 5s deadline is pending.
+func TestResponder_PartialRequestNoReply(t *testing.T) {
+	r, err := NewResponder("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewResponder: %v", err)
+	}
+	r.Start()
+	defer func() { _ = r.Stop() }()
+
+	conn, err := net.Dial("tcp", r.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Send only 8 bytes: far short of the required 48. The server's ReadFull
+	// must keep blocking (deadline not yet expired), so no reply should arrive.
+	if _, err := conn.Write(make([]byte, 8)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Give the client a short read deadline well under sntpConnTimeout (5s).
+	// With the real deadline, the server is still blocked => we expect a client
+	// timeout, NOT data and NOT a clean EOF.
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	var buf [48]byte
+	n, err := conn.Read(buf[:])
+	if err == nil {
+		t.Fatalf("expected no reply for partial request, got %d bytes", n)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 bytes for partial request, got %d", n)
+	}
+	var nerr net.Error
+	if !errors.As(err, &nerr) || !nerr.Timeout() {
+		// A non-timeout error (e.g. EOF/connection reset) means the server
+		// closed the connection early — which is what a near-zero deadline
+		// would cause. The real 5s deadline must keep the server blocked.
+		t.Fatalf("expected client read timeout (server still blocked on ReadFull), got err=%v", err)
 	}
 }
 

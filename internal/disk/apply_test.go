@@ -58,6 +58,24 @@ func TestApplyTo(t *testing.T) {
 		}
 	})
 
+	t.Run("path source sets BaseImagePath", func(t *testing.T) {
+		cfg := mustDefault(t)
+		// The path branch (apply.go:37) only assigns BaseImagePath; it leaves
+		// config.Default's other image fields (incl. UseHostedGuestImage) as-is.
+		origHosted := cfg.UseHostedGuestImage
+		m := &Manifest{Name: "p", Image: ImageSpec{Path: "/tmp/root.qcow2"}, Boot: BootSpec{Mode: BootModeHeadless}}
+		if err := m.ApplyTo(cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.BaseImagePath != "/tmp/root.qcow2" {
+			t.Fatalf("BaseImagePath = %q, want %q", cfg.BaseImagePath, "/tmp/root.qcow2")
+		}
+		// The path case must NOT flip the hosted flag (unlike the hosted/arches cases).
+		if cfg.UseHostedGuestImage != origHosted {
+			t.Fatalf("path source changed UseHostedGuestImage: %v -> %v", origHosted, cfg.UseHostedGuestImage)
+		}
+	})
+
 	t.Run("arches missing goarch", func(t *testing.T) {
 		cfg := mustDefault(t)
 		other := tArchARM64
