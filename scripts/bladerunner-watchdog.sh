@@ -57,8 +57,15 @@ while :; do
   log "clock sys_offset=${sys_offset:-NA} leap=${leap:-NA} refid=${refid:-NA} rtc_delta=${rtc_delta}s"
   log "listen ssh22=$ssh_listen api8443=$api_listen oidc${VSOCK_OIDC_LOCAL_PORT}=$oidc_listen"
 
-  # --- HEAL: clock. If chrony reports not-synchronised, nudge it. Safe; a
-  #     step does not disturb CLOCK_MONOTONIC, so timers/containers are fine.
+  # --- HEAL: clock. Don't wait for chrony's autonomous poll (up to maxpoll
+  #     ~64s away) to notice a post-sleep offset: actively force a fresh host
+  #     measurement NOW (burst). chrony.conf's 'makestep 1.0 -1' then steps the
+  #     clock on that measurement for any offset >1s (and slews smaller ones),
+  #     so re-sync is bounded by THIS loop's period, not loop + a chrony poll.
+  #     A step never disturbs CLOCK_MONOTONIC, so timers/containers are fine.
+  #     The explicit makestep is a backstop for when chrony has already parked
+  #     the source as unreachable (its persistent makestep won't re-fire then).
+  chronyc burst 4/4 >/dev/null 2>&1 || true
   if [ "$leap" = "Not synchronised" ]; then
     log "heal: chronyc makestep (leap=Not synchronised)"
     chronyc makestep >/dev/null 2>&1 || true
