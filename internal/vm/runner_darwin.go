@@ -699,6 +699,7 @@ func (r *Runner) startForwarders() error {
 	logging.L().Info("forwarders active", "ssh", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalSSHPort), "api", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalAPIPort))
 
 	r.startOIDCReverseForwarder(device)
+	r.startNTPReverseForwarder(device)
 
 	return nil
 }
@@ -726,6 +727,31 @@ func (r *Runner) startOIDCReverseForwarder(device *vz.VirtioSocketDevice) {
 		return
 	}
 	r.reverseForwarders = append(r.reverseForwarders, oidcReverse)
+}
+
+// startNTPReverseForwarder wires the host pseudo-NTP (SNTP) responder so the
+// guest chrony can reach it over vsock. Failure is logged and ignored: chrony
+// retries each poll and the guest still boots.
+func (r *Runner) startNTPReverseForwarder(device *vz.VirtioSocketDevice) {
+	if r.cfg.LocalNTPPort == 0 || r.cfg.VsockNTPPort == 0 {
+		return
+	}
+	vsockLn, err := device.Listen(r.cfg.VsockNTPPort)
+	if err != nil {
+		logging.L().Warn("could not start ntp vsock listener", "err", err)
+		return
+	}
+	ntpReverse := newReversePortForwarder(
+		"ntp",
+		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalNTPPort),
+		vsockLn,
+	)
+	if err := ntpReverse.Start(); err != nil {
+		_ = vsockLn.Close()
+		logging.L().Warn("could not start ntp reverse forwarder", "err", err)
+		return
+	}
+	r.reverseForwarders = append(r.reverseForwarders, ntpReverse)
 }
 
 func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.ServerInfo) *report.StartupReport {

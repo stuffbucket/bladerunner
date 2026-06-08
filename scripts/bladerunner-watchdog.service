@@ -1,0 +1,13 @@
+[Unit]
+Description=Bladerunner guest-local wake-heal watchdog
+After=network.target chrony.service
+Wants=chrony.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/bladerunner-watchdog.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

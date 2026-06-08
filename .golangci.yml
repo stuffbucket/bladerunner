@@ -223,6 +223,20 @@ linters:
         linters:
           - mnd
 
+      # SNTP responder uses RFC 5905 wire-format constants (byte offsets, bit
+      # shifts, the 1900->1970 epoch offset) inherent to the protocol.
+      - path: 'internal/timesource/'
+        linters:
+          - mnd
+
+      # The guest watchdog matches chrony's exact (British-spelled) output
+      # string "Not synchronised"; misspell must not "correct" a load-bearing
+      # literal that chronyc actually emits.
+      - path: 'internal/provision/cloudinit\.go'
+        linters:
+          - misspell
+        text: 'synchronised'
+
       # Metadata has MAC address manipulation bits
       - path: 'internal/vm/metadata\.go'
         linters:

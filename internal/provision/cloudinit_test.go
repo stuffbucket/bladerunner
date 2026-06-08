@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -24,6 +25,8 @@ func testConfig() *config.Config {
 		VsockSSHPort:  10022,
 		VsockAPIPort:  18443,
 		VsockOIDCPort: 18556,
+		LocalNTPPort:  15557,
+		VsockNTPPort:  18557,
 	}
 }
 
@@ -229,5 +232,216 @@ func TestBuildCloudInit_UpdateGrubStillRuns(t *testing.T) {
 
 	if !strings.Contains(userData, "update-grub") {
 		t.Errorf("user-data missing update-grub invocation in bootcmd\n---\n%s\n---", userData)
+	}
+}
+
+// TestBuildCloudInit_ChronyInstalled verifies chrony is added to the same
+// resilient core apt install line as socat/jq, so it is present (with retries)
+// before the fragile incus provisioning.
+func TestBuildCloudInit_ChronyInstalled(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	if !strings.Contains(userData, "openssh-server socat jq chrony") {
+		t.Errorf("user-data does not install chrony in the core apt line\n---\n%s\n---", userData)
+	}
+}
+
+// TestBuildCloudInit_ChronyInstallsInCoreBlockBeforeIncus guards that chrony is
+// installed in the early, retried, resilient core-package block — NOT in the
+// best-effort incus block where a failure is swallowed by `|| true`. A chrony
+// install that lands in the swallowed block could silently never happen while
+// timesyncd is masked, stranding the guest with zero time sync.
+func TestBuildCloudInit_ChronyInstallsInCoreBlockBeforeIncus(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	chronyIdx := strings.Index(userData, "openssh-server socat jq chrony")
+	incusIdx := strings.Index(userData, "incus incus-client")
+	if chronyIdx < 0 {
+		t.Fatalf("user-data does not install chrony in the core line\n---\n%s\n---", userData)
+	}
+	if incusIdx < 0 {
+		t.Fatalf("user-data does not install incus (test assumption broke)\n---\n%s\n---", userData)
+	}
+	if chronyIdx > incusIdx {
+		t.Errorf("chrony (idx %d) installs AFTER incus (idx %d); it must be in the early resilient core block", chronyIdx, incusIdx)
+	}
+}
+
+// TestBuildCloudInit_ChronyConfEmitted verifies the suspend-tuned chrony.conf is
+// written, with the unlimited-step makestep and rtcsync directives.
+func TestBuildCloudInit_ChronyConfEmitted(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"/etc/chrony/chrony.conf",
+		"makestep 1.0 -1",
+		"rtcsync",
+		// Host-pointed source over vsock (Step 2): the guest coheres to the host
+		// clock, not UTC, and works offline.
+		"server 127.0.0.1 iburst prefer minpoll 4 maxpoll 6",
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing chrony.conf snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+	// The public NTP pool must be DROPPED: it needs internet (fails in airplane
+	// mode) and syncs to UTC instead of the host clock.
+	if strings.Contains(userData, "pool 2.debian.pool.ntp.org") {
+		t.Errorf("user-data still contains the dropped public NTP pool\n---\n%s\n---", userData)
+	}
+}
+
+// TestBuildCloudInit_NTPBridgeEmitted verifies the guest socat UDP<->vsock NTP
+// bridge unit is written and enabled, relaying guest localhost UDP 123 to the
+// host SNTP responder over vsock (CID 2, VsockNTPPort).
+func TestBuildCloudInit_NTPBridgeEmitted(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"/etc/systemd/system/bladerunner-vsock-ntp.service",
+		"socat UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18557",
+		"systemctl enable --now bladerunner-vsock-ntp.service",
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing NTP bridge snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
+// TestChronyConfMatchesCheckedInFile is a drift guard: the chronyConf const (the
+// cloud-init path) and scripts/chrony.conf (the baked-image path) are synced by
+// hand. They must stay byte-identical or the two provisioning paths diverge.
+func TestChronyConfMatchesCheckedInFile(t *testing.T) {
+	t.Parallel()
+	b, err := os.ReadFile("../../scripts/chrony.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != chronyConf {
+		t.Errorf("chronyConf const drifted from scripts/chrony.conf")
+	}
+}
+
+// TestBuildCloudInit_TimesyncdMaskedAfterChronyActive verifies systemd-timesyncd
+// is masked, AND that the mask is gated behind an `is-active chrony` check that
+// precedes it — the half-removal guard that prevents a failed chrony install
+// from leaving the guest with no time sync at all.
+func TestBuildCloudInit_TimesyncdMaskedAfterChronyActive(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	guardIdx := strings.Index(userData, "systemctl is-active --quiet chrony")
+	maskIdx := strings.Index(userData, "systemctl mask systemd-timesyncd")
+	if guardIdx < 0 {
+		t.Fatalf("user-data missing the `is-active chrony` half-removal guard\n---\n%s\n---", userData)
+	}
+	if maskIdx < 0 {
+		t.Fatalf("user-data does not mask systemd-timesyncd\n---\n%s\n---", userData)
+	}
+	if guardIdx > maskIdx {
+		t.Errorf("timesyncd mask (idx %d) is not gated behind the chrony-active check (idx %d)", maskIdx, guardIdx)
+	}
+}
+
+// TestBuildCloudInit_WatchdogEmitted verifies the guest-local wake-heal watchdog
+// script + unit are written and enabled, and that the watchdog heals the clock
+// and the two stateless socat relays.
+func TestBuildCloudInit_WatchdogEmitted(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"/usr/local/sbin/bladerunner-watchdog.sh",
+		"/etc/systemd/system/bladerunner-watchdog.service",
+		"chronyc makestep",
+		"bladerunner-vsock-incus",
+		"bladerunner-vsock-oidc",
+		"systemctl enable --now bladerunner-watchdog.service",
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing watchdog snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
+// TestBuildCloudInit_WatchdogNeverRestartsNetworkd guards the container-safety
+// constraint: the watchdog must never blanket-restart systemd-networkd (it would
+// tear down running Incus container bridges).
+func TestBuildCloudInit_WatchdogNeverRestartsNetworkd(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	if strings.Contains(userData, "systemctl restart systemd-networkd") {
+		t.Errorf("watchdog must NEVER restart systemd-networkd (disrupts Incus container bridges)\n---\n%s\n---", userData)
+	}
+}
+
+// TestBuildCloudInit_WatchdogLogsEveryCycle locks in the "log even when healthy"
+// requirement: every cycle the watchdog logs the clock offset and the RTC delta
+// to the journal so the NEXT wedge yields measurement, not inference.
+func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"logger -t \"$TAG\"", // journal logging via the bladerunner-watchdog tag
+		"TAG=bladerunner-watchdog",
+		"sys_offset", // clock-offset observation logged
+		"rtc_delta",  // RTC-vs-realtime delta logged (the VZ-RTC empirical test)
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing watchdog per-cycle log token %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
+// TestProvisioningAssetsMatchCheckedInFiles guards against drift between the
+// cloud-init path (which embeds these as Go consts) and the image-build path
+// (which --copy-ins the checked-in scripts/ files). The two MUST stay
+// byte-identical or a cloud-init guest and an image-built guest would run
+// different time-heal logic. If this fails, update both copies together.
+func TestProvisioningAssetsMatchCheckedInFiles(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		path string
+		got  string
+	}{
+		{"chrony.conf", "../../scripts/chrony.conf", chronyConf},
+		{"bladerunner-watchdog.sh", "../../scripts/bladerunner-watchdog.sh", watchdogScript},
+		{"bladerunner-watchdog.service", "../../scripts/bladerunner-watchdog.service", watchdogUnit},
+	}
+	for _, c := range cases {
+		want, err := os.ReadFile(c.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", c.path, err)
+		}
+		if string(want) != c.got {
+			t.Errorf("%s drifted from %s — the cloud-init const and the image-build file must be byte-identical (update both)", c.name, c.path)
+		}
 	}
 }
