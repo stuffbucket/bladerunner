@@ -28,6 +28,9 @@ const (
 	ntpModeMask = 0x7
 	// nanosPerSecond is used to scale a fractional second into NTP 32-bit form.
 	nanosPerSecond = 1e9
+	// sntpConnTimeout bounds a single read-request/write-reply exchange so a
+	// stalled peer cannot pin a goroutine + fd.
+	sntpConnTimeout = 5 * time.Second
 )
 
 // Responder is a stream SNTP server: per accepted connection it reads exactly
@@ -99,6 +102,9 @@ func (r *Responder) Addr() net.Addr {
 // per-datagram child needs EOF to flush the UDP response back to chrony. Do NOT
 // loop reading multiple requests on one connection.
 func (r *Responder) serveOne(conn net.Conn) error {
+	// Bound the exchange so a peer that connects and sends fewer than 48 bytes
+	// without closing cannot pin a goroutine + fd indefinitely.
+	_ = conn.SetDeadline(time.Now().Add(sntpConnTimeout))
 	var req [48]byte
 	if _, err := io.ReadFull(conn, req[:]); err != nil {
 		return err // short/partial read => drop this datagram; chrony retries next poll

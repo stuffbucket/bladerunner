@@ -255,7 +255,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// reverse forwarder can dial it the moment the guest chrony polls. The
 	// responder serves the HOST clock as a stratum-1 source; the guest coheres to
 	// the host (not UTC) and works offline over vsock. Non-fatal: chrony retries.
-	if cfg.LocalNTPPort != 0 {
+	if cfg.LocalNTPPort != 0 && cfg.VsockNTPPort != 0 {
 		ntpResponder, nerr := timesource.NewResponder(fmt.Sprintf("127.0.0.1:%d", cfg.LocalNTPPort))
 		if nerr != nil {
 			logging.L().Warn("ntp responder not started", "err", nerr)

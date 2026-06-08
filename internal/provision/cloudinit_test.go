@@ -418,3 +418,30 @@ func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
 		}
 	}
 }
+
+// TestProvisioningAssetsMatchCheckedInFiles guards against drift between the
+// cloud-init path (which embeds these as Go consts) and the image-build path
+// (which --copy-ins the checked-in scripts/ files). The two MUST stay
+// byte-identical or a cloud-init guest and an image-built guest would run
+// different time-heal logic. If this fails, update both copies together.
+func TestProvisioningAssetsMatchCheckedInFiles(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		path string
+		got  string
+	}{
+		{"chrony.conf", "../../scripts/chrony.conf", chronyConf},
+		{"bladerunner-watchdog.sh", "../../scripts/bladerunner-watchdog.sh", watchdogScript},
+		{"bladerunner-watchdog.service", "../../scripts/bladerunner-watchdog.service", watchdogUnit},
+	}
+	for _, c := range cases {
+		want, err := os.ReadFile(c.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", c.path, err)
+		}
+		if string(want) != c.got {
+			t.Errorf("%s drifted from %s — the cloud-init const and the image-build file must be byte-identical (update both)", c.name, c.path)
+		}
+	}
+}
