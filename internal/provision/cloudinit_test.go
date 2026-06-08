@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -24,6 +25,8 @@ func testConfig() *config.Config {
 		VsockSSHPort:  10022,
 		VsockAPIPort:  18443,
 		VsockOIDCPort: 18556,
+		LocalNTPPort:  15557,
+		VsockNTPPort:  18557,
 	}
 }
 
@@ -282,11 +285,54 @@ func TestBuildCloudInit_ChronyConfEmitted(t *testing.T) {
 		"/etc/chrony/chrony.conf",
 		"makestep 1.0 -1",
 		"rtcsync",
+		// Host-pointed source over vsock (Step 2): the guest coheres to the host
+		// clock, not UTC, and works offline.
+		"server 127.0.0.1 iburst prefer minpoll 4 maxpoll 6",
 	}
 	for _, want := range wants {
 		if !strings.Contains(userData, want) {
 			t.Errorf("user-data missing chrony.conf snippet %q\n---\n%s\n---", want, userData)
 		}
+	}
+	// The public NTP pool must be DROPPED: it needs internet (fails in airplane
+	// mode) and syncs to UTC instead of the host clock.
+	if strings.Contains(userData, "pool 2.debian.pool.ntp.org") {
+		t.Errorf("user-data still contains the dropped public NTP pool\n---\n%s\n---", userData)
+	}
+}
+
+// TestBuildCloudInit_NTPBridgeEmitted verifies the guest socat UDP<->vsock NTP
+// bridge unit is written and enabled, relaying guest localhost UDP 123 to the
+// host SNTP responder over vsock (CID 2, VsockNTPPort).
+func TestBuildCloudInit_NTPBridgeEmitted(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"/etc/systemd/system/bladerunner-vsock-ntp.service",
+		"socat UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18557",
+		"systemctl enable --now bladerunner-vsock-ntp.service",
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data missing NTP bridge snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
+// TestChronyConfMatchesCheckedInFile is a drift guard: the chronyConf const (the
+// cloud-init path) and scripts/chrony.conf (the baked-image path) are synced by
+// hand. They must stay byte-identical or the two provisioning paths diverge.
+func TestChronyConfMatchesCheckedInFile(t *testing.T) {
+	t.Parallel()
+	b, err := os.ReadFile("../../scripts/chrony.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != chronyConf {
+		t.Errorf("chronyConf const drifted from scripts/chrony.conf")
 	}
 }
 

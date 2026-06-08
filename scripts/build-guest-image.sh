@@ -136,6 +136,11 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         --run-command "chmod 0755 /usr/local/sbin/bladerunner-watchdog.sh"
         --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.service:/etc/systemd/system"
         --run-command "systemctl enable bladerunner-watchdog.service"
+        # vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder. Baked
+        # into the image so the agent/guest-agent path (which emits no time-stack
+        # cloud-init) still has the bridge. Single source: scripts/bladerunner-vsock-ntp.service.
+        --copy-in     "${SCRIPT_DIR}/bladerunner-vsock-ntp.service:/etc/systemd/system"
+        --run-command "systemctl enable bladerunner-vsock-ntp.service"
         --append-line "/etc/initramfs-tools/modules:vmw_vsock_virtio_transport"
         --append-line "/etc/initramfs-tools/modules:vhost_vsock"
         --write       "/etc/bladerunner-image-version:${BUILD_DATE}"
@@ -187,6 +192,7 @@ else
     # package), via the single-source-of-truth file staged here.
     install -m 0755 "${SCRIPT_DIR}/bladerunner-watchdog.sh" "${MNT}/usr/local/sbin/bladerunner-watchdog.sh"
     install -m 0644 "${SCRIPT_DIR}/bladerunner-watchdog.service" "${MNT}/etc/systemd/system/bladerunner-watchdog.service"
+    install -m 0644 "${SCRIPT_DIR}/bladerunner-vsock-ntp.service" "${MNT}/etc/systemd/system/bladerunner-vsock-ntp.service"
     install -m 0644 "${SCRIPT_DIR}/chrony.conf" "${MNT}/root/bladerunner-chrony.conf"
 
     chroot "${MNT}" /bin/bash -eu <<EOS
@@ -204,6 +210,7 @@ systemctl enable chrony
 # (chronyd binary), not 'is-active' which is always false here.
 if command -v chronyd >/dev/null 2>&1; then systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true; fi
 systemctl enable bladerunner-watchdog.service
+systemctl enable bladerunner-vsock-ntp.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
 update-initramfs -u

@@ -23,6 +23,22 @@ recovery layer for exactly the case the host-side reconnect path cannot reach
   number of times — on its first post-resume NTP measurement. timesyncd is
   disabled+masked **only after chrony is verified active** (a transient chrony
   install failure must never strand the guest with zero time sync).
+- **The NTP source is the *host clock*, served over vsock** (not the public
+  Debian pool). chrony now points at `server 127.0.0.1 iburst prefer minpoll 4
+  maxpoll 6`, which a guest-local socat bridge
+  (`scripts/bladerunner-vsock-ntp.service`:
+  `UDP4-RECVFROM:123,fork` ↔ `VSOCK-CONNECT:2:<VsockNTPPort>`) relays over vsock
+  to a host pseudo-NTP (SNTP) responder (`internal/timesource`,
+  `cmd/bladerunner/start.go`). The responder stamps each 48-byte reply from the
+  **host** wall clock as a stratum-1 source. Consequences: (1) the guest coheres
+  to the host clock, *not* UTC — correct even when the host clock is "wrong";
+  (2) it works **fully offline** (airplane mode) because vsock needs no IP
+  network, gateway, or host internet. The public pool is intentionally **dropped**
+  (it requires internet and would sync to UTC). `maxpoll 6` (~64s) re-checks
+  tighter than the old global `8` (~256s) so a post-sleep offset is noticed
+  sooner. The host responder is started **before** the VM (the vsock reverse
+  forwarder has no dial retry), and the watchdog observes + bounces the
+  `bladerunner-vsock-ntp` relay alongside the other socat relays.
 - **A guest-local watchdog** (`scripts/bladerunner-watchdog.{sh,service}`) is a
   `Type=simple` systemd service running an in-process loop. Every 60s it **logs**
   the chrony clock offset, the RTC-vs-realtime delta, and per-forwarder health to
@@ -42,15 +58,19 @@ no backstop:
 | Path | Where | chrony + watchdog source |
 | --- | --- | --- |
 | cloud-init bootstrap | `internal/provision/cloudinit.go` (`renderTimeHeal`) | embeds a byte-for-byte copy of the watchdog logic + the `scripts/*` content |
-| image build, virt-customize | `scripts/build-guest-image.sh` | `--copy-in scripts/chrony.conf` + `scripts/bladerunner-watchdog.{sh,service}` |
-| image build, nbd/chroot | `scripts/build-guest-image.sh` | `install` the same `scripts/*` files |
+| image build, virt-customize | `scripts/build-guest-image.sh` | `--copy-in scripts/chrony.conf` + `scripts/bladerunner-watchdog.{sh,service}` + `scripts/bladerunner-vsock-ntp.service` |
+| image build, nbd/chroot | `scripts/build-guest-image.sh` | `install` the same `scripts/*` files (incl. `bladerunner-vsock-ntp.service`) |
 | br-agent minimal cloud-init | `internal/provision/cloudinit.go` (`buildMinimalCloudInit`) | **provisions nothing** — relies on the pre-baked image carrying chrony + watchdog |
 
-**Single source of truth:** `scripts/chrony.conf` and
-`scripts/bladerunner-watchdog.{sh,service}` are canonical. The cloud-init Go path
+**Single source of truth:** `scripts/chrony.conf`,
+`scripts/bladerunner-watchdog.{sh,service}`, and
+`scripts/bladerunner-vsock-ntp.service` are canonical. The cloud-init Go path
 embeds a byte-for-byte copy of the executable logic (port values are threaded via
 a templated `/etc/default/bladerunner-watchdog` env file, not by string
-substitution into the script body). If you change one, change all of them.
+substitution into the script body; the NTP bridge's `VsockNTPPort` is the one
+templated `%d` and its default *is* the `18557` baked into the checked-in unit
+file). If you change one, change all of them. A drift-guard test asserts the
+`chronyConf` const equals `scripts/chrony.conf` byte-for-byte.
 
 CI asserts the cloud-init path only (`internal/provision/cloudinit_test.go`); the
 two image-build arms have **no automated guard** — they must be checked by review.
@@ -77,15 +97,33 @@ honestly:
   watchdog only **logs** `rtc_delta`; **no heal path depends on the RTC** until a
   real Mac-sleep spike proves it tracks real time.
 - **Hypothesis-driven:** `makestep 1.0 -1` and the offset magnitude are guesses.
+- **CONFIRMED (unit-tested):** the SNTP reply byte layout (mode=4, stratum=1, VN
+  echoed, client-transmit echoed into origin, host-now timestamps); cloud-init
+  emits the `bladerunner-vsock-ntp.service` unit + the host-pointed
+  `server 127.0.0.1` chrony line + the public pool dropped; `chronyConf` const ==
+  `scripts/chrony.conf`.
+- **HYPOTHESIS (cannot be unit-tested here):** (1) socat
+  `UDP4-RECVFROM:123,fork` ↔ `VSOCK-CONNECT` single request/response NTP
+  semantics end-to-end on this stack (the documented "ntpd-like" use case, but
+  unverified here); (2) chrony accepting a `127.0.0.1` stratum-1 source as
+  authority (not flagging falseticker/unsynchronised) — needs `chronyc
+  sources`/`tracking` on a real guest; (3) **the whole point** — post host-sleep,
+  `makestep` stepping the guest to host time within a poll *in airplane mode*.
 
 ## Validation gap
 
 End-to-end sleep/wake recovery **cannot be unit-tested**. Whether `makestep`
 fires fast enough to fix OIDC after a multi-day sleep, and whether the forwarders
-self-heal, requires a **real Mac sleep/wake**. CI asserts only that the
-provisioning strings are emitted. The journal logs (`logger -t
-bladerunner-watchdog`) are what will turn the clock-vs-connectivity inference into
-a measurement on the next real wedge:
+self-heal, requires a **real Mac sleep/wake**. The host-clock-over-vsock path
+adds its own gap: whether the socat UDP↔vsock bridge actually delivers the
+host's stratum-1 reply to chrony, whether chrony accepts `127.0.0.1` as
+authority, and whether the guest steps to host time within a poll **in airplane
+mode** all require a **real Mac sleep/resume + airplane-mode run** and cannot be
+exercised in CI. CI asserts only that the provisioning strings are emitted. On a
+live guest, confirm the source is accepted with `chronyc sources` / `chronyc
+tracking` (refid should show the host source, not a pool). The journal logs
+(`logger -t bladerunner-watchdog`) are what will turn the
+clock-vs-connectivity inference into a measurement on the next real wedge:
 
 ```bash
 runner shell

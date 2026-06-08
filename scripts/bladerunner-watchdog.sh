@@ -50,7 +50,7 @@ while :; do
   ssh_listen=$(listening 22 && echo up || echo down)
   api_listen=$(listening 8443 && echo up || echo down)
   oidc_listen=$(listening "$VSOCK_OIDC_LOCAL_PORT" && echo up || echo down)
-  for u in bladerunner-vsock-ssh bladerunner-vsock-incus bladerunner-vsock-oidc; do
+  for u in bladerunner-vsock-ssh bladerunner-vsock-incus bladerunner-vsock-oidc bladerunner-vsock-ntp; do
     st=$(unit_active "$u.service" && echo active || echo inactive)
     log "fwd $u=$st nrestarts=$(unit_restarts "$u.service")"
   done
@@ -76,6 +76,10 @@ while :; do
   if ! unit_active bladerunner-vsock-oidc.service; then
     log "heal: restart bladerunner-vsock-oidc (relay inactive)"
     systemctl restart bladerunner-vsock-oidc.service || true
+  fi
+  if ! unit_active bladerunner-vsock-ntp.service; then
+    log "heal: restart bladerunner-vsock-ntp (relay inactive)"
+    systemctl restart bladerunner-vsock-ntp.service || true
   fi
 
   # --- HEAL: vsock-ssh LAST and tightly gated. Only when local sshd IS

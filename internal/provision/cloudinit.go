@@ -506,7 +506,7 @@ while :; do
   ssh_listen=$(listening 22 && echo up || echo down)
   api_listen=$(listening 8443 && echo up || echo down)
   oidc_listen=$(listening "$VSOCK_OIDC_LOCAL_PORT" && echo up || echo down)
-  for u in bladerunner-vsock-ssh bladerunner-vsock-incus bladerunner-vsock-oidc; do
+  for u in bladerunner-vsock-ssh bladerunner-vsock-incus bladerunner-vsock-oidc bladerunner-vsock-ntp; do
     st=$(unit_active "$u.service" && echo active || echo inactive)
     log "fwd $u=$st nrestarts=$(unit_restarts "$u.service")"
   done
@@ -528,6 +528,10 @@ while :; do
   if ! unit_active bladerunner-vsock-oidc.service; then
     log "heal: restart bladerunner-vsock-oidc (relay inactive)"
     systemctl restart bladerunner-vsock-oidc.service || true
+  fi
+  if ! unit_active bladerunner-vsock-ntp.service; then
+    log "heal: restart bladerunner-vsock-ntp (relay inactive)"
+    systemctl restart bladerunner-vsock-ntp.service || true
   fi
 
   # --- HEAL: vsock-ssh LAST and tightly gated (sshd :22 up AND relay dead).
@@ -567,7 +571,15 @@ WantedBy=multi-user.target
 // no fmt verbs (it contains no % so it is safe verbatim). makestep 1.0 -1 steps
 // the clock for ANY offset >1s an UNLIMITED number of times — the guest-local
 // recovery for a host suspend (no paravirt "you were stopped" signal exists).
-const chronyConf = `pool 2.debian.pool.ntp.org iburst
+const chronyConf = `# Host pseudo-NTP source over vsock (guest UDP 123 -> bladerunner-vsock-ntp.service
+# -> vsock -> host SNTP responder serving the HOST clock as stratum-1). The guest
+# coheres to the HOST clock (not UTC) and works fully OFFLINE: vsock needs no IP
+# network, no gateway, no host internet. The public pool is intentionally DROPPED
+# — it requires internet (fails in airplane mode) and syncs to UTC, not the host.
+# Poll lives on this line: maxpoll 6 (~64s) is tighter than the old global 8
+# (~256s) so a post-sleep offset is noticed sooner. iburst makes the FIRST sync
+# after resume happen within seconds.
+server 127.0.0.1 iburst prefer minpoll 4 maxpoll 6
 # makestep 1.0 -1 = step the clock for ANY offset > 1s, an UNLIMITED number of
 # times (the "-1" count). This is the guest-LOCAL recovery for a host suspend:
 # the guest gets no paravirt "you were stopped" signal, so chrony stepping on
@@ -579,11 +591,6 @@ const chronyConf = `pool 2.debian.pool.ntp.org iburst
 makestep 1.0 -1
 # Keep the RTC disciplined from system time so a future cold boot starts close.
 rtcsync
-# Poll aggressively-ish so a wake is noticed within ~1 min, capped so chrony
-# re-checks at least every ~17 min and notices a post-resume offset reasonably
-# soon. iburst above makes the FIRST sync after resume happen within seconds.
-minpoll 4
-maxpoll 8
 driftfile /var/lib/chrony/chrony.drift
 logdir /var/log/chrony
 `
@@ -602,6 +609,28 @@ logdir /var/log/chrony
 // substitution and stays identical to the checked-in copy).
 func renderTimeHeal(cfg *config.Config) string {
 	var b strings.Builder
+
+	// vsock NTP bridge: guest localhost UDP 123 -> vsock -> host SNTP responder.
+	// UDP4-RECVFROM,fork = one vsock stream per datagram (48 in / 48 out). The
+	// guest chrony "server 127.0.0.1" line in chronyConf targets this bridge. The
+	// bridge is emitted BEFORE the chrony.conf write so the transport exists the
+	// moment chrony enables.
+	//
+	// DUAL-SOURCE DISCIPLINE: this unit body must stay BYTE-IDENTICAL to the
+	// checked-in scripts/bladerunner-vsock-ntp.service (which the image-build
+	// arms --copy-in) except for the templated %d, whose default IS the 18557
+	// hardcoded in that file. Editing one without the other silently desyncs the
+	// cloud-init path from the baked image — same discipline as chronyConf above.
+	b.WriteString("\n# --- vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder ---\n")
+	fmt.Fprintf(&b, "cat >/etc/systemd/system/bladerunner-vsock-ntp.service <<'UNIT'\n"+
+		"[Unit]\nDescription=Bladerunner vsock NTP forward (guest UDP 123 -> host vsock)\n"+
+		"After=network.target\nConditionPathExists=/usr/bin/socat\nConditionPathExists=/dev/vsock\n\n"+
+		"[Service]\nType=simple\n"+
+		"ExecStart=/usr/bin/socat UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d\n"+
+		"Restart=always\nRestartSec=1\n\n"+
+		"[Install]\nWantedBy=multi-user.target\nUNIT\n", cfg.VsockNTPPort)
+	b.WriteString("systemctl daemon-reload\n")
+	b.WriteString("systemctl enable --now bladerunner-vsock-ntp.service || true\n")
 
 	// chrony.conf (no fmt verbs; safe verbatim). Replace systemd-timesyncd.
 	b.WriteString("\n# --- chrony: replace systemd-timesyncd. Tuned to step the clock immediately\n")
