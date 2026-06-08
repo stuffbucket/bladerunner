@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 744 116" role="img" aria-label="bladerunner">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0" gradientUnits="objectBoundingBox">
+      <stop offset="0"   stop-color="#8A5CF6"/>
+      <stop offset="0.2" stop-color="#5865F2"/>
+      <stop offset="0.4" stop-color="#3B82F6"/>
+      <stop offset="0.6" stop-color="#06B6D4"/>
+      <stop offset="0.8" stop-color="#10B981"/>
+      <stop offset="1"   stop-color="#34D399"/>
+    </linearGradient>
+  </defs>
+  <text xml:space="preserve" x="6" y="22"
+        font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace"
+        font-size="20" font-weight="400" letter-spacing="0"
+        fill="url(#brand)">
+    <tspan x="6" dy="0">    __    __          __</tspan>
+    <tspan x="6" dy="22">   / /_  / /___ _____/ /__  _______  ______  ____  ___  _____</tspan>
+    <tspan x="6" dy="22">  / __ \/ / __ `/ __  / _ \/ ___/ / / / __ \/ __ \/ _ \/ ___/</tspan>
+    <tspan x="6" dy="22"> / /_/ / / /_/ / /_/ /  __/ /  / /_/ / / / / / / /  __/ /</tspan>
+    <tspan x="6" dy="22">/_.___/_/\__,_/\__,_/\___/_/   \__,_/_/ /_/_/ /_/\___/_/</tspan>
+  </text>
+</svg>
