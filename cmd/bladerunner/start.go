@@ -19,6 +19,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/oidc"
 	"github.com/stuffbucket/bladerunner/internal/ssh"
+	"github.com/stuffbucket/bladerunner/internal/timesource"
 	"github.com/stuffbucket/bladerunner/internal/ui"
 	"github.com/stuffbucket/bladerunner/internal/ui/board"
 	"github.com/stuffbucket/bladerunner/internal/vm"
@@ -248,6 +249,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 		logging.L().Warn("oidc provider not started", "err", err)
 	default:
 		defer func() { _ = oidcProvider.Stop() }()
+	}
+
+	// Start the host pseudo-NTP (SNTP) responder before the VM so the vsock
+	// reverse forwarder can dial it the moment the guest chrony polls. The
+	// responder serves the HOST clock as a stratum-1 source; the guest coheres to
+	// the host (not UTC) and works offline over vsock. Non-fatal: chrony retries.
+	if cfg.LocalNTPPort != 0 {
+		ntpResponder, nerr := timesource.NewResponder(fmt.Sprintf("127.0.0.1:%d", cfg.LocalNTPPort))
+		if nerr != nil {
+			logging.L().Warn("ntp responder not started", "err", nerr)
+		} else {
+			ntpResponder.Start()
+			defer func() { _ = ntpResponder.Stop() }()
+		}
 	}
 
 	// Create and start VM

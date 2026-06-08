@@ -29,6 +29,8 @@ const (
 	DefaultVsockSSHPort  = 10022
 	DefaultVsockAPIPort  = 18443
 	DefaultVsockOIDCPort = 18556
+	DefaultLocalNTPPort  = 15557
+	DefaultVsockNTPPort  = 18557
 
 	// DefaultAgentVsockPort is the host vsock port the in-guest br-agent dials
 	// to receive configuration commands. The host listens on this port (CID 2
@@ -134,6 +136,8 @@ type Config struct {
 	VsockSSHPort            uint32
 	VsockAPIPort            uint32
 	VsockOIDCPort           uint32
+	LocalNTPPort            int
+	VsockNTPPort            uint32
 	// AgentVsockPort is the host vsock port that br-agent (inside the guest)
 	// dials to participate in the configuration handshake. Default 19001.
 	AgentVsockPort uint32
@@ -326,6 +330,8 @@ func Default(baseDir string) (*Config, error) {
 		VsockSSHPort:        DefaultVsockSSHPort,
 		VsockAPIPort:        DefaultVsockAPIPort,
 		VsockOIDCPort:       DefaultVsockOIDCPort,
+		LocalNTPPort:        DefaultLocalNTPPort,
+		VsockNTPPort:        DefaultVsockNTPPort,
 		AgentVsockPort:      DefaultAgentVsockPort,
 		UseGuestAgent:       false,
 		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultLocalOIDCPort),
@@ -425,6 +431,9 @@ func (c *Config) validatePorts() error {
 	if c.LocalOIDCPort != 0 && (c.LocalOIDCPort < minPort || c.LocalOIDCPort > maxPort) {
 		return errors.New("local oidc port must be in range 1-65535")
 	}
+	if c.LocalNTPPort != 0 && (c.LocalNTPPort < minPort || c.LocalNTPPort > maxPort) {
+		return errors.New("local ntp port must be in range 1-65535")
+	}
 	if c.LocalSSHPort == c.LocalAPIPort {
 		return errors.New("local ssh and api ports must differ")
 	}
@@ -436,8 +445,14 @@ func (c *Config) validatePorts() error {
 	}
 	if c.AgentVsockPort != 0 {
 		switch c.AgentVsockPort {
+		case c.VsockSSHPort, c.VsockAPIPort, c.VsockOIDCPort, c.VsockNTPPort:
+			return errors.New("agent vsock port must differ from ssh/api/oidc/ntp vsock ports")
+		}
+	}
+	if c.VsockNTPPort != 0 {
+		switch c.VsockNTPPort {
 		case c.VsockSSHPort, c.VsockAPIPort, c.VsockOIDCPort:
-			return errors.New("agent vsock port must differ from ssh/api/oidc vsock ports")
+			return errors.New("guest vsock ntp port must differ from ssh/api/oidc vsock ports")
 		}
 	}
 	return nil
