@@ -57,4 +57,6 @@ func init() {
 	rootCmd.AddCommand(disksCmd)
 	rootCmd.AddCommand(bootCmd)
 	rootCmd.AddCommand(ejectCmd)
+	rootCmd.AddCommand(reconnectCmd)
+	rootCmd.AddCommand(menubarCmd)
 }

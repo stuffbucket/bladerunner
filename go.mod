@@ -3,6 +3,7 @@ module github.com/stuffbucket/bladerunner
 go 1.25.6
 
 require (
+	fyne.io/systray v1.12.1
 	github.com/Code-Hex/vz/v3 v3.7.1
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/log v0.4.2
@@ -12,6 +13,7 @@ require (
 	github.com/zitadel/oidc/v3 v3.45.5
 	golang.org/x/crypto v0.49.0
 	golang.org/x/oauth2 v0.36.0
+	golang.org/x/sys v0.42.0
 	golang.org/x/term v0.41.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -36,6 +38,7 @@ require (
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
@@ -72,7 +75,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.42.0 // indirect
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
 	golang.org/x/mod v0.34.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
