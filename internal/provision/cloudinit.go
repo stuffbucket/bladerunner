@@ -155,6 +155,14 @@ export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /var/lib/bladerunner
 
+# Emit a host-visible breadcrumb to /dev/console (captured into the host-side
+# console.log) so first-boot progress is visible even when SSH/Incus aren't up
+# yet. Best-effort: console may not exist on some virt setups. (#52)
+br_stage() {
+  echo "bladerunner-bootstrap: stage=$1 t=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" >/dev/console 2>/dev/null || true
+}
+br_stage start
+
 # Load vsock kernel modules early (required for socat VSOCK-LISTEN)
 # These may be built-in on some kernels, so ignore errors.
 modprobe vsock 2>/dev/null || true
@@ -232,7 +240,9 @@ native_incus_distro() {
 #     the host<->guest vsock SSH bridge needs; install them (with retries)
 #     before the heavier, failure-prone incus provisioning below.
 if command -v apt-get >/dev/null 2>&1; then
+  br_stage apt-update
   apt_update_retry
+  br_stage apt-install-base
   for attempt in 1 2 3; do
     if apt-get install -y -qq ca-certificates curl gpg openssh-server socat jq chrony; then
       break
@@ -246,6 +256,7 @@ fi
 
 systemctl enable --now ssh || true
 systemctl enable --now sshd || true
+br_stage ssh-up
 
 # --- Break-glass SSH access, provisioned HERE in the bootstrap (runcmd) rather
 #     than via cloud-init's users/ssh_authorized_keys/chpasswd modules. Those are
@@ -339,11 +350,13 @@ systemctl enable --now bladerunner-vsock-ssh.service || true
 systemctl enable --now bladerunner-vsock-incus.service || true
 systemctl enable --now bladerunner-vsock-oidc.service || true
 %s%s
+br_stage vsock-services-up
 
 # --- Best-effort incus provisioning. Everything below is non-fatal: if it
 #     fails, host<->guest SSH (configured above) still works, so the VM stays
 #     reachable and debuggable instead of silently stranding the operator.
 if command -v apt-get >/dev/null 2>&1; then
+  br_stage apt-install-incus
   if native_incus_distro; then
     apt-get install -y -qq incus incus-client || true
   elif ! apt-get install -y -qq incus incus-client; then
@@ -361,6 +374,7 @@ fi
 
 systemctl enable --now incus || true
 systemctl enable --now incus.socket || true
+br_stage incus-socket-up
 
 for i in $(seq 1 60); do
   if incus admin waitready --timeout=1 >/dev/null 2>&1; then
@@ -368,9 +382,11 @@ for i in $(seq 1 60); do
   fi
   sleep 1
 done
+br_stage incus-ready
 
 incus admin init --auto || true
 incus config set core.https_address "[::]:8443" || true
+br_stage incus-init-done
 
 # Configure Incus to trust the bladerunner local OIDC provider.
 # The issuer URL is the loopback address inside the guest, which is forwarded
@@ -428,6 +444,7 @@ systemctl status bladerunner-vsock-incus.service --no-pager 2>&1 | tee -a /var/l
 ip -4 -br addr show scope global > /var/lib/bladerunner/ipv4.txt || true
 incus info > /var/lib/bladerunner/incus-info.txt || true
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
+br_stage bootstrap-done
 `,
 		// Break-glass SSH block (SSH_USER, SSH_PUBKEY), placed first because it
 		// appears early in the bootstrap, before the vsock units.
