@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
 	"image"
 	"image/color"
@@ -27,18 +28,36 @@ const menubarRefreshInterval = 3 * time.Second
 // auto-reconnect to heal the guest's clock + vsock forwarders.
 const wakeGapSeconds = 60
 
-// status-dot rendering constants.
+// status-icon rendering constants.
 const (
 	iconSize    = 22
-	iconInset   = 3.0
-	pixelCenter = 0.5
 	alphaOpaque = 0xFF
-	// dot colors: gray (stopped), green (running+healthy), amber (running but
+	// alphaShift converts a 16-bit alpha sample (from color.Color's RGBA()) to 8-bit.
+	alphaShift = 8
+	// glyph colors: gray (stopped), green (running+healthy), amber (running but
 	// the guest is not answering — "wedged" — or status unknown).
 	grayR, grayG, grayB    = 0x9A, 0xA4, 0xA8
 	greenR, greenG, greenB = 0x27, 0xC9, 0x3F
 	amberR, amberG, amberB = 0xFF, 0xBD, 0x2E
 )
+
+// menubarGlyphPNG is the bladerunner "b" mark (44x44, black on transparent).
+// Its per-pixel alpha is the glyph coverage; statusIcon tints that alpha by VM
+// state. Regenerate from assets/brand/menubar-b.svg via scripts/gen-brand-assets.sh.
+//
+//go:embed assets/menubar-b.png
+var menubarGlyphPNG []byte
+
+// menubarGlyph is menubarGlyphPNG decoded once at startup (used as an alpha mask).
+var menubarGlyph = mustDecodePNG(menubarGlyphPNG)
+
+func mustDecodePNG(b []byte) image.Image {
+	img, err := png.Decode(bytes.NewReader(b))
+	if err != nil {
+		panic("decode embedded menubar glyph: " + err.Error())
+	}
+	return img
+}
 
 // vmState is the menubar's view of the VM: not just up/down, but whether the
 // guest actually answers a liveness probe (so a wedged guest is distinguishable
@@ -217,10 +236,12 @@ func openShellTerminal() {
 	_ = exec.CommandContext(context.Background(), "osascript", "-e", script).Start()
 }
 
-// statusIcon renders a small filled-circle status dot colored by VM state.
-// Generated in-code so there are no asset files.
+// statusIcon renders the bladerunner "b" mark tinted by VM state: gray
+// (stopped), green (running+healthy), amber (wedged/unknown). The embedded
+// glyph is an alpha mask; we composite the state color through its coverage and
+// box-average the 2x mask down to the status-item size so the letter edges stay
+// crisp on Retina menu bars.
 func statusIcon(state vmState) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, iconSize, iconSize))
 	dot := color.RGBA{R: grayR, G: grayG, B: grayB, A: alphaOpaque}
 	switch state {
 	case vmHealthy:
@@ -230,14 +251,30 @@ func statusIcon(state vmState) []byte {
 	case vmStopped:
 		// gray (default)
 	}
-	cx, cy := float64(iconSize)/2, float64(iconSize)/2
-	r := float64(iconSize)/2 - iconInset
+
+	img := image.NewNRGBA(image.Rect(0, 0, iconSize, iconSize))
+	sb := menubarGlyph.Bounds()
+	sx := float64(sb.Dx()) / float64(iconSize)
+	sy := float64(sb.Dy()) / float64(iconSize)
 	for y := range iconSize {
 		for x := range iconSize {
-			dx, dy := float64(x)+pixelCenter-cx, float64(y)+pixelCenter-cy
-			if dx*dx+dy*dy <= r*r {
-				img.Set(x, y, dot)
+			x0, x1 := sb.Min.X+int(float64(x)*sx), sb.Min.X+int(float64(x+1)*sx)
+			y0, y1 := sb.Min.Y+int(float64(y)*sy), sb.Min.Y+int(float64(y+1)*sy)
+			if x1 <= x0 {
+				x1 = x0 + 1
 			}
+			if y1 <= y0 {
+				y1 = y0 + 1
+			}
+			var sum, n uint32
+			for yy := y0; yy < y1; yy++ {
+				for xx := x0; xx < x1; xx++ {
+					_, _, _, a := menubarGlyph.At(xx, yy).RGBA()
+					sum += a >> alphaShift // 16-bit -> 8-bit alpha
+					n++
+				}
+			}
+			img.SetNRGBA(x, y, color.NRGBA{R: dot.R, G: dot.G, B: dot.B, A: uint8(sum / n)})
 		}
 	}
 	var buf bytes.Buffer

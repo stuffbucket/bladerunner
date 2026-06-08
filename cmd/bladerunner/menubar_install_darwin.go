@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -11,13 +12,24 @@ import (
 	"path/filepath"
 )
 
+// appIconICNS is the dock/Finder app icon ("br." terminal tile) written into the
+// bundle's Resources. Regenerate from assets/brand/appicon.svg via
+// scripts/gen-brand-assets.sh.
+//
+//go:embed assets/AppIcon.icns
+var appIconICNS []byte
+
 const (
 	menubarBundleName = "Bladerunner"
 	menubarBundleID   = "com.stuffbucket.bladerunner.menubar"
 	menubarAgentLabel = "com.stuffbucket.bladerunner.menubar"
-	bundleDirPerm     = 0o755
-	bundleFilePerm    = 0o644
-	bundleExecPerm    = 0o755
+	// menubarIconName is the CFBundleIconFile basename (AppIcon.icns, dropped in
+	// Contents/Resources). Even under LSUIElement (no dock), this gives the .app
+	// its Finder / ~/Applications / AirDrop icon.
+	menubarIconName = "AppIcon"
+	bundleDirPerm   = 0o755
+	bundleFilePerm  = 0o644
+	bundleExecPerm  = 0o755
 )
 
 // menubarPaths resolves the install locations under the user's home.
@@ -55,6 +67,16 @@ func installMenubarAgent() error {
 	}
 	if err := os.WriteFile(filepath.Join(appDir, "Contents", "Info.plist"), []byte(infoPlist()), bundleFilePerm); err != nil {
 		return fmt.Errorf("write Info.plist: %w", err)
+	}
+
+	// Bundle the app icon (Contents/Resources/AppIcon.icns) referenced by
+	// CFBundleIconFile in Info.plist.
+	resourcesDir := filepath.Join(appDir, "Contents", "Resources")
+	if err := os.MkdirAll(resourcesDir, bundleDirPerm); err != nil {
+		return fmt.Errorf("create Resources dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(resourcesDir, menubarIconName+".icns"), appIconICNS, bundleFilePerm); err != nil {
+		return fmt.Errorf("write app icon: %w", err)
 	}
 
 	// Per-user LaunchAgent. Run the bundle's executable (so NSBundle.mainBundle
@@ -134,6 +156,7 @@ func infoPlist() string {
 	<key>CFBundleDisplayName</key><string>%s</string>
 	<key>CFBundleIdentifier</key><string>%s</string>
 	<key>CFBundleExecutable</key><string>%s</string>
+	<key>CFBundleIconFile</key><string>%s</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleShortVersionString</key><string>%s</string>
@@ -143,7 +166,7 @@ func infoPlist() string {
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict>
 </plist>
-`, menubarBundleName, menubarBundleName, menubarBundleID, menubarBundleName, version, version)
+`, menubarBundleName, menubarBundleName, menubarBundleID, menubarBundleName, menubarIconName, version, version)
 }
 
 func launchAgentPlist(execPath string) string {
