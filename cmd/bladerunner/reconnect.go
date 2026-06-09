@@ -21,7 +21,7 @@ behind real time — which breaks the web UI's OIDC token exchange — and the
 Incus/OIDC vsock forwarders stale. 'reconnect' pushes the host's current time
 into the guest, kicks NTP, and restarts the Incus/OIDC vsock forwarders, all
 without restarting the VM. It is best-effort: if the guest is already fully
-unresponsive, use 'runner stop' + 'runner start' (or the menubar's Restart).`,
+unresponsive, use 'br stop' + 'br start' (or the menubar's Restart).`,
 	RunE: runReconnect,
 }
 

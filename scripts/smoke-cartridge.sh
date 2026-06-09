@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BIN="$PROJECT_ROOT/bin/runner"
+BIN="$PROJECT_ROOT/bin/br"
 
 DISK="${SMOKE_DISK:-debian-trixie-gui}"
 READY_TIMEOUT="${SMOKE_READY_TIMEOUT:-600}"
@@ -69,7 +69,7 @@ note "Preflight: required local ports must be free (bladerunner uses fixed ports
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&-; return 0; } || return 1; }
 for p in 6022 18443; do
   if port_in_use "$p"; then
-    fail "port $p is in use — another bladerunner VM is running. Stop it ('runner stop') first; the cartridge boot needs these ports."
+    fail "port $p is in use — another bladerunner VM is running. Stop it ('br stop') first; the cartridge boot needs these ports."
   fi
 done
 ok "local ports free"

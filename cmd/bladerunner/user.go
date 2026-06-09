@@ -91,7 +91,7 @@ func runUserList(_ *cobra.Command, _ []string) error {
 	}
 	if len(idents) == 0 {
 		fmt.Println(subtle("No identities registered."))
-		fmt.Printf("Add one with %s\n", command("runner user add <pubkey>"))
+		fmt.Printf("Add one with %s\n", command("br user add <pubkey>"))
 		return nil
 	}
 	fmt.Println(title("Registered Identities"))

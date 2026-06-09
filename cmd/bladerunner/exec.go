@@ -41,7 +41,7 @@ func (e *exitError) Error() string { return fmt.Sprintf("exit status %d", e.code
 
 func runExec(cmdCobra *cobra.Command, args []string) error {
 	if jsonOutput {
-		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'runner status --json' or 'runner ls --json' for machine-readable state", "exec")
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "exec")
 		emitJSONError(err)
 		return err
 	}

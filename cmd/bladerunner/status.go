@@ -50,7 +50,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 		fmt.Println(title("Bladerunner Status"))
 		fmt.Println(renderPanels(left, right))
-		fmt.Println(subtle("  Start the VM with:"), command("runner start"))
+		fmt.Println(subtle("  Start the VM with:"), command("br start"))
 		fmt.Println()
 		return nil
 	}
@@ -132,8 +132,8 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Println(renderPanels(left, right))
 	fmt.Printf("  %s %s    %s %s\n",
-		subtle("Shell:"), command("runner shell"),
-		subtle("SSH:"), command("runner ssh"))
+		subtle("Shell:"), command("br shell"),
+		subtle("SSH:"), command("br ssh"))
 	fmt.Println()
 
 	return nil

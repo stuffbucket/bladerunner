@@ -46,12 +46,12 @@ var disksCmd = &cobra.Command{
 user disks in ~/.config/bladerunner/disks/*.disk.
 
 Each disk shows its boot mode, origin (builtin/user), and whether its per-disk
-state slot holds saved guest RAM ("saved", restorable with 'runner boot') or is
+state slot holds saved guest RAM ("saved", restorable with 'br boot') or is
 fresh.`,
 	RunE: runDisks,
 }
 
-// diskReport is the JSON shape for one row of `runner disks`.
+// diskReport is the JSON shape for one row of `br disks`.
 type diskReport struct {
 	Name          string `json:"name"`
 	Description   string `json:"description,omitempty"`
@@ -92,7 +92,7 @@ func runDisks(_ *cobra.Command, _ []string) error {
 
 	if len(reports) == 0 && len(cartridges) == 0 {
 		fmt.Println(subtle("No disks available."))
-		fmt.Printf("Create one with %s\n", command("runner disk new <name>"))
+		fmt.Printf("Create one with %s\n", command("br disk new <name>"))
 		return nil
 	}
 
@@ -127,7 +127,7 @@ func runDisks(_ *cobra.Command, _ []string) error {
 		fmt.Println()
 	}
 
-	fmt.Printf("Boot one with %s\n", command("runner boot <name|cartridge>"))
+	fmt.Printf("Boot one with %s\n", command("br boot <name|cartridge>"))
 	return nil
 }
 
@@ -139,9 +139,9 @@ var diskCmd = &cobra.Command{
 	Long: `Author bladerunner disk manifests.
 
 A disk is a ".disk" JSON manifest bundling an image identity, VM sizing, and a
-boot mode. Use 'runner disk new' to scaffold one and 'runner disk bake' to build
-its qcow2 and record the image's SHA-256. List disks with 'runner disks' and
-power one on with 'runner boot <name>'.
+boot mode. Use 'br disk new' to scaffold one and 'br disk bake' to build
+its qcow2 and record the image's SHA-256. List disks with 'br disks' and
+power one on with 'br boot <name>'.
 
 User disks live in ~/.config/bladerunner/disks/*.disk.`,
 }
@@ -152,7 +152,7 @@ var diskNewCmd = &cobra.Command{
 	Long: `Scaffold a new ".disk" manifest in ~/.config/bladerunner/disks/.
 
 By default the disk targets the Debian Trixie genericcloud image for both
-arm64/amd64 with empty SHA-256 digests (filled in later by 'runner disk bake',
+arm64/amd64 with empty SHA-256 digests (filled in later by 'br disk bake',
 or verified via sidecar at boot). Use --from <disk> to fork an existing catalog
 disk's image and sizing. --gui sets boot mode to "gui"; otherwise "headless".`,
 	Args: cobra.ExactArgs(1),
@@ -167,7 +167,7 @@ resulting SHA-256 and image path back into the user manifest.
 
 This is a host-side developer action: it requires bash, qemu-img, and the build
 script's dependencies (libguestfs-tools, likely sudo). Builtin disks are
-read-only; fork one first with 'runner disk new <name> --from <builtin>'.`,
+read-only; fork one first with 'br disk new <name> --from <builtin>'.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDiskBake,
 }
@@ -248,7 +248,7 @@ func runDiskNew(_ *cobra.Command, args []string) error {
 	if diskNewFlags.from != "" {
 		src, ok := cat.Lookup(diskNewFlags.from)
 		if !ok {
-			return jsonOrError(fmt.Errorf("--from disk %q not found (see 'runner disks')", diskNewFlags.from))
+			return jsonOrError(fmt.Errorf("--from disk %q not found (see 'br disks')", diskNewFlags.from))
 		}
 		m = src.Manifest.Clone()
 		m.Name = name
@@ -293,7 +293,7 @@ func runDiskNew(_ *cobra.Command, args []string) error {
 		return emitJSON(diskActionReport{Status: "created", Name: name, Path: path})
 	}
 	fmt.Printf("%s Created disk %s at %s\n", success("✓"), value(name), subtle(path))
-	fmt.Printf("Build it with %s\n", command("runner disk bake "+name))
+	fmt.Printf("Build it with %s\n", command("br disk bake "+name))
 	return nil
 }
 
@@ -311,10 +311,10 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	if !util.FileExists(manifestPath) {
 		if cat, err := disk.LoadCatalog(); err == nil {
 			if e, ok := cat.Lookup(name); ok && e.Origin == disk.OriginBuiltin {
-				return jsonOrError(fmt.Errorf("builtin disks are read-only; fork it first with 'runner disk new %s --from %s'", name, name))
+				return jsonOrError(fmt.Errorf("builtin disks are read-only; fork it first with 'br disk new %s --from %s'", name, name))
 			}
 		}
-		return jsonOrError(fmt.Errorf("no user disk %q at %s (create it with 'runner disk new %s')", name, manifestPath, name))
+		return jsonOrError(fmt.Errorf("no user disk %q at %s (create it with 'br disk new %s')", name, manifestPath, name))
 	}
 	m, err := disk.Load(manifestPath)
 	if err != nil {
@@ -424,5 +424,5 @@ func resolveBuildScript() (string, error) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("could not find %s near the executable or cwd; run 'runner disk bake' from the bladerunner repo (it needs the build script and libguestfs-tools)", rel)
+	return "", fmt.Errorf("could not find %s near the executable or cwd; run 'br disk bake' from the bladerunner repo (it needs the build script and libguestfs-tools)", rel)
 }

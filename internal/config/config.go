@@ -103,7 +103,7 @@ type Config struct {
 	StateDir string
 	VMDir    string
 	DiskPath string
-	// SavedStatePath is where `runner save` / `runner upgrade` write the VZ saved
+	// SavedStatePath is where `br save` / `br upgrade` write the VZ saved
 	// machine state. Defaults to <stateDir>/saved-state.bin.
 	SavedStatePath string
 	DiskSizeGiB    int

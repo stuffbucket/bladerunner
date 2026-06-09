@@ -14,7 +14,7 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "runner",
+	Use:   "br",
 	Short: "Bladerunner - Run Incus VMs on macOS",
 	Long: `Bladerunner runs Incus VM on macOS using the Apple VZ framework.
 It provides a full Incus container environment inside the VM.`,
@@ -25,7 +25,7 @@ It provides a full Incus container environment inside the VM.`,
 }
 
 func init() {
-	rootCmd.SetVersionTemplate(fmt.Sprintf("runner version %s (commit: %s, built: %s)\n", version, commit, date))
+	rootCmd.SetVersionTemplate(fmt.Sprintf("br version %s (commit: %s, built: %s)\n", version, commit, date))
 
 	// Prepend the gradient banner to help output when running interactively.
 	defaultHelp := rootCmd.HelpTemplate()

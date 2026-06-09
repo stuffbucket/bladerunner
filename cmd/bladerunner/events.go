@@ -39,7 +39,7 @@ func init() {
 
 func runEvents(_ *cobra.Command, _ []string) error {
 	if jsonOutput {
-		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'runner status --json' or 'runner ls --json' for machine-readable state", "events")
+		err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", "events")
 		emitJSONError(err)
 		return err
 	}

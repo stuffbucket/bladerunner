@@ -212,10 +212,10 @@ func runnerSelf() string {
 	if exe, err := os.Executable(); err == nil {
 		return exe
 	}
-	return "runner"
+	return "br"
 }
 
-// launchDetached starts `runner <args...>` detached (new session) so a
+// launchDetached starts `br <args...>` detached (new session) so a
 // long-running command (start, web) keeps running after the menu action returns.
 func launchDetached(args ...string) error {
 	cmd := exec.CommandContext(context.Background(), runnerSelf(), args...)
@@ -225,12 +225,12 @@ func launchDetached(args ...string) error {
 	return cmd.Start()
 }
 
-// runnerRun runs `runner <args...>` to completion (for short commands like stop).
+// runnerRun runs `br <args...>` to completion (for short commands like stop).
 func runnerRun(args ...string) {
 	_ = exec.CommandContext(context.Background(), runnerSelf(), args...).Run()
 }
 
-// openShellTerminal opens Terminal.app running `runner shell`.
+// openShellTerminal opens Terminal.app running `br shell`.
 func openShellTerminal() {
 	script := fmt.Sprintf("tell application \"Terminal\"\n  do script \"%s shell\"\n  activate\nend tell", runnerSelf())
 	_ = exec.CommandContext(context.Background(), "osascript", "-e", script).Start()

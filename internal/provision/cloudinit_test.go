@@ -96,7 +96,7 @@ func TestBuildCloudInit_NoLegacySedGrubEdit(t *testing.T) {
 // up incus (or a transient apt error) aborts the bootstrap before the bridge
 // exists, permanently leaving the guest with no host<->guest SSH over vsock
 // (runcmd is once-per-instance and never retries). This is the root cause of a
-// guest that boots fine but where `runner shell` resets with errno 54.
+// guest that boots fine but where `br shell` resets with errno 54.
 func TestBuildCloudInit_VsockSSHBridgeBeforeIncusInstall(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
@@ -171,7 +171,7 @@ func TestBuildCloudInit_BootBreadcrumbs(t *testing.T) {
 // TestBuildCloudInit_ShareAutomountWhenEnabled verifies that, with a share
 // configured, the bootstrap emits the VirtioFS mount (matching tag), the nofail
 // option (boot survives an absent share), and the ACPI poweroff pin that makes
-// `runner eject` a deterministic clean shutdown.
+// `br eject` a deterministic clean shutdown.
 func TestBuildCloudInit_ShareAutomountWhenEnabled(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()

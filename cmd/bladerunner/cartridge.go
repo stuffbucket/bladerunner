@@ -44,9 +44,9 @@ var diskPackCmd = &cobra.Command{
 single APFS sparse image holding the disk manifest, a bootable root.img, EFI +
 cloud-init state, and a read-write host<->guest share folder.
 
-Because 'runner eject' always powers the guest off cleanly (ACPI), a cartridge is
+Because 'br eject' always powers the guest off cleanly (ACPI), a cartridge is
 always in a consistent cold-boot state — AirDrop the file to any Mac running
-bladerunner and 'runner boot <file>' just works.
+bladerunner and 'br boot <file>' just works.
 
   --out <file>   Output path (default: ./<name>.sparseimage)
   --ship         Also produce a compressed read-only <name>.dmg (the AirDrop form)
@@ -68,7 +68,7 @@ func init() {
 	diskCmd.AddCommand(diskPackCmd)
 }
 
-// cartridgePackReport is the JSON result for `runner disk pack`.
+// cartridgePackReport is the JSON result for `br disk pack`.
 type cartridgePackReport struct {
 	Status     string `json:"status"`
 	Name       string `json:"name"`
@@ -202,11 +202,11 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s %s\n", key("AirDrop (dmg):"), value(report.DMG))
 	}
 	fmt.Printf("  %s %s mounted at %s in the guest\n", key("share:"), shareTag, shareGuestPath)
-	fmt.Printf("Boot it with %s\n", command("runner boot "+report.cartridgeArg()))
+	fmt.Printf("Boot it with %s\n", command("br boot "+report.cartridgeArg()))
 	return nil
 }
 
-// cartridgeArg returns the path a user would pass to `runner boot`: the DMG when
+// cartridgeArg returns the path a user would pass to `br boot`: the DMG when
 // shipped (the AirDrop form), else the sparse image.
 func (r cartridgePackReport) cartridgeArg() string {
 	if r.DMG != "" {
@@ -343,7 +343,7 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 
 	baseDir := cartridgeMountpoint(name)
 	if control.NewClient(baseDir).IsRunning() {
-		return jsonOrError(fmt.Errorf("cartridge %q is already booted (use 'runner eject' first)", name))
+		return jsonOrError(fmt.Errorf("cartridge %q is already booted (use 'br eject' first)", name))
 	}
 
 	bootImg := path
@@ -465,9 +465,9 @@ func detachBootCartridge() {
 	}
 }
 
-// --- cartridge listing for `runner disks` --------------------------------
+// --- cartridge listing for `br disks` --------------------------------
 
-// cartridgeStatus describes an attached cartridge for `runner disks`.
+// cartridgeStatus describes an attached cartridge for `br disks`.
 type cartridgeStatus struct {
 	Name       string `json:"name"`
 	Mountpoint string `json:"mountpoint"`

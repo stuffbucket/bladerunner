@@ -91,7 +91,7 @@ while :; do
 
   # --- HEAL: vsock-ssh LAST and tightly gated. Only when local sshd IS
   #     listening (:22 up, so the in-guest target is healthy) but the relay
-  #     is dead. This avoids racing an operator's live 'runner shell' and
+  #     is dead. This avoids racing an operator's live 'br shell' and
   #     avoids spinning the unit's unbounded ExecStartPre when sshd is down.
   #     The watchdog runs locally, so bouncing the bridge never cuts its own
   #     execution path. (Restart=always already auto-heals a crashed socat,

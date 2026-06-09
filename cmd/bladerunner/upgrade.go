@@ -21,7 +21,7 @@ When the host supports VZ save/restore, the guest's running state is saved,
 the old server is stopped, and the new server restores and resumes the guest —
 no cold reboot. Otherwise it falls back to a stop + fresh start.
 
-This becomes the new long-lived server (foreground), like 'runner start'.`,
+This becomes the new long-lived server (foreground), like 'br start'.`,
 	RunE: runUpgrade,
 }
 
@@ -29,7 +29,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	stateDir := config.DefaultStateDir()
 	client := control.NewClient(stateDir)
 	if !client.IsRunning() {
-		return jsonOrError(fmt.Errorf("no running server to upgrade (use 'runner start')"))
+		return jsonOrError(fmt.Errorf("no running server to upgrade (use 'br start')"))
 	}
 
 	serverVer, err := client.ServerVersion()

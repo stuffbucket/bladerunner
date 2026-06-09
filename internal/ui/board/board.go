@@ -1,6 +1,6 @@
 // Package board renders a buildx-style split-view progress UI: a static panel
 // of named stages on top and a live tail of recent log lines underneath. It is
-// designed for the `runner start` boot sequence where the user needs to see what
+// designed for the `br start` boot sequence where the user needs to see what
 // the guest is doing while we wait for cloud-init and Incus to come up.
 //
 // When the output is not a TTY the renderer downgrades to plain structured
