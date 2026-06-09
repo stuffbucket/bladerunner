@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/stuffbucket/bladerunner/compare/v0.4.0...v0.4.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **ci:** move Homebrew formula template out of ignored build/ ([#88](https://github.com/stuffbucket/bladerunner/issues/88)) ([4c983ee](https://github.com/stuffbucket/bladerunner/commit/4c983eeb5f9fc5e603774066ad35dd08fb7d3b8b))
+
 ## [0.4.0](https://github.com/stuffbucket/bladerunner/compare/v0.3.0...v0.4.0) (2026-06-09)
 
 
