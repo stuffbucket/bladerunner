@@ -11,3 +11,7 @@ func installMenubarAgent() error {
 func uninstallMenubarAgent() error {
 	return errors.New("the bladerunner menubar agent requires macOS")
 }
+
+func bundleMenubarApp(_ string) error {
+	return errors.New("building Bladerunner.app requires macOS")
+}
