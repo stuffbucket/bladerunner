@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/stuffbucket/bladerunner/compare/v0.4.2...v0.4.3) (2026-06-09)
+
+
+### Features
+
+* **site:** advertise the latest version + pin/unpin (maximal lesson) ([#94](https://github.com/stuffbucket/bladerunner/issues/94)) ([0a46fe4](https://github.com/stuffbucket/bladerunner/commit/0a46fe411f7127773ea6e59fe9fecc14cbd589dc))
+
 ## [0.4.2](https://github.com/stuffbucket/bladerunner/compare/v0.4.1...v0.4.2) (2026-06-09)
 
 
