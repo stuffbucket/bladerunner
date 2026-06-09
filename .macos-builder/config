@@ -1,0 +1,5 @@
+app_path = dist-dmg/Bladerunner.app
+volname = Bladerunner
+bundle_id = co.stuffbucket.bladerunner
+entitlements = virtualization
+artifact = dmg

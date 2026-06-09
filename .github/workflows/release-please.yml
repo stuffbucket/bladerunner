@@ -14,8 +14,8 @@ name: Release
 # All three live in one workflow gated on release-please's `release_created`
 # output, so no cross-workflow dispatch / GITHUB_TOKEN anti-loop concerns.
 #
-# The signed + notarized .app DMG (a separate Developer-ID artifact built on a
-# self-hosted runner) is intentionally NOT here — see release-macos-dmg.yml.
+# The signed + notarized .app DMG is built off-repo: macos-build (below) just
+# triggers stuffbucket/macos-builder, which owns the runner + Apple secrets.
 
 on:
   push:
@@ -51,14 +51,13 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # Signed + notarized Bladerunner.app DMG on the self-hosted macOS runner.
-  # OFF until vars.ENABLE_SIGNED_DMG == 'true' (so releases don't hang waiting
-  # for a self-hosted runner that isn't provisioned yet). See the reusable
-  # workflow's header for the one-time prerequisites.
-  macos-dmg:
+  # Trigger the signed + notarized Bladerunner.app DMG on the private builder
+  # repo (stuffbucket/macos-builder), which owns the runner + Apple secrets.
+  # No-ops until MACOS_BUILDER_PAT is set (onboarding) — see macos-build.yml.
+  macos-build:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true' && vars.ENABLE_SIGNED_DMG == 'true'
-    uses: ./.github/workflows/release-macos-dmg.yml
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/macos-build.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
     secrets: inherit

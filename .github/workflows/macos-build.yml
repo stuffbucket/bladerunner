@@ -1,0 +1,61 @@
+name: macOS signed build
+
+# Trigger the signed macOS DMG build on the PRIVATE builder repo
+# (stuffbucket/macos-builder), which owns the only self-hosted macOS runner and
+# all Apple signing secrets. This repo carries NEITHER. The builder checks this
+# repo out at the tag, runs .macos-builder/build.sh (which only builds the
+# unsigned Bladerunner.app via `br menubar bundle`), then signs + notarizes +
+# staples + packages the DMG and uploads it onto this release.
+#
+# Onboarding (one-time, until then this safely no-ops):
+#   1. Install the `app-repoman` GitHub App on this repo (Contents: read+write).
+#   2. Add secret MACOS_BUILDER_PAT — a fine-grained PAT scoped to ONLY
+#      stuffbucket/macos-builder with Actions: write (its sole power: start a build).
+#   3. Add this repo's policy at clients/stuffbucket/bladerunner.policy in the
+#      builder (entitlements_allowed must include `virtualization`).
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build, e.g. v0.4.3"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch to macos-builder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger build on stuffbucket/macos-builder
+        env:
+          GH_TOKEN: ${{ secrets.MACOS_BUILDER_PAT }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # No PAT yet → not onboarded to the builder. Skip without failing the
+          # release; nothing else here depends on the DMG.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::MACOS_BUILDER_PAT not set — skipping macOS build dispatch (repo not onboarded to macos-builder yet)."
+            exit 0
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "::error::No tag to build." >&2
+            exit 1
+          fi
+          echo "Dispatching macOS signed build for ${REPO}@${TAG}"
+          gh workflow run build.yml \
+            --repo stuffbucket/macos-builder \
+            --ref main \
+            -f "repo=${REPO}" \
+            -f "ref=${TAG}"
+          echo "Dispatched. The signed .dmg will appear on the ${TAG} release shortly."
