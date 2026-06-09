@@ -17,21 +17,21 @@ const steps = [
     title: 'Start the VM',
     caption: 'First boot takes a few minutes while cloud-init installs and configures Incus. A startup report is printed and saved to ~/.local/state/bladerunner/startup-report.json.',
     copy: 'br start',
-    body: `<span class="tprompt">$ runner</span><span class="targ"> start</span>`,
+    body: `<span class="tprompt">$ br</span><span class="targ"> start</span>`,
   },
   {
     n: '03',
     title: 'Open the web UI — already signed in',
     caption: 'Lands you in the Incus dashboard authenticated with your SSH key.',
     copy: 'br web',
-    body: `<span class="tprompt">$ runner</span><span class="targ"> web</span>`,
+    body: `<span class="tprompt">$ br</span><span class="targ"> web</span>`,
   },
   {
     n: '04',
     title: 'SSH in',
     caption: 'Show connection details, or connect directly on the forwarded port.',
     copy: 'ssh -p 6022 incus@127.0.0.1',
-    body: `<span class="tprompt">$ runner</span><span class="targ"> ssh</span>        <span class="tcomment"># show connection details</span>
+    body: `<span class="tprompt">$ br</span><span class="targ"> ssh</span>        <span class="tcomment"># show connection details</span>
 <span class="tprompt">$ ssh</span><span class="targ"> -p 6022 incus@127.0.0.1</span>`,
   },
   {
@@ -39,8 +39,8 @@ const steps = [
     title: 'Snapshot and resume',
     caption: 'Pause and snapshot the machine state, then bring it right back.',
     copy: 'br save',
-    body: `<span class="tprompt">$ runner</span><span class="targ"> save</span>       <span class="tcomment"># pause, snapshot machine state, resume</span>
-<span class="tprompt">$ runner</span><span class="targ"> restore</span>    <span class="tcomment"># bring the VM back from saved state</span>`,
+    body: `<span class="tprompt">$ br</span><span class="targ"> save</span>       <span class="tcomment"># pause, snapshot machine state, resume</span>
+<span class="tprompt">$ br</span><span class="targ"> restore</span>    <span class="tcomment"># bring the VM back from saved state</span>`,
   },
 ];
 ---
