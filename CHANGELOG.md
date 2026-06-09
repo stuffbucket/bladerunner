@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/stuffbucket/bladerunner/compare/v0.4.3...v0.4.4) (2026-06-09)
+
+
+### Features
+
+* **release:** prepare bladerunner as a macos-builder client ([#97](https://github.com/stuffbucket/bladerunner/issues/97)) ([1162815](https://github.com/stuffbucket/bladerunner/commit/11628150b1704b2f1aa9fad9f30a686f3ffcf757))
+
 ## [0.4.3](https://github.com/stuffbucket/bladerunner/compare/v0.4.2...v0.4.3) (2026-06-09)
 
 
