@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/stuffbucket/bladerunner/compare/v0.4.4...v0.4.5) (2026-06-09)
+
+
+### Bug Fixes
+
+* **macos-builder:** provision Go in the producer (runner has bun/cargo, not Go) ([#99](https://github.com/stuffbucket/bladerunner/issues/99)) ([26845c2](https://github.com/stuffbucket/bladerunner/commit/26845c2a1dbdba0e2724d4ec22b3a0a4da8e7e5d))
+
 ## [0.4.4](https://github.com/stuffbucket/bladerunner/compare/v0.4.3...v0.4.4) (2026-06-09)
 
 
