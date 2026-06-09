@@ -26,6 +26,11 @@ permissions:
   contents: write
   pull-requests: write
 
+# Run JS actions (release-please-action) on the Node 24 runtime, not the
+# deprecated Node 20. See github.blog deprecation-of-node-20-on-github-actions.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
