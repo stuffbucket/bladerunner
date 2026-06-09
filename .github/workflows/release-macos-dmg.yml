@@ -4,24 +4,27 @@ name: Release macOS DMG
 # a DMG, attach it to the release, and sync the Homebrew cask. Called by
 # release-please.yml when the release is cut AND vars.ENABLE_SIGNED_DMG == 'true'.
 #
-# Runs on the SELF-HOSTED macOS runner (the same instance maximal uses) because
-# Developer-ID signing + Apple notarization need the signing keychain and Apple
-# credentials, which GitHub-hosted runners don't have. Notarizing the .dmg also
-# notarizes the .app inside it (Apple notarizes nested files), so a separate
-# .app notarize/staple isn't needed for drag-to-Applications distribution.
+# Runs on the SELF-HOSTED macOS runner (the same instance maximal uses), which
+# already has the Developer ID identity in its login keychain and a stored
+# notarytool credential profile — so NO Apple secrets are injected from GitHub.
+# Notarizing the .dmg also notarizes the .app inside it (Apple notarizes nested
+# files), so a separate .app notarize/staple isn't needed.
 #
 # Bladerunner.app has a single executable (the `br` binary), so — unlike
-# maximal's Tauri+sidecar bundle — signing the .app top-level (with the VZ
-# entitlement + hardened runtime) signs everything; no inside-out pre-signing.
+# maximal's Tauri+sidecar bundle — a plain top-level sign (VZ entitlement +
+# hardened runtime) signs everything; no --deep, no inside-out pre-signing.
 #
-# ── ONE-TIME PREREQUISITES (mirror maximal) ─────────────────────────────────
-#   1. A self-hosted macOS (Apple Silicon) runner registered to this repo/org,
-#      with a signing keychain holding the Developer ID Application identity.
-#   2. Repo variable  ENABLE_SIGNED_DMG = true   (turns this job on).
-#   3. Repo/org secrets: DEVELOPER_ID_APPLICATION, APPLE_ID, APPLE_PASSWORD
-#      (an app-specific password), APPLE_TEAM_ID, KEYCHAIN_PASSWORD, and
-#      HOMEBREW_TAP_TOKEN (already present, for the cask push).
-# Until (1)-(3) exist, the caller gates this off, so releases are unaffected.
+# ── ONE-TIME PREREQUISITES ──────────────────────────────────────────────────
+#   1. The self-hosted macOS runner registered to this repo/org, with its login
+#      keychain holding the Developer ID Application identity AND a notarytool
+#      profile: xcrun notarytool store-credentials <profile> --apple-id ...
+#   2. Repo variables:
+#        ENABLE_SIGNED_DMG          = true            (turns this job on)
+#        NOTARYTOOL_KEYCHAIN_PROFILE = <profile name>  (from step 1)
+#        DMG_SIGN_IDENTITY          = <identity>       (optional; defaults to
+#                                                       "Developer ID Application")
+#   3. HOMEBREW_TAP_TOKEN secret (already present) for the cask push.
+# Until ENABLE_SIGNED_DMG is set, the caller gates this off (releases unaffected).
 
 on:
   workflow_call:
@@ -68,33 +71,26 @@ jobs:
           ./bin/br menubar bundle --output dist-dmg
           ls -la dist-dmg/Bladerunner.app/Contents
 
-      - name: Unlock signing keychain
-        env:
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KC="$HOME/Library/Keychains/bladerunner.keychain-db"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KC"
-          security list-keychains -d user -s "$KC"
-
-      # Sign the .app with Developer ID + hardened runtime and the VZ
-      # entitlement (com.apple.security.virtualization), so the bundled `br`
-      # can create VMs. One executable → no --deep / no inside-out pre-sign.
+      # Sign the .app with the Developer ID identity already in the runner's
+      # (unlocked) login keychain + hardened runtime + the VZ entitlement
+      # (com.apple.security.virtualization), so the bundled `br` can create VMs.
+      # One executable → plain top-level sign, a --strict verify (no --deep),
+      # no inside-out pre-sign. The identity is referenced by name (a repo
+      # variable, not a secret); nothing Apple is injected from GitHub.
       - name: Sign Bladerunner.app
         env:
-          SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          SIGN_IDENTITY: ${{ vars.DMG_SIGN_IDENTITY || 'Developer ID Application' }}
         run: |
           set -euo pipefail
           APP="dist-dmg/Bladerunner.app"
           codesign --force --options runtime --timestamp \
             --entitlements vz.entitlements \
             --sign "$SIGN_IDENTITY" "$APP"
-          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
 
       - name: Build + sign DMG
         env:
-          SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          SIGN_IDENTITY: ${{ vars.DMG_SIGN_IDENTITY || 'Developer ID Application' }}
         run: |
           set -euo pipefail
           STAGE="$(mktemp -d)/stage"; mkdir -p "$STAGE"
@@ -104,25 +100,29 @@ jobs:
           codesign --force --sign "$SIGN_IDENTITY" "dist-dmg/${DMG}"
           codesign --verify --verbose=2 "dist-dmg/${DMG}"
 
+      # Notarize via the runner's stored notarytool keychain profile
+      # (xcrun notarytool store-credentials <profile> ...), so no APPLE_ID /
+      # app-password / team-id are injected from GitHub. Set the profile name in
+      # the repo variable NOTARYTOOL_KEYCHAIN_PROFILE.
       - name: Notarize + staple
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_PROFILE: ${{ vars.NOTARYTOOL_KEYCHAIN_PROFILE }}
         run: |
           set -euo pipefail
+          if [ -z "${NOTARY_PROFILE:-}" ]; then
+            echo "::error::Set repo variable NOTARYTOOL_KEYCHAIN_PROFILE to the runner's stored notarytool profile name."
+            exit 1
+          fi
           OUT="dist-dmg/${DMG}"
           set +e
-          SUBOUT="$(xcrun notarytool submit "$OUT" \
-            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" --wait --output-format json)"
+          SUBOUT="$(xcrun notarytool submit "$OUT" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)"
           RC=$?
           set -e
           echo "$SUBOUT"
           STATUS="$(echo "$SUBOUT" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || echo '')"
           if [ "$RC" -ne 0 ] || [ "$STATUS" != "Accepted" ]; then
             UUID="$(echo "$SUBOUT" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || echo '')"
-            [ -n "$UUID" ] && xcrun notarytool log "$UUID" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+            [ -n "$UUID" ] && xcrun notarytool log "$UUID" --keychain-profile "$NOTARY_PROFILE" || true
             echo "::error::DMG notarization failed (status='${STATUS}')."
             exit 1
           fi
