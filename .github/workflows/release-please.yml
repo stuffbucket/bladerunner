@@ -7,7 +7,7 @@ name: Release
 #   2. goreleaser builds the signed (ad-hoc) `br` darwin/arm64 tarball +
 #      checksums on a GitHub-hosted macOS runner and uploads them to the
 #      release. CGO links Virtualization.framework, so this MUST run on macOS.
-#   3. The source-controlled Homebrew formula (build/homebrew/bladerunner.rb)
+#   3. The source-controlled Homebrew formula (packaging/homebrew/bladerunner.rb)
 #      is rendered with the release version + sha256 and synced into
 #      stuffbucket/homebrew-tap, so `brew upgrade` tracks every release.
 #
@@ -111,7 +111,7 @@ jobs:
           fi
           sed -e "s/PLACEHOLDER_VERSION/${VERSION}/g" \
               -e "s/PLACEHOLDER_SHA256_DARWIN_ARM64/${SHA256}/" \
-              build/homebrew/bladerunner.rb > /tmp/bladerunner.rb
+              packaging/homebrew/bladerunner.rb > /tmp/bladerunner.rb
           echo "Rendered formula:"; cat /tmp/bladerunner.rb
 
       - name: Push formula to stuffbucket/homebrew-tap
