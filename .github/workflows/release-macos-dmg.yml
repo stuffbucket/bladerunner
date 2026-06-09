@@ -33,9 +33,21 @@ on:
         description: Release tag to build + attach the DMG for (e.g. v0.4.1)
         required: true
         type: string
+  # On-demand: build a DMG for an existing tag without cutting a release —
+  # used to bring the self-hosted signing path online + validate it.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build the DMG for (e.g. v0.4.3)
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+# Run JS actions (upload-artifact, checkout, setup-go) on Node 24, not Node 20.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   dmg:
@@ -104,16 +116,22 @@ jobs:
       # (xcrun notarytool store-credentials <profile> ...), so no APPLE_ID /
       # app-password / team-id are injected from GitHub. Set the profile name in
       # the repo variable NOTARYTOOL_KEYCHAIN_PROFILE.
-      - name: Notarize + staple
+      - name: Notarize + staple (signed-only if no profile yet)
         env:
           NOTARY_PROFILE: ${{ vars.NOTARYTOOL_KEYCHAIN_PROFILE }}
         run: |
           set -euo pipefail
-          if [ -z "${NOTARY_PROFILE:-}" ]; then
-            echo "::error::Set repo variable NOTARYTOOL_KEYCHAIN_PROFILE to the runner's stored notarytool profile name."
-            exit 1
-          fi
           OUT="dist-dmg/${DMG}"
+          # First-run / not-yet-configured path: produce a SIGNED but NOT-notarized
+          # DMG so this run still validates runner pickup + Developer-ID signing.
+          # It is uploaded as a workflow artifact only (not attached to the release
+          # / cask). Set NOTARYTOOL_KEYCHAIN_PROFILE to notarize + ship.
+          if [ -z "${NOTARY_PROFILE:-}" ]; then
+            echo "::warning::NOTARYTOOL_KEYCHAIN_PROFILE unset — signed-only DMG (no notarization). Run 'xcrun notarytool store-credentials <name>' on the runner and set the variable to notarize + ship."
+            echo "NOTARIZED=false" >> "$GITHUB_ENV"
+            (cd dist-dmg && shasum -a 256 "${DMG}" > "${DMG}.sha256")
+            exit 0
+          fi
           set +e
           SUBOUT="$(xcrun notarytool submit "$OUT" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)"
           RC=$?
@@ -130,14 +148,30 @@ jobs:
           xcrun stapler validate "$OUT"
           spctl -a -t open --context context:primary-signature -v "$OUT"
           (cd dist-dmg && shasum -a 256 "${DMG}" > "${DMG}.sha256")
+          echo "NOTARIZED=true" >> "$GITHUB_ENV"
 
+      # Always keep the built DMG as a downloadable artifact — so even a
+      # signed-only test run produces something inspectable.
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DMG }}
+          path: |
+            dist-dmg/${{ env.DMG }}
+            dist-dmg/${{ env.DMG }}.sha256
+          if-no-files-found: error
+
+      # Only a fully notarized DMG is published to the release + cask; a
+      # signed-only test build stops at the artifact above.
       - name: Attach DMG to the release
+        if: env.NOTARIZED == 'true'
         run: |
           set -euo pipefail
           gh release upload "$TAG" "dist-dmg/${DMG}" "dist-dmg/${DMG}.sha256" \
             --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Sync Homebrew cask to the tap
+        if: env.NOTARIZED == 'true'
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
