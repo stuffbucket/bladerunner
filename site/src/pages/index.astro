@@ -8,11 +8,43 @@ import Quickstart from '../components/Quickstart.astro';
 import Why from '../components/Why.astro';
 import FinalCta from '../components/FinalCta.astro';
 import Footer from '../components/Footer.astro';
+
+const REPO = 'stuffbucket/bladerunner';
+
+// Version the page advertises. A pin (VITE_SITE_PIN_VERSION, surfaced from the
+// SITE_PIN_VERSION repo variable by pages.yml) wins; otherwise track GitHub's
+// /releases/latest at build time. Pin/unpin via site-pin.yml. The version chip
+// is non-critical, so any lookup failure just drops it (build never fails).
+const PINNED_TAG = (import.meta.env.VITE_SITE_PIN_VERSION ?? '').trim();
+
+async function fetchLatestTag(): Promise<string | null> {
+  try {
+    const token = (process.env.GITHUB_TOKEN ?? '').trim();
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'bladerunner-site-build',
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { tag_name?: string };
+    return typeof body.tag_name === 'string' && body.tag_name.length > 0 ? body.tag_name : null;
+  } catch {
+    return null;
+  }
+}
+
+const tag = PINNED_TAG || (await fetchLatestTag());
+const version = tag ? tag.replace(/^v/, '') : null;
+const releaseUrl = tag
+  ? `https://github.com/${REPO}/releases/tag/${tag}`
+  : `https://github.com/${REPO}/releases`;
 ---
 <Base>
   <Nav />
   <main>
-    <Hero />
+    <Hero version={version} releaseUrl={releaseUrl} />
     <SsoMarquee />
     <FeatureGrid />
     <Quickstart />

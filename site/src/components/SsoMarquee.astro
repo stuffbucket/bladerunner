@@ -6,7 +6,7 @@ import Terminal from './Terminal.astro';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const shot = `${base}/incus-ui-shot.png`;
 
-const callout = `<span class="tprompt">$ runner</span><span class="targ"> web</span>
+const callout = `<span class="tprompt">$ br</span><span class="targ"> web</span>
 <span class="tcomment"># no password · no cert prompt · no OIDC</span>`;
 ---
 <section id="sso" class="section band-subtle sso">
@@ -23,12 +23,12 @@ const callout = `<span class="tprompt">$ runner</span><span class="targ"> web</s
       <Eyebrow text="The marquee feature" />
       <h2 class="h2">Open the dashboard already logged in.</h2>
       <p class="sso-body">
-        <code class="chip"><span class="cmd">runner</span> web</code> opens the Incus dashboard and
+        <code class="chip"><span class="cmd">br</span> web</code> opens the Incus dashboard and
         you land already logged in — no password, no client-cert prompt, no OIDC setup. bladerunner
         proves possession of the same SSH key you use for
-        <code class="chip"><span class="cmd">runner</span> ssh</code> and hands the browser a
+        <code class="chip"><span class="cmd">br</span> ssh</code> and hands the browser a
         session. (Approving from another terminal?
-        <code class="chip"><span class="cmd">runner</span> web approve</code> works too.)
+        <code class="chip"><span class="cmd">br</span> web approve</code> works too.)
       </p>
 
       <div class="sso-callout">

@@ -11,12 +11,12 @@ import FeatureCard from './FeatureCard.astro';
 
     <div class="fgrid">
       <FeatureCard icon="key" title="Browser sign-on with your SSH key" span href="#sso">
-        <code class="chip"><span class="cmd">runner</span> web</code> opens the Incus dashboard and you
+        <code class="chip"><span class="cmd">br</span> web</code> opens the Incus dashboard and you
         land already logged in — no password, no client-cert prompt, no OIDC setup. bladerunner proves
         possession of the same SSH key you use for
-        <code class="chip"><span class="cmd">runner</span> ssh</code> and hands the browser a session.
+        <code class="chip"><span class="cmd">br</span> ssh</code> and hands the browser a session.
         (Approving from another terminal?
-        <code class="chip"><span class="cmd">runner</span> web approve</code> works too.)
+        <code class="chip"><span class="cmd">br</span> web approve</code> works too.)
       </FeatureCard>
 
       <FeatureCard icon="chip" title="Native Apple Virtualization.framework">
@@ -40,9 +40,9 @@ import FeatureCard from './FeatureCard.astro';
       </FeatureCard>
 
       <FeatureCard icon="save" title="Save, restore, and auto-start">
-        <code class="chip"><span class="cmd">runner</span> save</code> pauses the guest, snapshots its
+        <code class="chip"><span class="cmd">br</span> save</code> pauses the guest, snapshots its
         machine state to disk, and resumes;
-        <code class="chip"><span class="cmd">runner</span> restore</code> brings it right back. Commands
+        <code class="chip"><span class="cmd">br</span> restore</code> brings it right back. Commands
         offer to boot the VM when it isn’t running, so you rarely have to think about lifecycle. Nested
         virtualization is on by default, so Incus VMs work out of the box.
       </FeatureCard>

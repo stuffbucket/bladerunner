@@ -44,6 +44,14 @@ jobs:
         run: npm ci
 
       - name: Build
+        env:
+          # Optional pin: set the SITE_PIN_VERSION repo variable (e.g. v0.4.2)
+          # to freeze the advertised version instead of tracking /releases/latest.
+          # Manage with site-pin.yml; unset + redeploy to resume tracking latest.
+          VITE_SITE_PIN_VERSION: ${{ vars.SITE_PIN_VERSION }}
+          # Authenticate the releases/latest lookup in index.astro (raises the
+          # anonymous 60-req/hr rate limit that a busy release day can exhaust).
+          GITHUB_TOKEN: ${{ github.token }}
         run: npm run build
 
       - name: Upload artifact

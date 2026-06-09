@@ -3,19 +3,25 @@ import Eyebrow from './Eyebrow.astro';
 import Button from './Button.astro';
 import Terminal from './Terminal.astro';
 
+interface Props {
+  version?: string | null;
+  releaseUrl?: string;
+}
+const { version = null, releaseUrl = '' } = Astro.props as Props;
+
 const INSTALL = 'brew install stuffbucket/tap/bladerunner';
 const GH = 'https://github.com/stuffbucket/bladerunner';
 
 const heroBody = `<span class="line"><span class="tprompt">$ brew</span><span class="targ"> install stuffbucket/tap/bladerunner</span></span>
 <span class="line"><span class="tok">✔</span> signed with Virtualization entitlement</span>
 <span class="line"> </span>
-<span class="line"><span class="tprompt">$ runner</span><span class="targ"> start</span></span>
+<span class="line"><span class="tprompt">$ br</span><span class="targ"> start</span></span>
 <span class="line"><span class="spin">⠙</span> booting Debian 13 (trixie)…</span>
 <span class="line"><span class="spin">⠹</span> cloud-init: installing incus…</span>
 <span class="line"><span class="tok">✔</span> Incus ready · <span class="tstring">https://127.0.0.1:18443</span></span>
 <span class="line"><span class="tok">✔</span> SSH        · <span class="tstring">127.0.0.1:6022</span></span>
 <span class="line"> </span>
-<span class="line"><span class="tprompt">$ runner</span><span class="targ"> web</span></span>
+<span class="line"><span class="tprompt">$ br</span><span class="targ"> web</span></span>
 <span class="line">→ opening dashboard, signed in with your SSH key <span class="tok">✓</span></span>`;
 ---
 <header id="top" class="section band-bg hero">
@@ -27,9 +33,9 @@ const heroBody = `<span class="line"><span class="tprompt">$ brew</span><span cl
         bladerunner runs a full Incus daemon in a Debian 13 VM built directly on Apple’s
         Virtualization.framework — no Lima, no Colima, no QEMU layer in between.
         <code class="chip"><span class="cmd">brew</span> install</code>,
-        <code class="chip"><span class="cmd">runner</span> start</code>, and you’re running
+        <code class="chip"><span class="cmd">br</span> start</code>, and you’re running
         containers and VMs on Apple Silicon. Then
-        <code class="chip"><span class="cmd">runner</span> web</code> opens the Incus dashboard
+        <code class="chip"><span class="cmd">br</span> web</code> opens the Incus dashboard
         already signed in with your SSH key.
       </p>
 
@@ -38,7 +44,11 @@ const heroBody = `<span class="line"><span class="tprompt">$ brew</span><span cl
         <Button variant="outline" href={GH} external>View on GitHub →</Button>
       </div>
 
-      <p class="hero-micro">Apple Silicon · macOS 13+ · M1–M4</p>
+      <p class="hero-micro">
+        Apple Silicon · macOS 13+ · M1–M4{version && (
+          <> · <a class="hero-ver" href={releaseUrl}>v{version}</a></>
+        )}
+      </p>
     </div>
 
     <div class="hero-term reveal">
@@ -73,6 +83,13 @@ const heroBody = `<span class="line"><span class="tprompt">$ brew</span><span cl
     font-family: var(--font-mono);
     font-size: var(--t-small);
     color: var(--muted);
+  }
+  .hero-ver {
+    color: var(--accent, currentColor);
+    text-decoration: none;
+  }
+  .hero-ver:hover {
+    text-decoration: underline;
   }
 
   @media (max-width: 1023px) {
