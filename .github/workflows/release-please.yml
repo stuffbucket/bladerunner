@@ -1,0 +1,132 @@
+name: Release
+
+# Maximal-style release pipeline:
+#   1. release-please maintains CHANGELOG + version and opens a release PR.
+#      Merging it creates the vX.Y.Z tag + GitHub Release (notes from the
+#      changelog).
+#   2. goreleaser builds the signed (ad-hoc) `br` darwin/arm64 tarball +
+#      checksums on a GitHub-hosted macOS runner and uploads them to the
+#      release. CGO links Virtualization.framework, so this MUST run on macOS.
+#   3. The source-controlled Homebrew formula (build/homebrew/bladerunner.rb)
+#      is rendered with the release version + sha256 and synced into
+#      stuffbucket/homebrew-tap, so `brew upgrade` tracks every release.
+#
+# All three live in one workflow gated on release-please's `release_created`
+# output, so no cross-workflow dispatch / GITHUB_TOKEN anti-loop concerns.
+#
+# The signed + notarized .app DMG (a separate Developer-ID artifact built on a
+# self-hosted runner) is intentionally NOT here — see release-macos-dmg.yml.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  goreleaser:
+    name: Build + attach CLI tarball (macOS)
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release artifacts (goreleaser, no publish)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --skip=publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload tarball + checksums to the release
+        run: |
+          set -euo pipefail
+          ls -la dist/
+          gh release upload "$TAG" \
+            dist/bladerunner_*_darwin_aarch64.tar.gz \
+            dist/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  homebrew:
+    name: Sync Homebrew formula to the tap
+    needs: [release-please, goreleaser]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Render formula from the source-controlled template
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.txt --dir /tmp --clobber
+          ARCHIVE="bladerunner_${VERSION}_darwin_aarch64.tar.gz"
+          SHA256="$(grep "$ARCHIVE" /tmp/checksums.txt | awk '{print $1}')"
+          if [ -z "$SHA256" ]; then
+            echo "::error::no sha256 for $ARCHIVE in checksums.txt"; cat /tmp/checksums.txt; exit 1
+          fi
+          sed -e "s/PLACEHOLDER_VERSION/${VERSION}/g" \
+              -e "s/PLACEHOLDER_SHA256_DARWIN_ARM64/${SHA256}/" \
+              build/homebrew/bladerunner.rb > /tmp/bladerunner.rb
+          echo "Rendered formula:"; cat /tmp/bladerunner.rb
+
+      - name: Push formula to stuffbucket/homebrew-tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN secret not set"; exit 1
+          fi
+          cd /tmp
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/stuffbucket/homebrew-tap.git"
+          cp /tmp/bladerunner.rb homebrew-tap/Formula/bladerunner.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/bladerunner.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged."
+          else
+            git commit -m "bladerunner ${TAG}"
+            git push
+          fi
