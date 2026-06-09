@@ -51,6 +51,18 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  # Signed + notarized Bladerunner.app DMG on the self-hosted macOS runner.
+  # OFF until vars.ENABLE_SIGNED_DMG == 'true' (so releases don't hang waiting
+  # for a self-hosted runner that isn't provisioned yet). See the reusable
+  # workflow's header for the one-time prerequisites.
+  macos-dmg:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true' && vars.ENABLE_SIGNED_DMG == 'true'
+    uses: ./.github/workflows/release-macos-dmg.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
+
   goreleaser:
     name: Build + attach CLI tarball (macOS)
     needs: release-please

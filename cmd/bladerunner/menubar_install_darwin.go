@@ -44,6 +44,48 @@ func menubarPaths() (appDir, execPath, agentPath string, err error) {
 	return appDir, execPath, agentPath, nil
 }
 
+// writeAppBundle assembles a Bladerunner.app at appDir: Contents/MacOS/<name>
+// (a copy of srcBinary), Contents/Info.plist (LSUIElement + CFBundleIconFile),
+// and Contents/Resources/AppIcon.icns. It installs NO LaunchAgent — shared by
+// 'menubar install' and 'menubar bundle' (the release DMG build).
+func writeAppBundle(appDir, execPath, srcBinary string) error {
+	if err := os.MkdirAll(filepath.Dir(execPath), bundleDirPerm); err != nil {
+		return fmt.Errorf("create bundle dir: %w", err)
+	}
+	if err := copyExecutable(srcBinary, execPath); err != nil {
+		return fmt.Errorf("copy binary into bundle: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "Contents", "Info.plist"), []byte(infoPlist()), bundleFilePerm); err != nil {
+		return fmt.Errorf("write Info.plist: %w", err)
+	}
+	resourcesDir := filepath.Join(appDir, "Contents", "Resources")
+	if err := os.MkdirAll(resourcesDir, bundleDirPerm); err != nil {
+		return fmt.Errorf("create Resources dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(resourcesDir, menubarIconName+".icns"), appIconICNS, bundleFilePerm); err != nil {
+		return fmt.Errorf("write app icon: %w", err)
+	}
+	return nil
+}
+
+// bundleMenubarApp writes a standalone Bladerunner.app into outputDir (no
+// LaunchAgent) around the currently-running binary. The release pipeline runs
+// this on the self-hosted macOS runner, then Developer-ID signs + notarizes the
+// bundle into a DMG. Double-clicking the result launches the menubar (see main).
+func bundleMenubarApp(outputDir string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate self: %w", err)
+	}
+	appDir := filepath.Join(outputDir, menubarBundleName+".app")
+	execPath := filepath.Join(appDir, "Contents", "MacOS", menubarBundleName)
+	if err := writeAppBundle(appDir, execPath, self); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Wrote %s\n", appDir)
+	return nil
+}
+
 // installMenubarAgent builds the menubar-only .app bundle (LSUIElement, so no
 // dock icon) around a copy of this binary, then registers a per-user LaunchAgent
 // that runs it at login. The copied binary is a full 'runner', so the menu's
@@ -58,25 +100,8 @@ func installMenubarAgent() error {
 		return err
 	}
 
-	// Bundle layout: Bladerunner.app/Contents/{Info.plist,MacOS/Bladerunner}.
-	if err := os.MkdirAll(filepath.Dir(execPath), bundleDirPerm); err != nil {
-		return fmt.Errorf("create bundle dir: %w", err)
-	}
-	if err := copyExecutable(self, execPath); err != nil {
-		return fmt.Errorf("copy binary into bundle: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(appDir, "Contents", "Info.plist"), []byte(infoPlist()), bundleFilePerm); err != nil {
-		return fmt.Errorf("write Info.plist: %w", err)
-	}
-
-	// Bundle the app icon (Contents/Resources/AppIcon.icns) referenced by
-	// CFBundleIconFile in Info.plist.
-	resourcesDir := filepath.Join(appDir, "Contents", "Resources")
-	if err := os.MkdirAll(resourcesDir, bundleDirPerm); err != nil {
-		return fmt.Errorf("create Resources dir: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(resourcesDir, menubarIconName+".icns"), appIconICNS, bundleFilePerm); err != nil {
-		return fmt.Errorf("write app icon: %w", err)
+	if err := writeAppBundle(appDir, execPath, self); err != nil {
+		return err
 	}
 
 	// Per-user LaunchAgent. Run the bundle's executable (so NSBundle.mainBundle
