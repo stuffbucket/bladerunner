@@ -16,14 +16,14 @@ const steps = [
     n: '02',
     title: 'Start the VM',
     caption: 'First boot takes a few minutes while cloud-init installs and configures Incus. A startup report is printed and saved to ~/.local/state/bladerunner/startup-report.json.',
-    copy: 'runner start',
+    copy: 'br start',
     body: `<span class="tprompt">$ runner</span><span class="targ"> start</span>`,
   },
   {
     n: '03',
     title: 'Open the web UI — already signed in',
     caption: 'Lands you in the Incus dashboard authenticated with your SSH key.',
-    copy: 'runner web',
+    copy: 'br web',
     body: `<span class="tprompt">$ runner</span><span class="targ"> web</span>`,
   },
   {
@@ -38,7 +38,7 @@ const steps = [
     n: '05',
     title: 'Snapshot and resume',
     caption: 'Pause and snapshot the machine state, then bring it right back.',
-    copy: 'runner save',
+    copy: 'br save',
     body: `<span class="tprompt">$ runner</span><span class="targ"> save</span>       <span class="tcomment"># pause, snapshot machine state, resume</span>
 <span class="tprompt">$ runner</span><span class="targ"> restore</span>    <span class="tcomment"># bring the VM back from saved state</span>`,
   },
@@ -71,7 +71,7 @@ const steps = [
               <p class="qs-caption"><strong>{s.title}.</strong> <span set:html={s.caption} /></p>
             </div>
             <div class="qs-term">
-              <Terminal label="runner — zsh" ariaLabel={`Step ${s.n}: ${s.title}`}>
+              <Terminal label="br — zsh" ariaLabel={`Step ${s.n}: ${s.title}`}>
                 <Fragment set:html={s.body} />
               </Terminal>
               <div class="qs-copy"><CopyButton copy={s.copy} /></div>
