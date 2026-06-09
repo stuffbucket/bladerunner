@@ -21,7 +21,10 @@ var appIconICNS []byte
 
 const (
 	menubarBundleName = "Bladerunner"
-	menubarBundleID   = "com.stuffbucket.bladerunner.menubar"
+	// menubarBundleID is the .app's CFBundleIdentifier. It must match the
+	// bundle_id in .macos-builder/config so the signing builder's policy + sign
+	// line up (the co.stuffbucket.* convention shared with maximal).
+	menubarBundleID   = "co.stuffbucket.bladerunner"
 	menubarAgentLabel = "com.stuffbucket.bladerunner.menubar"
 	// menubarIconName is the CFBundleIconFile basename (AppIcon.icns, dropped in
 	// Contents/Resources). Even under LSUIElement (no dock), this gives the .app
