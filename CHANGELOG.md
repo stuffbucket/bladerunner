@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/stuffbucket/bladerunner/compare/v0.4.1...v0.4.2) (2026-06-09)
+
+
+### Features
+
+* **release:** signed + notarized Bladerunner.app DMG + cask ([#91](https://github.com/stuffbucket/bladerunner/issues/91)) ([0a7c02d](https://github.com/stuffbucket/bladerunner/commit/0a7c02dc3f263820c7d44333e32bfb96c046472d))
+
 ## [0.4.1](https://github.com/stuffbucket/bladerunner/compare/v0.4.0...v0.4.1) (2026-06-09)
 
 
