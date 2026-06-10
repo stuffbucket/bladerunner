@@ -57,22 +57,12 @@ func defaultNotifier() notifier { return noopNotifier{} }
 
 // splashController shows/hides the "bladerunner is starting…" splash. The
 // transition machine drives it (Show on Start, Hide on the first healthy edge)
-// without knowing the window implementation, so the cgo NSPopover splash can be
-// dropped in later behind the same interface. No-op until then.
+// without knowing the window implementation. The real implementation is the cgo
+// floating HUD window in ui_bridge_darwin.go (defaultSplash); tests use a fake.
 type splashController interface {
 	Show()
 	Hide()
 }
-
-// noopSplash is the default splash controller until the cgo splash window lands.
-type noopSplash struct{}
-
-func (noopSplash) Show() {}
-func (noopSplash) Hide() {}
-
-// defaultSplash returns the splash controller for this process (a no-op until
-// the cgo splash window PR).
-func defaultSplash() splashController { return noopSplash{} }
 
 // vmNotifier is the edge-triggered notification + splash state machine. It is
 // fed every health reading from the poll goroutine (observe) and the Start
