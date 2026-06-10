@@ -3,3 +3,6 @@ volname = Bladerunner
 bundle_id = co.stuffbucket.bladerunner
 entitlements = virtualization
 artifact = dmg
+# Match the CLI tarball naming (bladerunner_<version>_darwin_aarch64.tar.gz) so
+# the DMG is self-describing: {version} is the release tag without leading 'v'.
+dmg_name = bladerunner_{version}_darwin_aarch64.dmg
