@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6](https://github.com/stuffbucket/bladerunner/compare/v0.4.5...v0.4.6) (2026-06-10)
+
+
+### Features
+
+* **release:** request a semver-arch DMG filename from macos-builder ([#101](https://github.com/stuffbucket/bladerunner/issues/101)) ([1b9912c](https://github.com/stuffbucket/bladerunner/commit/1b9912c3c1bc996ee4a993c9e284d574374f6aef))
+
 ## [0.4.5](https://github.com/stuffbucket/bladerunner/compare/v0.4.4...v0.4.5) (2026-06-09)
 
 
