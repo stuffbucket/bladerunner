@@ -23,6 +23,11 @@ import (
 
 const menubarRefreshInterval = 3 * time.Second
 
+// startActionTimeout bounds how long a StartOnFirstAction click waits for the
+// lazily-started guest to become healthy before giving up on running the
+// deferred action (matches the splash auto-dismiss budget for a cold boot).
+const startActionTimeout = 5 * time.Minute
+
 // wakeGapSeconds: if wall-clock advances far more than the poll interval between
 // two polls, the Mac slept and woke (the agent was frozen meanwhile). On wake we
 // auto-reconnect to heal the guest's clock + vsock forwarders.
@@ -88,6 +93,7 @@ func runMenubar() error {
 	return nil
 }
 
+//nolint:gocyclo // onMenubarReady is a setup+dispatch function — menu build, the apply() state mapping, and the click select; the start-policy branches tip it past the ceiling without adding real branching complexity.
 func onMenubarReady() {
 	systray.SetIcon(statusIcon(vmStopped))
 	systray.SetTooltip("bladerunner")
@@ -105,6 +111,16 @@ func onMenubarReady() {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit the bladerunner menubar")
 
+	// Read the host-wide start policy once. It governs whether the menubar
+	// auto-starts the VM at launch (StartOnLaunch) or lazily on the first
+	// Web/Shell action (StartOnFirstAction). Default StartManual is today's
+	// behavior; a missing/invalid settings file falls back to it.
+	startPolicy := config.StartManual
+	if s, err := config.LoadSettings(config.DefaultStateDir()); err == nil {
+		startPolicy = s.StartPolicy
+	}
+	firstAction := startPolicy == config.StartOnFirstAction
+
 	apply := func(st vmState) {
 		systray.SetIcon(statusIcon(st))
 		switch st {
@@ -118,13 +134,14 @@ func onMenubarReady() {
 			mStatus.SetTitle("bladerunner: running (status unknown)")
 		}
 		running := st != vmStopped
-		healthy := st == vmHealthy
 		setEnabled(mStart, st == vmStopped)
 		setEnabled(mStop, running)
 		setEnabled(mReconnect, running) // light heal after sleep
 		setEnabled(mRestart, running)   // restart is the fix when fully wedged
-		setEnabled(mWeb, healthy)       // web/shell only work when the guest answers
-		setEnabled(mShell, healthy)
+		// Web/Shell normally require a healthy guest. Under StartOnFirstAction
+		// they stay clickable while stopped so a click can lazily boot the VM.
+		setEnabled(mWeb, webShellEnabled(st, firstAction))
+		setEnabled(mShell, webShellEnabled(st, firstAction))
 	}
 	apply(vmStopped)
 
@@ -137,8 +154,38 @@ func onMenubarReady() {
 	notif := newVMNotifier(defaultNotifier(), splash)
 
 	// When a second launch hands off (see acquireMenubarLock), re-surface this
-	// instance by re-showing the splash. No-op until the cgo splash lands.
+	// instance by re-showing the splash.
 	setMenubarPresentHandler(splash.Show)
+
+	// triggerStart boots the VM the same way the Start item does — show the
+	// splash + arm the notify machine, then launch `br start` detached. The
+	// single canonical start path, reused by the Start click and the policies.
+	// (`br start`'s control socket refuses a second bind, so a racing auto-start
+	// + manual start can never double-boot.)
+	triggerStart := func() {
+		mStatus.SetTitle("bladerunner: starting…")
+		notif.onStart(time.Now())
+		_ = launchDetached("start")
+	}
+
+	// runWhenHealthy polls until the guest answers (bounded) then runs action —
+	// used by StartOnFirstAction to perform the Web/Shell action once the
+	// lazily-started VM is ready.
+	runWhenHealthy := func(action func()) {
+		deadline := time.Now().Add(startActionTimeout)
+		for time.Now().Before(deadline) {
+			if vmHealth() == vmHealthy {
+				action()
+				return
+			}
+			time.Sleep(menubarRefreshInterval)
+		}
+	}
+
+	// StartOnLaunch: boot the VM now if it isn't already up.
+	if startPolicy == config.StartOnLaunch && vmHealth() == vmStopped {
+		triggerStart()
+	}
 
 	// Poll health off the click loop so a slow probe (a wedged guest) never
 	// blocks the menu. The same loop detects host sleep/wake (a big wall-clock
@@ -171,9 +218,7 @@ func onMenubarReady() {
 			case st := <-healthCh:
 				apply(st)
 			case <-mStart.ClickedCh:
-				mStatus.SetTitle("bladerunner: starting…")
-				notif.onStart(time.Now())
-				_ = launchDetached("start")
+				triggerStart()
 			case <-mStop.ClickedCh:
 				mStatus.SetTitle("bladerunner: stopping…")
 				go runnerRun("stop")
@@ -184,15 +229,35 @@ func onMenubarReady() {
 				mStatus.SetTitle("bladerunner: restarting…")
 				go restartVM()
 			case <-mWeb.ClickedCh:
-				_ = launchDetached("web")
+				// Under StartOnFirstAction a click while stopped lazily boots the
+				// VM, then opens the web UI once the guest is healthy.
+				if firstAction && vmHealth() == vmStopped {
+					triggerStart()
+					go runWhenHealthy(func() { _ = launchDetached("web") })
+				} else {
+					_ = launchDetached("web")
+				}
 			case <-mShell.ClickedCh:
-				openShellTerminal()
+				if firstAction && vmHealth() == vmStopped {
+					triggerStart()
+					go runWhenHealthy(openShellTerminal)
+				} else {
+					openShellTerminal()
+				}
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
 			}
 		}
 	}()
+}
+
+// webShellEnabled reports whether the Web/Shell menu items should be clickable
+// for a given VM state. They need a healthy guest, except under
+// StartOnFirstAction where they stay clickable while stopped so a click can
+// lazily boot the VM.
+func webShellEnabled(st vmState, firstAction bool) bool {
+	return st == vmHealthy || (firstAction && st == vmStopped)
 }
 
 func setEnabled(m *systray.MenuItem, enabled bool) {
