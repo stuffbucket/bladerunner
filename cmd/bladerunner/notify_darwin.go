@@ -3,6 +3,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -50,10 +52,36 @@ type noopNotifier struct{}
 
 func (noopNotifier) notify(string, string) {}
 
-// defaultNotifier returns the notifier to use for this process. Today it is
-// always a no-op; the UN-backed notifier (selected when running inside the
-// signed Bladerunner.app) is wired in the notifications-delivery PR.
-func defaultNotifier() notifier { return noopNotifier{} }
+// defaultNotifier returns the notifier to use for this process: the branded
+// UNUserNotificationCenter notifier when running inside the (signed) .app
+// bundle, otherwise a no-op. UN requires a valid bundle id + code signature to
+// deliver — a bare `br menubar` from the CLI has neither — so emitting from
+// outside the bundle would silently fail (or, accessing the center, raise),
+// hence the guard. Only the long-lived menubar process emits; the detached
+// `br` subprocesses it spawns are never bundled and must not notify.
+func defaultNotifier() notifier {
+	if runningInsideAppBundle() {
+		return newUNNotifier()
+	}
+	return noopNotifier{}
+}
+
+// runningInsideAppBundle reports whether this process is the menubar binary
+// running from inside Bladerunner.app (…/Bladerunner.app/Contents/MacOS/…),
+// which is the only context where UNUserNotificationCenter can deliver.
+func runningInsideAppBundle() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	return isAppBundlePath(exe)
+}
+
+// isAppBundlePath reports whether an executable path lies inside a macOS .app
+// bundle's MacOS dir. Split out for testing.
+func isAppBundlePath(exe string) bool {
+	return strings.Contains(exe, ".app/Contents/MacOS/")
+}
 
 // splashController shows/hides the "bladerunner is starting…" splash. The
 // transition machine drives it (Show on Start, Hide on the first healthy edge)

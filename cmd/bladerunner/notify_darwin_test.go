@@ -184,11 +184,31 @@ func TestNotifySuppressWedgedExpires(t *testing.T) {
 	}
 }
 
-// defaultNotifier/defaultSplash must be safe no-ops so wiring them in changes no
-// behavior until the cgo implementations land.
+func TestIsAppBundlePath(t *testing.T) {
+	tests := []struct {
+		exe  string
+		want bool
+	}{
+		{"/Users/x/Applications/Bladerunner.app/Contents/MacOS/Bladerunner", true},
+		{"/opt/homebrew/bin/br", false},
+		{"/usr/local/bin/br", false},
+		{"/tmp/build/br", false},
+		{"/Applications/Other.app/Contents/MacOS/Other", true},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isAppBundlePath(tt.exe); got != tt.want {
+			t.Errorf("isAppBundlePath(%q) = %v, want %v", tt.exe, got, tt.want)
+		}
+	}
+}
+
+// defaultNotifier/defaultSplash must return non-nil controllers. Outside a .app
+// bundle (as in tests) defaultNotifier is the no-op, so driving the machine
+// through a transition must not panic.
 func TestDefaultsAreNoops(t *testing.T) {
 	if defaultNotifier() == nil || defaultSplash() == nil {
-		t.Fatal("defaultNotifier/defaultSplash must return non-nil no-ops")
+		t.Fatal("defaultNotifier/defaultSplash must return non-nil controllers")
 	}
 	m := newVMNotifier(defaultNotifier(), defaultSplash())
 	now := time.Unix(1_700_000_000, 0)

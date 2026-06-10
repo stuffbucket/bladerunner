@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <UserNotifications/UserNotifications.h>
 #include "ui_bridge_darwin.h"
 
 // View tags so brShowSplash can find and update the icon/message subviews when
@@ -106,6 +107,51 @@ void brHideSplash(void) {
   runOnMain(^{
     if (gSplashWindow != nil) {
       [gSplashWindow orderOut:nil];
+    }
+  });
+}
+
+void brRequestNotificationAuth(void) {
+  runOnMain(^{
+    @try {
+      UNUserNotificationCenter *center =
+          [UNUserNotificationCenter currentNotificationCenter];
+      [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert |
+                                               UNAuthorizationOptionSound)
+                            completionHandler:^(BOOL granted, NSError *error) {
+                              (void)granted;
+                              (void)error; // denial degrades to no banners
+                            }];
+    } @catch (NSException *e) {
+      // currentNotificationCenter raises for a process without a valid bundle
+      // id + code signature (e.g. a bare `br menubar` or an unsigned dev
+      // bundle). Swallow: notifications simply won't appear there.
+      (void)e;
+    }
+  });
+}
+
+void brPostNotification(const char *title, const char *body) {
+  NSString *t = title ? [NSString stringWithUTF8String:title] : @"";
+  NSString *b = body ? [NSString stringWithUTF8String:body] : @"";
+  runOnMain(^{
+    @try {
+      UNUserNotificationCenter *center =
+          [UNUserNotificationCenter currentNotificationCenter];
+      UNMutableNotificationContent *content =
+          [[UNMutableNotificationContent alloc] init];
+      content.title = t;
+      content.body = b;
+      content.sound = [UNNotificationSound defaultSound];
+      // nil trigger => deliver immediately. A fresh UUID id per request so
+      // banners never coalesce/replace one another.
+      UNNotificationRequest *req =
+          [UNNotificationRequest requestWithIdentifier:[[NSUUID UUID] UUIDString]
+                                               content:content
+                                               trigger:nil];
+      [center addNotificationRequest:req withCompletionHandler:nil];
+    } @catch (NSException *e) {
+      (void)e;
     }
   });
 }
