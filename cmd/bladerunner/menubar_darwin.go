@@ -72,6 +72,17 @@ const (
 )
 
 func runMenubar() error {
+	// Enforce a single menubar instance per host BEFORE systray.Run seizes the
+	// main thread. A second launch (LaunchAgent at login + a Finder double-click
+	// + `br menubar` from a terminal are all normal) hands off to the running
+	// instance and exits 0 — quietly, never an error, so the KeepAlive
+	// LaunchAgent does not relaunch-fight it.
+	release, already := acquireMenubarLock(firePresent)
+	if already {
+		return nil
+	}
+	defer release()
+
 	// systray.Run takes over the main thread and blocks until Quit.
 	systray.Run(onMenubarReady, func() {})
 	return nil
@@ -122,7 +133,12 @@ func onMenubarReady() {
 	// Today both the notifier and splash are no-ops; the cgo UNUserNotification
 	// and NSPopover implementations are dropped in behind these interfaces in
 	// later PRs.
-	notif := newVMNotifier(defaultNotifier(), defaultSplash())
+	splash := defaultSplash()
+	notif := newVMNotifier(defaultNotifier(), splash)
+
+	// When a second launch hands off (see acquireMenubarLock), re-surface this
+	// instance by re-showing the splash. No-op until the cgo splash lands.
+	setMenubarPresentHandler(splash.Show)
 
 	// Poll health off the click loop so a slow probe (a wedged guest) never
 	// blocks the menu. The same loop detects host sleep/wake (a big wall-clock
