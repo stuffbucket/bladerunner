@@ -117,6 +117,13 @@ func onMenubarReady() {
 	}
 	apply(vmStopped)
 
+	// notif turns the stream of health readings + Start clicks into at-most-one
+	// native banner per real VM transition, and drives the starting splash.
+	// Today both the notifier and splash are no-ops; the cgo UNUserNotification
+	// and NSPopover implementations are dropped in behind these interfaces in
+	// later PRs.
+	notif := newVMNotifier(defaultNotifier(), defaultSplash())
+
 	// Poll health off the click loop so a slow probe (a wedged guest) never
 	// blocks the menu. The same loop detects host sleep/wake (a big wall-clock
 	// jump between polls) and auto-reconnects to heal the guest.
@@ -127,9 +134,13 @@ func onMenubarReady() {
 			st := vmHealth()
 			now := time.Now().Unix()
 			if st != vmStopped && now-lastWall > int64(menubarRefreshInterval/time.Second)+wakeGapSeconds {
+				notif.onWake(time.Now())
 				go runnerRun("reconnect") // self-heal after a detected wake
 			}
 			lastWall = now
+			// Feed every reading (not just the ones that fit in the channel) to
+			// the transition machine, so edge detection never misses a change.
+			notif.observe(st, time.Now())
 			select {
 			case healthCh <- st:
 			default:
@@ -145,6 +156,7 @@ func onMenubarReady() {
 				apply(st)
 			case <-mStart.ClickedCh:
 				mStatus.SetTitle("bladerunner: starting…")
+				notif.onStart(time.Now())
 				_ = launchDetached("start")
 			case <-mStop.ClickedCh:
 				mStatus.SetTitle("bladerunner: stopping…")
