@@ -242,10 +242,10 @@ linters:
         linters:
           - mnd
 
-      # The cgo UI bridge requires a standalone `import "C"` immediately after
-      # the preamble comment; gocritic's dupImport false-positives on it,
+      # The cgo UI bridge files require a standalone `import "C"` immediately
+      # after the preamble comment; gocritic's dupImport false-positives on it,
       # spuriously pairing "C" with the package decl / other imports.
-      - path: 'cmd/bladerunner/ui_bridge_darwin\.go'
+      - path: 'cmd/bladerunner/(ui_bridge|settings_window)_darwin\.go'
         linters:
           - gocritic
         text: 'dupImport'
