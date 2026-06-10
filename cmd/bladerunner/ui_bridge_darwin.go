@@ -4,7 +4,7 @@ package main
 
 /*
 #cgo CFLAGS: -x objective-c -fobjc-arc
-#cgo LDFLAGS: -framework Cocoa
+#cgo LDFLAGS: -framework Cocoa -framework UserNotifications
 #include <stdlib.h>
 #include "ui_bridge_darwin.h"
 */
@@ -14,6 +14,7 @@ import (
 	_ "embed"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 // splashIconICNS is the colorful app mark shown on the starting splash. The
@@ -71,4 +72,24 @@ func (s *cgoSplash) Hide() {
 	}
 	s.mu.Unlock()
 	C.brHideSplash()
+}
+
+// unNotifier delivers branded banners via UNUserNotificationCenter. It is
+// selected by defaultNotifier ONLY when running inside the signed Bladerunner
+// .app bundle; outside the bundle UN can't deliver, so a no-op is used instead.
+type unNotifier struct{}
+
+func (unNotifier) notify(title, body string) {
+	ctitle := C.CString(title)
+	cbody := C.CString(body)
+	defer C.free(unsafe.Pointer(ctitle))
+	defer C.free(unsafe.Pointer(cbody))
+	C.brPostNotification(ctitle, cbody)
+}
+
+// newUNNotifier requests notification authorization once and returns the
+// UN-backed notifier.
+func newUNNotifier() notifier {
+	C.brRequestNotificationAuth()
+	return unNotifier{}
 }
