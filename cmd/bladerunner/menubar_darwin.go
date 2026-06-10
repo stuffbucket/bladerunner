@@ -109,6 +109,7 @@ func onMenubarReady() {
 	mWeb := systray.AddMenuItem("Open Web UI…", "Open the Incus web UI with single sign-on")
 	mShell := systray.AddMenuItem("Open Shell…", "Open a Terminal shell inside the VM")
 	systray.AddSeparator()
+	mSettings := systray.AddMenuItem("Settings…", "Edit bladerunner settings")
 	mQuit := systray.AddMenuItem("Quit", "Quit the bladerunner menubar")
 
 	// Read the host-wide start policy once. It governs whether the menubar
@@ -244,6 +245,8 @@ func onMenubarReady() {
 				} else {
 					openShellTerminal()
 				}
+			case <-mSettings.ClickedCh:
+				showSettingsWindow()
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
