@@ -16,6 +16,9 @@ const (
 	NetworkModeShared  = "shared"
 	NetworkModeBridged = "bridged"
 
+	// DefaultBridgeInterface is the host interface used for bridged networking.
+	DefaultBridgeInterface = "en0"
+
 	// Default values for CLI flags and config
 	DefaultCPUs        = 4
 	DefaultMemoryGiB   = 8
@@ -344,7 +347,7 @@ func Default(baseDir string) (*Config, error) {
 		IdentityDir:         defaultIdentityDir(),
 		AuthMode:            AuthModeOIDC,
 		NetworkMode:         NetworkModeShared,
-		BridgeInterface:     "en0",
+		BridgeInterface:     DefaultBridgeInterface,
 		GUI:                 true,
 		UseHostedGuestImage: useHosted,
 		CPUs:                DefaultCPUs,
