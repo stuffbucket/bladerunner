@@ -217,7 +217,7 @@ func DefaultSettings() Settings {
 		MemoryGiB:       DefaultMemoryGiB,
 		DiskSizeGiB:     DefaultDiskSizeGiB,
 		NetworkMode:     NetSettingShared,
-		BridgeInterface: "en0",
+		BridgeInterface: DefaultBridgeInterface,
 		AuthMode:        AuthSettingOIDC,
 		Image:           ImageSource{Kind: ImageDebian},
 		NestedVirt:      NestedAuto,
