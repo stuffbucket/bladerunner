@@ -141,6 +141,51 @@ func ejectForceFromArgs(req *control.Request) bool {
 	return req.Args["1"] == control.EjectModeForce
 }
 
+// applyFlagOverrides applies the `start` CLI flags onto cfg, on top of the
+// already-overlaid Settings and disk manifest. When driven is true (a
+// boot/cartridge boot stuffed pre-resolved precedence into startFlags) every
+// flag is applied verbatim; otherwise only flags the user explicitly changed
+// (per the changed predicate, normally cmd.Flags().Changed) are applied, so the
+// persisted Settings baseline is not clobbered by cobra's flag defaults.
+func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bool) {
+	apply := func(name string) bool { return driven || changed(name) }
+
+	if apply("cpus") {
+		cfg.CPUs = startFlags.cpus
+	}
+	if apply("memory") {
+		cfg.MemoryGiB = startFlags.memory
+	}
+	if apply("disk") {
+		cfg.DiskSizeGiB = startFlags.disk
+	}
+	if apply("gui") {
+		cfg.GUI = startFlags.gui
+	}
+	if apply("timeout") {
+		cfg.WaitForIncus = startFlags.timeout
+	}
+	// UseGuestAgent is derived from two flags; recompute if either was set.
+	if apply("use-guest-agent") || apply("no-agent") {
+		cfg.UseGuestAgent = startFlags.useAgent && !startFlags.noAgent
+	}
+	if apply("no-nested-virt") {
+		cfg.NestedVirtDisabled = startFlags.noNested
+	}
+	// Image flags keep their "non-empty means set" guard: a boot/cartridge start
+	// clears them (it carries the image via the manifest), and a plain start
+	// leaves them empty unless the user passed one.
+	if startFlags.imageURL != "" && apply("image-url") {
+		cfg.BaseImageURL = startFlags.imageURL
+		// A custom image isn't the pinned Debian default, so the embedded
+		// SHA-512 no longer applies; fall back to sidecar verification.
+		cfg.BaseImageSHA512 = ""
+	}
+	if startFlags.imagePath != "" && apply("image-path") {
+		cfg.BaseImagePath = startFlags.imagePath
+	}
+}
+
 //nolint:gocyclo // runStart was already at the gocyclo ceiling; the applyBootManifest guard for `br boot` tips it one over with essential error propagation.
 func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -193,31 +238,33 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	go ctrlServer.Start(ctx)
 
-	// Apply a disk manifest (set by `br boot`) as defaults BEFORE the flag
-	// overrides below, so the manifest's image/sizing/boot-mode lands first and
-	// explicit flags still win. No-op for a plain `br start`.
+	// Overlay the persisted, host-wide user settings (defaults -> Settings)
+	// BEFORE the manifest and flags so a user's saved preferences become the
+	// baseline. Settings live under the default state dir (not a custom
+	// --state-dir slot or a cartridge), matching the menubar's settings screen.
+	// A missing file yields defaults (no-op); an invalid file is logged once
+	// logging is up and ignored in favor of defaults rather than aborting start.
+	settings, settingsErr := config.LoadSettings(config.DefaultStateDir())
+	if settingsErr != nil {
+		settings = config.DefaultSettings()
+	}
+	settings.ApplyTo(cfg)
+
+	// Apply a disk manifest (set by `br boot`) as defaults AFTER Settings but
+	// BEFORE the flag overrides below, so the manifest's image/sizing/boot-mode
+	// overrides saved Settings and explicit flags still win. No-op for a plain
+	// `br start`.
 	if err := applyBootManifest(cfg); err != nil {
 		return err
 	}
 
-	// Apply flags
-	cfg.CPUs = startFlags.cpus
-	cfg.MemoryGiB = startFlags.memory
-	cfg.DiskSizeGiB = startFlags.disk
-	cfg.GUI = startFlags.gui
-	cfg.WaitForIncus = startFlags.timeout
-	cfg.UseGuestAgent = startFlags.useAgent && !startFlags.noAgent
-	cfg.NestedVirtDisabled = startFlags.noNested
-
-	if startFlags.imageURL != "" {
-		cfg.BaseImageURL = startFlags.imageURL
-		// A custom image isn't the pinned Debian default, so the embedded
-		// SHA-512 no longer applies; fall back to sidecar verification.
-		cfg.BaseImageSHA512 = ""
-	}
-	if startFlags.imagePath != "" {
-		cfg.BaseImagePath = startFlags.imagePath
-	}
+	// Apply CLI flags. On a boot/cartridge-driven start the flags carry
+	// pre-resolved precedence (flag-or-manifest-or-default, incl. a --headless
+	// override of a GUI manifest) and are applied verbatim; on a plain `br
+	// start` only flags the user explicitly changed are applied, so the
+	// persisted Settings overlaid above are not clobbered by flag defaults.
+	driven := bootManifest != nil || bootCartridge.mountpoint != ""
+	applyFlagOverrides(cfg, cmd.Flags().Changed, driven)
 
 	// A cartridge boot roots every per-VM path inside the mounted image and wires
 	// the RW share. This must land AFTER the manifest/flag overrides so the
@@ -227,6 +274,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Setup logging
 	if err := logging.Init(cfg.LogPath); err != nil {
 		return err
+	}
+	if settingsErr != nil {
+		logging.L().Warn("ignoring invalid settings; using defaults", "err", settingsErr)
 	}
 
 	// Ensure SSH keys
