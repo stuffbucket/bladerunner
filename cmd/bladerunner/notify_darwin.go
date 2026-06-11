@@ -19,6 +19,7 @@ const (
 	bodyUnresponsive = "Your VM is unresponsive — try Restart."
 	bodyStopped      = "Your VM stopped."
 	bodyReconnecting = "Reconnecting after sleep…"
+	bodyEngineUpdate = "An update is ready — choose “Restart VM to finish update”."
 )
 
 // Tuning for the transition state machine, sized against the 3s health poll.
@@ -167,6 +168,13 @@ func (m *vmNotifier) onPresent() {
 	if m.expectingStart {
 		m.showSplash()
 	}
+}
+
+// notifyEngineUpdate posts the one-shot "engine update ready" banner when the
+// running VM is older than this menubar. The poll loop already gates it to once
+// per session, so this just emits.
+func (m *vmNotifier) notifyEngineUpdate() {
+	m.n.notify(notifyTitle, bodyEngineUpdate)
 }
 
 // onWake emits the one-shot "reconnecting after sleep" banner when the poll loop

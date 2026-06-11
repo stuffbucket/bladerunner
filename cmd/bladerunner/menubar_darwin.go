@@ -77,12 +77,14 @@ const (
 )
 
 func runMenubar() error {
-	// Enforce a single menubar instance per host BEFORE systray.Run seizes the
-	// main thread. A second launch (LaunchAgent at login + a Finder double-click
-	// + `br menubar` from a terminal are all normal) hands off to the running
-	// instance and exits 0 — quietly, never an error, so the KeepAlive
-	// LaunchAgent does not relaunch-fight it.
-	release, already := acquireMenubarLock(firePresent)
+	// Enforce a version-aware single-instance rule BEFORE systray.Run seizes the
+	// main thread. A second launch of the same-or-older version hands off to the
+	// running instance and exits 0 — quietly, never an error, so the KeepAlive
+	// LaunchAgent does not relaunch-fight it. A NEWER launch (an upgrade) instead
+	// asks the running instance to step down (systray.Quit) and takes over; the
+	// VM runs in a detached `br start` and is untouched, so containers keep
+	// running.
+	release, already := acquireMenubarLock(version, firePresent, func() { systray.Quit() })
 	if already {
 		return nil
 	}
@@ -101,6 +103,11 @@ func onMenubarReady() {
 	mStatus := systray.AddMenuItem("Checking…", "Bladerunner VM status")
 	mStatus.Disable()
 	systray.AddSeparator()
+	// Shown only when the running VM (engine) was started by an older build than
+	// this menubar — a user-gated, non-destructive "restart to apply" (Docker
+	// Desktop's app-vs-engine split). Hidden until detected.
+	mUpdate := systray.AddMenuItem("Restart VM to finish update", "Gracefully restart the VM to apply the new bladerunner version")
+	mUpdate.Hide()
 	mStart := systray.AddMenuItem("Start VM", "Boot the bladerunner VM")
 	mStop := systray.AddMenuItem("Stop VM", "Gracefully stop the VM")
 	mReconnect := systray.AddMenuItem("Reconnect", "Re-sync the guest after sleep (clock + forwarders) without restarting")
@@ -193,8 +200,10 @@ func onMenubarReady() {
 	// blocks the menu. The same loop detects host sleep/wake (a big wall-clock
 	// jump between polls) and auto-reconnects to heal the guest.
 	healthCh := make(chan vmState, 1)
+	updateCh := make(chan struct{}, 1)
 	go func() {
 		lastWall := time.Now().Unix()
+		engineChecked := false
 		for {
 			st := vmHealth()
 			now := time.Now().Unix()
@@ -206,6 +215,19 @@ func onMenubarReady() {
 			// Feed every reading (not just the ones that fit in the channel) to
 			// the transition machine, so edge detection never misses a change.
 			notif.observe(st, time.Now())
+			// Once the guest is up, check whether it's running an OLDER engine
+			// than this (possibly just-upgraded) menubar; if so, surface a
+			// user-gated "restart to apply". Checked once per session.
+			if st == vmHealthy && !engineChecked {
+				engineChecked = true
+				if engineUpgradeAvailable(version) {
+					notif.notifyEngineUpdate()
+					select {
+					case updateCh <- struct{}{}:
+					default:
+					}
+				}
+			}
 			select {
 			case healthCh <- st:
 			default:
@@ -219,6 +241,12 @@ func onMenubarReady() {
 			select {
 			case st := <-healthCh:
 				apply(st)
+			case <-updateCh:
+				mUpdate.Show() // an older engine is running; offer the restart
+			case <-mUpdate.ClickedCh:
+				mStatus.SetTitle("bladerunner: updating…")
+				mUpdate.Hide()
+				go runnerRun("upgrade") // graceful save/restore to the new engine
 			case <-mStart.ClickedCh:
 				triggerStart()
 			case <-mStop.ClickedCh:
@@ -254,6 +282,19 @@ func onMenubarReady() {
 			}
 		}
 	}()
+}
+
+// engineUpgradeAvailable reports whether the running VM (started by some prior
+// `br start`) is an OLDER build than this menubar (menubarVer) — i.e. a restart
+// would move the engine up to the current version. Returns false when the VM
+// isn't reachable or versions don't compare (dev/unknown), so it never nags
+// spuriously.
+func engineUpgradeAvailable(menubarVer string) bool {
+	serverVer, err := control.NewClient(config.DefaultStateDir()).ServerVersion()
+	if err != nil {
+		return false
+	}
+	return shouldStepDown(menubarVer, serverVer)
 }
 
 // webShellEnabled reports whether the Web/Shell menu items should be clickable

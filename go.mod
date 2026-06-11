@@ -5,6 +5,7 @@ go 1.25.6
 require (
 	fyne.io/systray v1.12.1
 	github.com/Code-Hex/vz/v3 v3.7.1
+	github.com/blang/semver/v4 v4.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/log v1.0.0
 	github.com/go-jose/go-jose/v4 v4.1.4
@@ -23,7 +24,6 @@ require (
 	github.com/Code-Hex/go-infinity-channel v1.0.0 // indirect
 	github.com/apex/log v1.9.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
-	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.2.3-0.20250311203215-f60798e515dc // indirect
 	github.com/charmbracelet/x/ansi v0.8.0 // indirect
