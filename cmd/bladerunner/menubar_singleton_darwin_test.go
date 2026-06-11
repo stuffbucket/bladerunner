@@ -24,10 +24,34 @@ func isolatedStateDir(t *testing.T) {
 	t.Setenv("BLADERUNNER_STATE_DIR", dir)
 }
 
+func noop() {}
+
+func TestShouldStepDown(t *testing.T) {
+	tests := []struct {
+		mine, theirs string
+		want         bool
+	}{
+		{"0.5.0", "0.4.7", true},   // newer -> take over
+		{"0.4.7", "0.5.0", false},  // older -> defer
+		{"0.4.7", "0.4.7", false},  // equal -> defer
+		{"v0.5.0", "v0.4.0", true}, // v-prefix tolerated
+		{"1.0.0", "0.9.9", true},
+		{"dev", "0.4.7", false}, // unknown launcher -> defer
+		{"0.5.0", "dev", false}, // unknown running -> defer
+		{"", "0.4.7", false},    // empty -> defer
+		{"0.4.7", "garbage", false},
+	}
+	for _, tt := range tests {
+		if got := shouldStepDown(tt.mine, tt.theirs); got != tt.want {
+			t.Errorf("shouldStepDown(%q,%q)=%v, want %v", tt.mine, tt.theirs, got, tt.want)
+		}
+	}
+}
+
 func TestAcquireMenubarLockFirstWins(t *testing.T) {
 	isolatedStateDir(t)
 
-	release, already := acquireMenubarLock(func() {})
+	release, already := acquireMenubarLock("1.0.0", noop, noop)
 	if already {
 		t.Fatal("first acquire reported already-running")
 	}
@@ -41,47 +65,101 @@ func TestAcquireMenubarLockFirstWins(t *testing.T) {
 	}
 }
 
-func TestAcquireMenubarLockSecondHandsOff(t *testing.T) {
+// A same-version second launch defers and asks the running instance to surface.
+func TestAcquireMenubarLockSameVersionDefers(t *testing.T) {
 	isolatedStateDir(t)
 
 	presented := make(chan struct{}, 1)
-	release, already := acquireMenubarLock(func() { presented <- struct{}{} })
+	release, already := acquireMenubarLock("1.0.0", func() { presented <- struct{}{} }, noop)
 	if already {
 		t.Fatal("first acquire reported already-running")
 	}
 	defer release()
 
-	// A second acquire must detect the first and hand off (already=true).
-	release2, already2 := acquireMenubarLock(func() { t.Error("second instance should not serve") })
+	release2, already2 := acquireMenubarLock("1.0.0", func() { t.Error("second should not serve") }, noop)
 	if !already2 {
-		t.Fatal("second acquire did not detect the running instance")
+		t.Fatal("same-version second acquire did not defer")
 	}
 	if release2 != nil {
-		t.Error("second acquire should return a nil release (it owns nothing)")
+		t.Error("deferring second acquire should return a nil release")
 	}
-
 	select {
 	case <-presented:
-		// good: the running instance was asked to surface.
 	case <-time.After(2 * time.Second):
 		t.Fatal("running instance never received the present handoff")
+	}
+}
+
+// An OLDER second launch defers to the newer running instance.
+func TestAcquireMenubarLockOlderDefers(t *testing.T) {
+	isolatedStateDir(t)
+
+	release, already := acquireMenubarLock("1.1.0", noop, func() { t.Error("newer instance must not step down for an older one") })
+	if already {
+		t.Fatal("first acquire reported already-running")
+	}
+	defer release()
+
+	release2, already2 := acquireMenubarLock("1.0.0", noop, noop)
+	if !already2 {
+		t.Fatal("older second acquire should defer")
+	}
+	if release2 != nil {
+		t.Error("deferring acquire should return nil release")
+	}
+	// Give any (erroneous) stepdown a moment to fire.
+	time.Sleep(150 * time.Millisecond)
+}
+
+// A NEWER second launch (an upgrade) makes the running instance step down and
+// takes over the socket.
+func TestAcquireMenubarLockNewerStepsDown(t *testing.T) {
+	isolatedStateDir(t)
+
+	var release1 func()
+	steppedDown := make(chan struct{}, 1)
+	r1, already := acquireMenubarLock("1.0.0", noop, func() {
+		release1() // a real instance would systray.Quit -> release on exit
+		steppedDown <- struct{}{}
+	})
+	if already {
+		t.Fatal("first acquire reported already-running")
+	}
+	release1 = r1
+
+	// Newer launch should take over (already=false) and own the socket.
+	release2, already2 := acquireMenubarLock("1.1.0", noop, noop)
+	if already2 {
+		t.Fatal("newer launch should take over, not defer")
+	}
+	if release2 == nil {
+		t.Fatal("newer launch should own the socket (non-nil release)")
+	}
+	defer release2()
+
+	select {
+	case <-steppedDown:
+	case <-time.After(3 * time.Second):
+		t.Fatal("running instance was never asked to step down")
+	}
+	if _, err := os.Stat(menubarSocketPath()); err != nil {
+		t.Errorf("new instance does not hold the socket: %v", err)
 	}
 }
 
 func TestAcquireMenubarLockReleaseAllowsReacquire(t *testing.T) {
 	isolatedStateDir(t)
 
-	release, already := acquireMenubarLock(func() {})
+	release, already := acquireMenubarLock("1.0.0", noop, noop)
 	if already {
 		t.Fatal("first acquire reported already-running")
 	}
 	release()
 
-	// The socket should be gone after release, so a fresh acquire wins again.
 	if _, err := os.Stat(menubarSocketPath()); !os.IsNotExist(err) {
 		t.Errorf("socket not removed on release: stat err = %v", err)
 	}
-	release2, already2 := acquireMenubarLock(func() {})
+	release2, already2 := acquireMenubarLock("1.0.0", noop, noop)
 	if already2 {
 		t.Fatal("re-acquire after release reported already-running")
 	}
@@ -92,12 +170,10 @@ func TestAcquireMenubarLockStaleSocket(t *testing.T) {
 	isolatedStateDir(t)
 
 	// Simulate a crashed instance: a socket file with no listener behind it.
-	path := menubarSocketPath()
-	if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
+	if err := os.WriteFile(menubarSocketPath(), []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	release, already := acquireMenubarLock(func() {})
+	release, already := acquireMenubarLock("1.0.0", noop, noop)
 	if already {
 		t.Fatal("a stale socket file should not look like a running instance")
 	}
