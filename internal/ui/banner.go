@@ -29,6 +29,13 @@ func Banner() string {
 	return renderBanner()
 }
 
+// BannerPlain returns the raw, ungradiented ASCII banner (no TTY gate, no
+// trailing newline) for renderers that apply their own styling — e.g. the macOS
+// splash, which draws it with a Core Animation gradient + shimmer.
+func BannerPlain() string {
+	return strings.TrimRight(bannerText, "\n")
+}
+
 // BannerWidth returns the column width of the widest banner line. The banner is
 // plain ASCII, so byte length equals column width.
 func BannerWidth() int {

@@ -1,13 +1,7 @@
 #import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 #import <UserNotifications/UserNotifications.h>
 #include "ui_bridge_darwin.h"
-
-// View tags so brShowSplash can find and update the icon/message subviews when
-// the panel already exists.
-enum {
-  kSplashIconTag = 1001,
-  kSplashLabelTag = 1002,
-};
 
 // The single splash window, retained for the process lifetime (reused across
 // show/hide). All access is on the main thread via runOnMain.
@@ -26,18 +20,58 @@ static void runOnMain(void (^block)(void)) {
   }
 }
 
-// buildSplashWindow constructs the borderless HUD panel once. Layout is fixed
-// (the content is tiny and static), so manual frames are simpler than
-// constraints here.
-static NSWindow *buildSplashWindow(void) {
-  NSRect frame = NSMakeRect(0, 0, 240, 150);
+// brandGradientColors is the purple->green ramp shared with the CLI banner.
+static NSArray *brandGradientColors(void) {
+  return @[
+    (id)[NSColor colorWithSRGBRed:0.541 green:0.361 blue:0.965 alpha:1].CGColor, // #8A5CF6
+    (id)[NSColor colorWithSRGBRed:0.345 green:0.396 blue:0.949 alpha:1].CGColor, // #5865F2
+    (id)[NSColor colorWithSRGBRed:0.231 green:0.510 blue:0.965 alpha:1].CGColor, // #3B82F6
+    (id)[NSColor colorWithSRGBRed:0.024 green:0.714 blue:0.831 alpha:1].CGColor, // #06B6D4
+    (id)[NSColor colorWithSRGBRed:0.063 green:0.725 blue:0.506 alpha:1].CGColor, // #10B981
+    (id)[NSColor colorWithSRGBRed:0.204 green:0.827 blue:0.600 alpha:1].CGColor, // #34D399
+  ];
+}
+
+// bannerMaskLayer builds a CATextLayer of the multi-line ASCII banner, used as
+// an alpha mask so a gradient only shows through the glyph pixels. White text =
+// opaque mask. A fresh instance is needed per gradient (a layer can't share a
+// mask).
+static CATextLayer *bannerMaskLayer(NSString *banner, NSFont *font, CGRect frame, CGFloat scale) {
+  CATextLayer *t = [CATextLayer layer];
+  t.string = banner;
+  t.font = (__bridge CFTypeRef)font;
+  t.fontSize = font.pointSize;
+  t.foregroundColor = NSColor.whiteColor.CGColor;
+  t.wrapped = YES;
+  t.alignmentMode = kCAAlignmentLeft;
+  t.frame = frame;
+  t.contentsScale = scale;
+  return t;
+}
+
+// buildSplashWindow constructs the borderless HUD once: the banner rendered in
+// the brand gradient with a left-to-right shimmer sweeping across the glyphs,
+// and a loading line beneath. Sized to the measured banner.
+static NSWindow *buildSplashWindow(NSString *banner) {
+  NSFont *mono = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightBold];
+  NSRect tb = [banner boundingRectWithSize:NSMakeSize(4000, 4000)
+                                   options:NSStringDrawingUsesLineFragmentOrigin
+                                attributes:@{NSFontAttributeName : mono}];
+  CGFloat textW = ceil(tb.size.width);
+  CGFloat textH = ceil(tb.size.height);
+
+  const CGFloat padX = 28, padTop = 22, gap = 12, loadingH = 18, padBottom = 16;
+  CGFloat W = textW + padX * 2;
+  CGFloat H = padTop + textH + gap + loadingH + padBottom;
+  NSRect frame = NSMakeRect(0, 0, W, H);
+
   NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
-                                             styleMask:NSWindowStyleMaskBorderless
-                                               backing:NSBackingStoreBuffered
-                                                 defer:NO];
+                                              styleMask:NSWindowStyleMaskBorderless
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
   win.level = NSFloatingWindowLevel;
   win.opaque = NO;
-  win.backgroundColor = [NSColor clearColor];
+  win.backgroundColor = NSColor.clearColor;
   win.hasShadow = YES;
   win.releasedWhenClosed = NO;
   // Show across Spaces and over fullscreen apps; never steal key focus (the
@@ -55,48 +89,71 @@ static NSWindow *buildSplashWindow(void) {
   bg.layer.masksToBounds = YES;
   win.contentView = bg;
 
-  NSImageView *icon = [[NSImageView alloc] initWithFrame:NSMakeRect(96, 78, 48, 48)];
-  icon.tag = kSplashIconTag;
-  icon.imageScaling = NSImageScaleProportionallyUpOrDown;
-  [bg addSubview:icon];
+  CGFloat scale = NSScreen.mainScreen.backingScaleFactor > 0
+                      ? NSScreen.mainScreen.backingScaleFactor
+                      : 2.0;
 
-  NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(12, 44, 216, 22)];
-  label.tag = kSplashLabelTag;
+  // Host layer positioned near the top (AppKit layers are y-up).
+  CALayer *host = [CALayer layer];
+  host.frame = CGRectMake(padX, H - padTop - textH, textW, textH);
+  [bg.layer addSublayer:host];
+  CGRect local = CGRectMake(0, 0, textW, textH);
+
+  // Base: the brand gradient, masked to the glyphs -> the colored "bladerunner".
+  CAGradientLayer *base = [CAGradientLayer layer];
+  base.frame = local;
+  base.colors = brandGradientColors();
+  base.startPoint = CGPointMake(0, 0.5);
+  base.endPoint = CGPointMake(1, 0.5);
+  base.mask = bannerMaskLayer(banner, mono, local, scale);
+  [host addSublayer:base];
+
+  // Shimmer: a bright band, masked to the same glyphs, whose stops animate
+  // left-to-right so a highlight sweeps across the figlet text.
+  CAGradientLayer *shine = [CAGradientLayer layer];
+  shine.frame = local;
+  shine.colors = @[
+    (id)[NSColor colorWithWhite:1 alpha:0].CGColor,
+    (id)[NSColor colorWithWhite:1 alpha:0.85].CGColor,
+    (id)[NSColor colorWithWhite:1 alpha:0].CGColor,
+  ];
+  shine.startPoint = CGPointMake(0, 0.5);
+  shine.endPoint = CGPointMake(1, 0.5);
+  shine.locations = @[ @0, @0.5, @1 ];
+  shine.mask = bannerMaskLayer(banner, mono, local, scale);
+  [host addSublayer:shine];
+
+  CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:@"locations"];
+  anim.fromValue = @[ @(-0.5), @(-0.25), @0 ];
+  anim.toValue = @[ @1.0, @1.25, @1.5 ];
+  anim.duration = 1.7;
+  anim.repeatCount = HUGE_VALF;
+  anim.timingFunction =
+      [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+  [shine addAnimation:anim forKey:@"shimmer"];
+
+  // Loading line beneath the banner.
+  NSTextField *label =
+      [[NSTextField alloc] initWithFrame:NSMakeRect(padX, padBottom, textW, loadingH)];
   label.editable = NO;
   label.selectable = NO;
   label.bezeled = NO;
   label.bordered = NO;
   label.drawsBackground = NO;
   label.alignment = NSTextAlignmentCenter;
-  label.textColor = [NSColor labelColor];
-  label.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-  label.stringValue = @"bladerunner is starting…";
+  label.textColor = NSColor.secondaryLabelColor;
+  label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+  label.stringValue = @"starting up…";
   [bg addSubview:label];
-
-  NSProgressIndicator *spinner =
-      [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(112, 16, 16, 16)];
-  spinner.style = NSProgressIndicatorStyleSpinning;
-  spinner.indeterminate = YES;
-  [spinner startAnimation:nil];
-  [bg addSubview:spinner];
 
   return win;
 }
 
-void brShowSplash(const void *iconData, int iconLen) {
-  // Copy the icon bytes into an NSData synchronously (before the async hop) so
-  // the Go caller can free its buffer the moment this returns.
-  NSData *icon = (iconData && iconLen > 0)
-                     ? [NSData dataWithBytes:iconData length:(NSUInteger)iconLen]
-                     : nil;
+void brShowSplash(const char *banner) {
+  NSString *b = banner ? [NSString stringWithUTF8String:banner] : @"";
   runOnMain(^{
     if (gSplashWindow == nil) {
-      gSplashWindow = buildSplashWindow();
-    }
-    if (icon != nil) {
-      NSImage *img = [[NSImage alloc] initWithData:icon];
-      NSView *content = gSplashWindow.contentView;
-      ((NSImageView *)[content viewWithTag:kSplashIconTag]).image = img;
+      gSplashWindow = buildSplashWindow(b);
     }
     [gSplashWindow center];
     [gSplashWindow orderFrontRegardless];
