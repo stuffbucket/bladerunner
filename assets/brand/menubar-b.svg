@@ -1,7 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
-  <g transform="translate(6 0) skewX(-13)">
-    <path fill="#000" fill-rule="evenodd" d="
-      M 11 4 h 8 v 13.0 a 12.5 12.5 0 1 1 0 11.4 V 40 h -8 Z
-      M 18.4 23.4 a 6.1 6.1 0 1 0 12.2 0 a 6.1 6.1 0 1 0 -12.2 0 Z"/>
+  <!-- Bold slanted 'b' matching the dock monogram, drawn in black: the Go
+       menubar uses this as an alpha mask and tints it by VM state. -->
+  <g transform="translate(22 26) skewX(-8) translate(-22 -26)">
+    <text x="22" y="38" text-anchor="middle"
+          font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+          font-weight="800" font-size="46" fill="#000">b</text>
   </g>
 </svg>
