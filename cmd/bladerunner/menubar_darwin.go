@@ -154,9 +154,10 @@ func onMenubarReady() {
 	splash := defaultSplash()
 	notif := newVMNotifier(defaultNotifier(), splash)
 
-	// When a second launch hands off (see acquireMenubarLock), re-surface this
-	// instance by re-showing the splash.
-	setMenubarPresentHandler(splash.Show)
+	// When a second launch hands off (see acquireMenubarLock), re-surface the
+	// splash only if a start is in progress — never strand a "starting" splash
+	// over an already-running VM.
+	setMenubarPresentHandler(notif.onPresent)
 
 	// triggerStart boots the VM the same way the Start item does — show the
 	// splash + arm the notify machine, then launch `br start` detached. The

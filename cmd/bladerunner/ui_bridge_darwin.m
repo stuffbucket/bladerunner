@@ -53,14 +53,14 @@ static CATextLayer *bannerMaskLayer(NSString *banner, NSFont *font, CGRect frame
 // the brand gradient with a left-to-right shimmer sweeping across the glyphs,
 // and a loading line beneath. Sized to the measured banner.
 static NSWindow *buildSplashWindow(NSString *banner) {
-  NSFont *mono = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightBold];
-  NSRect tb = [banner boundingRectWithSize:NSMakeSize(4000, 4000)
+  NSFont *mono = [NSFont monospacedSystemFontOfSize:19 weight:NSFontWeightBold];
+  NSRect tb = [banner boundingRectWithSize:NSMakeSize(8000, 8000)
                                    options:NSStringDrawingUsesLineFragmentOrigin
                                 attributes:@{NSFontAttributeName : mono}];
   CGFloat textW = ceil(tb.size.width);
   CGFloat textH = ceil(tb.size.height);
 
-  const CGFloat padX = 28, padTop = 22, gap = 12, loadingH = 18, padBottom = 16;
+  const CGFloat padX = 64, padTop = 44, gap = 28, loadingH = 22, padBottom = 38;
   CGFloat W = textW + padX * 2;
   CGFloat H = padTop + textH + gap + loadingH + padBottom;
   NSRect frame = NSMakeRect(0, 0, W, H);
@@ -80,12 +80,12 @@ static NSWindow *buildSplashWindow(NSString *banner) {
                            NSWindowCollectionBehaviorFullScreenAuxiliary;
   win.ignoresMouseEvents = YES;
 
-  NSVisualEffectView *bg = [[NSVisualEffectView alloc] initWithFrame:frame];
-  bg.material = NSVisualEffectMaterialHUDWindow;
-  bg.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-  bg.state = NSVisualEffectStateActive;
+  // Solid near-black panel (matching the brand's dark squircle), rounded.
+  NSView *bg = [[NSView alloc] initWithFrame:frame];
   bg.wantsLayer = YES;
-  bg.layer.cornerRadius = 16.0;
+  bg.layer.backgroundColor =
+      [NSColor colorWithSRGBRed:0.043 green:0.059 blue:0.078 alpha:1.0].CGColor; // #0B0F14
+  bg.layer.cornerRadius = 22.0;
   bg.layer.masksToBounds = YES;
   win.contentView = bg;
 
@@ -93,9 +93,9 @@ static NSWindow *buildSplashWindow(NSString *banner) {
                       ? NSScreen.mainScreen.backingScaleFactor
                       : 2.0;
 
-  // Host layer positioned near the top (AppKit layers are y-up).
+  // Banner host layer, centered horizontally, near the top (layers are y-up).
   CALayer *host = [CALayer layer];
-  host.frame = CGRectMake(padX, H - padTop - textH, textW, textH);
+  host.frame = CGRectMake((W - textW) / 2.0, H - padTop - textH, textW, textH);
   [bg.layer addSublayer:host];
   CGRect local = CGRectMake(0, 0, textW, textH);
 
@@ -132,18 +132,18 @@ static NSWindow *buildSplashWindow(NSString *banner) {
       [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
   [shine addAnimation:anim forKey:@"shimmer"];
 
-  // Loading line beneath the banner.
+  // Loading line beneath the banner, centered across the full width.
   NSTextField *label =
-      [[NSTextField alloc] initWithFrame:NSMakeRect(padX, padBottom, textW, loadingH)];
+      [[NSTextField alloc] initWithFrame:NSMakeRect(0, padBottom, W, loadingH)];
   label.editable = NO;
   label.selectable = NO;
   label.bezeled = NO;
   label.bordered = NO;
   label.drawsBackground = NO;
   label.alignment = NSTextAlignmentCenter;
-  label.textColor = NSColor.secondaryLabelColor;
-  label.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
-  label.stringValue = @"starting up…";
+  label.textColor = [NSColor colorWithWhite:0.92 alpha:1.0];
+  label.font = [NSFont systemFontOfSize:15 weight:NSFontWeightRegular];
+  label.stringValue = @"Starting…";
   [bg addSubview:label];
 
   return win;

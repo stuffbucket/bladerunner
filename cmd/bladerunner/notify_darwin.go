@@ -117,8 +117,24 @@ type vmNotifier struct {
 	pending        vmState
 	pendingCount   int
 	expectingStart bool
+	splashUp       bool // the starting splash is currently shown
 	lastStartAt    time.Time
 	lastNotifyAt   time.Time
+}
+
+// showSplash/hideSplash track visibility so the splash is shown/hidden at most
+// once per episode and a healthy guest can idempotently clear it. Callers hold
+// m.mu.
+func (m *vmNotifier) showSplash() {
+	m.splashUp = true
+	m.splash.Show()
+}
+
+func (m *vmNotifier) hideSplash() {
+	if m.splashUp {
+		m.splashUp = false
+		m.splash.Hide()
+	}
 }
 
 func newVMNotifier(n notifier, splash splashController) *vmNotifier {
@@ -135,10 +151,22 @@ func newVMNotifier(n notifier, splash splashController) *vmNotifier {
 // so wedged/unknown readings are suppressed during boot, and shows the splash.
 func (m *vmNotifier) onStart(now time.Time) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.expectingStart = true
 	m.lastStartAt = now
-	m.mu.Unlock()
-	m.splash.Show()
+	m.showSplash()
+}
+
+// onPresent handles a second-launch handoff. It re-surfaces the starting splash
+// ONLY while a start is actually in progress; showing the "starting" splash over
+// an already-running VM would strand it on screen (no transition is coming to
+// hide it). When idle/healthy a second launch is a quiet no-op.
+func (m *vmNotifier) onPresent() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.expectingStart {
+		m.showSplash()
+	}
 }
 
 // onWake emits the one-shot "reconnecting after sleep" banner when the poll loop
@@ -159,6 +187,15 @@ func (m *vmNotifier) observe(st vmState, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// A healthy guest must always clear the starting splash, regardless of how it
+	// was shown (Start click, start policy, or a second-launch handoff) or
+	// whether this is a real transition — otherwise a splash shown over an
+	// already-running VM would be stranded. Idempotent via the splashUp guard.
+	if st == vmHealthy {
+		m.expectingStart = false
+		m.hideSplash()
+	}
+
 	// vmUnknown holds: never notify, never commit, and break any wedged streak.
 	if st == vmUnknown {
 		m.pending = vmUnknown
@@ -169,12 +206,6 @@ func (m *vmNotifier) observe(st vmState, now time.Time) {
 	if !m.seeded {
 		m.last = st
 		m.seeded = true
-		if st == vmHealthy {
-			// Already up at launch (e.g. menubar started at login over a running
-			// VM): nothing to announce, just make sure no stale splash lingers.
-			m.expectingStart = false
-			m.splash.Hide()
-		}
 		return
 	}
 
@@ -185,10 +216,6 @@ func (m *vmNotifier) observe(st vmState, now time.Time) {
 
 	prev := m.last
 	m.last = commit
-	if commit == vmHealthy {
-		m.expectingStart = false
-		m.splash.Hide()
-	}
 
 	body, notify := transitionBody(prev, commit)
 	if !notify || m.rateLimited(now) {

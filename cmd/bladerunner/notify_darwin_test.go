@@ -44,13 +44,42 @@ func (h *harness) at(d time.Duration) time.Time { return h.t0.Add(d) }
 
 func TestNotifySeedNoBanner(t *testing.T) {
 	h := newHarness()
-	// First reading seeds state; nothing should fire even if it's healthy.
+	// First reading seeds state; nothing should fire even if it's healthy. No
+	// splash was shown, so nothing to hide either.
 	h.m.observe(vmHealthy, h.at(0))
 	if len(h.n.bodies) != 0 {
 		t.Errorf("seed emitted banners: %v", h.n.bodies)
 	}
-	if h.sp.hides == 0 {
-		t.Error("seeding on an already-healthy VM should hide any stale splash")
+	if h.sp.shows != 0 {
+		t.Errorf("seed should not show a splash, shows=%d", h.sp.shows)
+	}
+}
+
+// Regression: a second-launch handoff must NOT show the starting splash when no
+// start is in progress (else it strands over an already-running VM); and once a
+// healthy guest is observed, any splash is cleared no matter how it was shown.
+func TestNotifyPresentDoesNotStrandSplash(t *testing.T) {
+	h := newHarness()
+	h.m.observe(vmHealthy, h.at(0)) // seed: VM already up at launch
+
+	// A handoff while idle/healthy: no splash.
+	h.m.onPresent()
+	if h.sp.shows != 0 {
+		t.Fatalf("onPresent over a running VM showed a splash (shows=%d)", h.sp.shows)
+	}
+
+	// During a start, a handoff re-shows the splash...
+	h.m.onStart(h.at(10 * time.Second))
+	h.m.onPresent()
+	if h.sp.shows < 1 {
+		t.Fatalf("onPresent during start should show the splash, shows=%d", h.sp.shows)
+	}
+	// ...and a healthy reading clears it even though there's no committed
+	// stopped->healthy transition (state was seeded healthy).
+	hidesBefore := h.sp.hides
+	h.m.observe(vmHealthy, h.at(30*time.Second))
+	if h.sp.hides <= hidesBefore {
+		t.Errorf("healthy observation must clear the splash (hides %d -> %d)", hidesBefore, h.sp.hides)
 	}
 }
 

@@ -3,6 +3,8 @@
 package main
 
 import (
+	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -12,6 +14,32 @@ import (
 
 	"github.com/stuffbucket/bladerunner/internal/config"
 )
+
+// Atkinson Hyperlegible (Braille Institute, SIL OFL 1.1) — a low-vision font
+// chosen for the settings UI. SF Pro isn't dependable inside the WKWebView and
+// isn't web-embeddable, so the latin subset (regular + bold) is embedded and
+// served as a data: @font-face, making it available regardless of the host.
+//
+//go:embed assets/fonts/AtkinsonHyperlegible-Regular.woff2
+var ahRegularWOFF2 []byte
+
+//go:embed assets/fonts/AtkinsonHyperlegible-Bold.woff2
+var ahBoldWOFF2 []byte
+
+// Atkinson ships only regular (400) and bold (700) faces.
+const (
+	fontWeightRegular = 400
+	fontWeightBold    = 700
+)
+
+// fontFaceCSS emits @font-face rules embedding the font as base64 data URIs.
+func fontFaceCSS() string {
+	enc := base64.StdEncoding
+	const tmpl = "@font-face{font-family:'Atkinson Hyperlegible';font-style:normal;" +
+		"font-weight:%d;font-display:swap;src:url(data:font/woff2;base64,%s) format('woff2');}"
+	return fmt.Sprintf(tmpl, fontWeightRegular, enc.EncodeToString(ahRegularWOFF2)) +
+		fmt.Sprintf(tmpl, fontWeightBold, enc.EncodeToString(ahBoldWOFF2))
+}
 
 // The settings window is a thin WKWebView renderer over the type-safe
 // config.Settings model. The labor-intensive, error-prone parts — laying out
@@ -173,7 +201,7 @@ func applySettingsForm(rawJSON, stateDir string, vmRunning bool) settingsSaveOut
 	}
 
 	if settingsRequiresRestart(base, updated) && vmRunning {
-		return settingsSaveOutcome{Message: "Saved. Restart the VM (menu ▸ Restart VM) to apply."}
+		return settingsSaveOutcome{Message: "Saved. Restart the VM (menu › Restart VM) to apply."}
 	}
 	return settingsSaveOutcome{Close: true}
 }
@@ -207,91 +235,173 @@ func option(value, label, cur string) string {
 // On Save it posts a JSON object of field→value to the native message handler
 // named "bladerunner"; the conditional rows (bridge iface, image url/path) are
 // shown/hidden by tiny inline JS keyed off the relevant selects.
+// selectCtl renders a styled <select> control with the given options
+// (value,label pairs); cur marks the selected one.
+func selectCtl(name, id, onchange, cur string, opts [][2]string) string {
+	attrs := `class="ctl" name="` + name + `"`
+	if id != "" {
+		attrs += ` id="` + id + `"`
+	}
+	if onchange != "" {
+		attrs += ` onchange="` + onchange + `"`
+	}
+	var b strings.Builder
+	b.WriteString("<select " + attrs + ">")
+	for _, o := range opts {
+		b.WriteString(option(o[0], o[1], cur))
+	}
+	b.WriteString("</select>")
+	return b.String()
+}
+
+// srow renders one settings row inside a card: a label on the left and a control
+// on the right. A non-empty id lets the conditional-visibility JS hide the row.
+func srow(id, label, control string) string {
+	idAttr := ""
+	if id != "" {
+		idAttr = ` id="` + id + `"`
+	}
+	return `<div class="row"` + idAttr + `><span class="lbl">` + label + `</span>` + control + `</div>`
+}
+
 func settingsFormHTML(s config.Settings) string {
 	v := valuesFromSettings(s)
 	esc := func(key string) string { return html.EscapeString(v[key]) }
+	numCtl := func(name string, minVal int, key string) string {
+		return fmt.Sprintf(`<input class="ctl" type="number" min="%d" name=%q value=%q>`, minVal, name, esc(key))
+	}
+	textCtl := func(name, key string) string {
+		return fmt.Sprintf(`<input class="ctl" type="text" name=%q value=%q>`, name, esc(key))
+	}
 
 	var b strings.Builder
-	b.WriteString(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>`)
+	b.WriteString(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><style>`)
+	b.WriteString(fontFaceCSS())
 	b.WriteString(settingsCSS)
 	b.WriteString(`</style></head><body><form id="f">`)
-	b.WriteString(`<h1>Bladerunner Settings</h1>`)
+
+	// Brand header (the native title bar already says "Bladerunner Settings").
+	b.WriteString(`<header class="head"><span class="mark"><b>br</b></span>` +
+		`<span class="ht"><span class="title">Bladerunner</span>` +
+		`<span class="sub">Virtual machine settings</span></span></header>`)
 
 	// General.
-	b.WriteString(`<section><h2>General</h2>`)
-	b.WriteString(`<label>Start policy<select name="` + fStartPolicy + `">`)
-	b.WriteString(option(string(config.StartManual), "Manual (start only when I ask)", v[fStartPolicy]))
-	b.WriteString(option(string(config.StartOnLaunch), "Start when the menubar launches", v[fStartPolicy]))
-	b.WriteString(option(string(config.StartOnFirstAction), "Start on first Web/Shell action", v[fStartPolicy]))
-	b.WriteString(`</select></label></section>`)
+	b.WriteString(`<div class="group"><div class="group-title">General</div><div class="card">`)
+	b.WriteString(srow("", "Start policy", selectCtl(fStartPolicy, "", "", v[fStartPolicy], [][2]string{
+		{string(config.StartManual), "Manual — only when I ask"},
+		{string(config.StartOnLaunch), "When the menu-bar app launches"},
+		{string(config.StartOnFirstAction), "On first Web/Shell action"},
+	})))
+	b.WriteString(`</div></div>`)
 
 	// Resources.
-	b.WriteString(`<section><h2>Resources</h2>`)
-	fmt.Fprintf(&b, `<label>CPUs<input type="number" min="1" name=%q value=%q></label>`, fCPUs, esc(fCPUs))
-	fmt.Fprintf(&b, `<label>Memory (GiB)<input type="number" min="2" name=%q value=%q></label>`, fMemoryGiB, esc(fMemoryGiB))
-	fmt.Fprintf(&b, `<label>Disk (GiB)<input type="number" min="%d" name=%q value=%q></label>`, config.MinDiskSizeGiB, fDiskSizeGiB, esc(fDiskSizeGiB))
-	b.WriteString(`</section>`)
+	b.WriteString(`<div class="group"><div class="group-title">Resources</div><div class="card">`)
+	b.WriteString(srow("", "CPUs", numCtl(fCPUs, 1, fCPUs)))
+	b.WriteString(srow("", "Memory (GiB)", numCtl(fMemoryGiB, 2, fMemoryGiB)))
+	b.WriteString(srow("", "Disk (GiB)", numCtl(fDiskSizeGiB, config.MinDiskSizeGiB, fDiskSizeGiB)))
+	b.WriteString(`</div></div>`)
 
 	// Network.
-	b.WriteString(`<section><h2>Network</h2>`)
-	b.WriteString(`<label>Mode<select id="net" name="` + fNetworkMode + `" onchange="sync()">`)
-	b.WriteString(option(string(config.NetSettingShared), "Shared (NAT)", v[fNetworkMode]))
-	b.WriteString(option(string(config.NetSettingBridged), "Bridged", v[fNetworkMode]))
-	b.WriteString(`</select></label>`)
-	fmt.Fprintf(&b, `<label id="bridgeRow">Bridge interface<input type="text" name=%q value=%q></label>`, fBridgeIface, esc(fBridgeIface))
-	b.WriteString(`</section>`)
+	b.WriteString(`<div class="group"><div class="group-title">Network</div><div class="card">`)
+	b.WriteString(srow("", "Mode", selectCtl(fNetworkMode, "net", "sync()", v[fNetworkMode], [][2]string{
+		{string(config.NetSettingShared), "Shared (NAT)"},
+		{string(config.NetSettingBridged), "Bridged"},
+	})))
+	b.WriteString(srow("bridgeRow", "Bridge interface", textCtl(fBridgeIface, fBridgeIface)))
+	b.WriteString(`</div></div>`)
 
-	// Auth.
-	b.WriteString(`<section><h2>Authentication</h2>`)
-	b.WriteString(`<label>Mode<select name="` + fAuthMode + `">`)
-	b.WriteString(option(string(config.AuthSettingOIDC), "OIDC (single sign-on)", v[fAuthMode]))
-	b.WriteString(option(string(config.AuthSettingCert), "Client certificate (mTLS)", v[fAuthMode]))
-	b.WriteString(`</select></label></section>`)
+	// Authentication.
+	b.WriteString(`<div class="group"><div class="group-title">Authentication</div><div class="card">`)
+	b.WriteString(srow("", "Mode", selectCtl(fAuthMode, "", "", v[fAuthMode], [][2]string{
+		{string(config.AuthSettingOIDC), "OIDC (single sign-on)"},
+		{string(config.AuthSettingCert), "Client certificate (mTLS)"},
+	})))
+	b.WriteString(`</div></div>`)
 
 	// Advanced.
-	b.WriteString(`<section><h2>Advanced</h2>`)
-	b.WriteString(`<label>Base image<select id="img" name="` + fImageKind + `" onchange="sync()">`)
-	b.WriteString(option(string(config.ImageDebian), "Debian Trixie (pinned)", v[fImageKind]))
-	b.WriteString(option(string(config.ImageHosted), "Pre-baked hosted image", v[fImageKind]))
-	b.WriteString(option(string(config.ImageCustomURL), "Custom URL", v[fImageKind]))
-	b.WriteString(option(string(config.ImageLocalPath), "Local path", v[fImageKind]))
-	b.WriteString(`</select></label>`)
-	fmt.Fprintf(&b, `<label id="urlRow">Image URL<input type="text" name=%q value=%q></label>`, fImageURL, esc(fImageURL))
-	fmt.Fprintf(&b, `<label id="pathRow">Image path<input type="text" name=%q value=%q></label>`, fImagePath, esc(fImagePath))
-	b.WriteString(`<label>Nested virtualization<select name="` + fNestedVirt + `">`)
-	b.WriteString(option(string(config.NestedAuto), "Auto (enable where supported)", v[fNestedVirt]))
-	b.WriteString(option(string(config.NestedDisabled), "Disabled", v[fNestedVirt]))
-	b.WriteString(`</select></label>`)
+	b.WriteString(`<div class="group"><div class="group-title">Advanced</div><div class="card">`)
+	b.WriteString(srow("", "Base image", selectCtl(fImageKind, "img", "sync()", v[fImageKind], [][2]string{
+		{string(config.ImageDebian), "Debian Trixie (pinned)"},
+		{string(config.ImageHosted), "Pre-baked hosted image"},
+		{string(config.ImageCustomURL), "Custom URL"},
+		{string(config.ImageLocalPath), "Local path"},
+	})))
+	b.WriteString(srow("urlRow", "Image URL", textCtl(fImageURL, fImageURL)))
+	b.WriteString(srow("pathRow", "Image path", textCtl(fImagePath, fImagePath)))
+	b.WriteString(srow("", "Nested virtualization", selectCtl(fNestedVirt, "", "", v[fNestedVirt], [][2]string{
+		{string(config.NestedAuto), "Auto (where supported)"},
+		{string(config.NestedDisabled), "Disabled"},
+	})))
 	checked := ""
 	if v[fUseGuestAgent] == "true" {
 		checked = " checked"
 	}
-	fmt.Fprintf(&b, `<label class="cb"><input type="checkbox" name=%q%s>Use in-guest agent for boot config</label>`, fUseGuestAgent, checked)
-	fmt.Fprintf(&b, `<label>Wait for Incus (e.g. 10m)<input type="text" name=%q value=%q></label>`, fWaitForIncus, esc(fWaitForIncus))
-	b.WriteString(`</section>`)
+	b.WriteString(srow("", "In-guest boot agent",
+		fmt.Sprintf(`<input class="sw" type="checkbox" name=%q%s>`, fUseGuestAgent, checked)))
+	b.WriteString(srow("", "Wait for Incus", textCtl(fWaitForIncus, fWaitForIncus)))
+	b.WriteString(`</div></div>`)
 
-	b.WriteString(`<div id="err" class="err"></div>`)
-	b.WriteString(`<div class="actions"><button type="button" onclick="save()">Save</button></div>`)
+	b.WriteString(`<footer class="actions"><span id="err" class="err"></span>` +
+		`<button type="button" class="primary" onclick="save()">Save</button></footer>`)
 	b.WriteString(`</form><script>`)
 	b.WriteString(settingsJS)
 	b.WriteString(`</script></body></html>`)
 	return b.String()
 }
 
-// settingsCSS styles the form to feel native and respect light/dark mode.
+// settingsCSS styles the form as a native macOS System Settings-style panel:
+// grouped rounded cards, SF system type, a single brand accent, dark theme.
 const settingsCSS = `
-:root { color-scheme: light dark; }
-body { font: -apple-system-body, system-ui; margin: 0; padding: 16px 20px; }
-h1 { font-size: 17px; margin: 0 0 12px; }
-h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; opacity: .6; margin: 16px 0 6px; }
-section { margin-bottom: 6px; }
-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 13px; }
-label.cb { justify-content: flex-start; gap: 8px; }
-input[type=text], input[type=number], select { width: 220px; font-size: 13px; }
-input[type=checkbox] { width: auto; }
-.actions { margin-top: 14px; text-align: right; }
-button { font-size: 13px; padding: 4px 14px; }
-.err { color: #d33; font-size: 12px; min-height: 16px; margin-top: 8px; white-space: pre-wrap; }
+:root{
+  color-scheme: dark;
+  --bg:#1c1c1e; --card:rgba(255,255,255,.055); --line:rgba(255,255,255,.09);
+  --text:#f2f2f7; --muted:#9b9ba1; --field:rgba(255,255,255,.06);
+  --field-line:rgba(255,255,255,.14); --accent:#8a5cf6;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:'Atkinson Hyperlegible',-apple-system,sans-serif;
+  font-size:13px; line-height:1.3; padding:20px 22px 18px;
+  -webkit-font-smoothing:antialiased;
+}
+.head{display:flex; align-items:center; gap:11px; margin:0 0 20px;}
+.mark{width:32px; height:32px; border-radius:8px; background:#0b0f14;
+  display:flex; align-items:center; justify-content:center;
+  box-shadow:0 1px 2px rgba(0,0,0,.4), inset 0 0 0 .5px rgba(255,255,255,.07);}
+.mark b{font-size:16px; font-weight:700; font-style:italic; letter-spacing:-1px;
+  background:linear-gradient(105deg,#8a5cf6,#3b82f6,#06b6d4,#34d399);
+  -webkit-background-clip:text; background-clip:text; color:transparent;}
+.ht{display:flex; flex-direction:column; line-height:1.25;}
+.ht .title{font-size:15px; font-weight:700;}
+.ht .sub{font-size:11.5px; color:var(--muted);}
+.group{margin-bottom:17px;}
+.group-title{font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;
+  color:var(--muted); margin:0 0 7px 12px;}
+.card{background:var(--card); border-radius:11px; overflow:hidden;
+  box-shadow:inset 0 0 0 .5px var(--line);}
+.row{display:flex; align-items:center; justify-content:space-between; gap:16px;
+  min-height:40px; padding:7px 14px; border-top:.5px solid var(--line);}
+.card .row:first-child{border-top:0;}
+.lbl{color:var(--text); white-space:nowrap;}
+.ctl{width:240px; flex:0 0 240px; font:inherit; color:var(--text);
+  background:var(--field); border:.5px solid var(--field-line); border-radius:6px;
+  padding:5px 9px; transition:border-color .12s, box-shadow .12s;}
+select.ctl{-webkit-appearance:none; appearance:none; padding-right:26px; cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239b9ba1' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:right 9px center;}
+.ctl:focus{outline:none; border-color:var(--accent);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 32%, transparent);}
+.sw{width:16px; height:16px; accent-color:var(--accent); cursor:pointer;}
+.actions{display:flex; align-items:center; justify-content:flex-end; gap:14px; margin-top:18px;}
+.err{flex:1 1 auto; min-height:16px; font-size:12px; color:#ff7a7a; white-space:pre-wrap;}
+.err.ok{color:#46d39a;}
+button.primary{font:inherit; font-weight:700; color:#fff; background:var(--accent);
+  border:0; border-radius:7px; padding:6px 18px; cursor:pointer;
+  transition:filter .12s, transform .04s;}
+button.primary:hover{filter:brightness(1.09);}
+button.primary:active{transform:translateY(.5px); filter:brightness(.94);}
 `
 
 // settingsJS shows/hides the conditional rows and posts the form as JSON.
