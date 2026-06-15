@@ -280,10 +280,9 @@ func settingsFormHTML(s config.Settings) string {
 	b.WriteString(settingsCSS)
 	b.WriteString(`</style></head><body><form id="f">`)
 
-	// Brand header (the native title bar already says "Bladerunner Settings").
-	b.WriteString(`<header class="head"><span class="mark"><b>br</b></span>` +
-		`<span class="ht"><span class="title">Bladerunner</span>` +
-		`<span class="sub">Virtual machine settings</span></span></header>`)
+	// No in-page title: the native window title bar already says "Bladerunner
+	// Settings", and macOS System Settings panes don't repeat their own name.
+	// Straight into the grouped cards.
 
 	// General.
 	b.WriteString(`<div class="group"><div class="group-title">General</div><div class="card">`)
@@ -356,7 +355,7 @@ const settingsCSS = `
   color-scheme: dark;
   --bg:#1c1c1e; --card:rgba(255,255,255,.055); --line:rgba(255,255,255,.09);
   --text:#f2f2f7; --muted:#9b9ba1; --field:rgba(255,255,255,.06);
-  --field-line:rgba(255,255,255,.14); --accent:#8a5cf6;
+  --field-line:rgba(255,255,255,.14); --accent:#b14fff;
 }
 *{box-sizing:border-box;}
 html,body{margin:0;}
@@ -371,7 +370,7 @@ body{
   display:flex; align-items:center; justify-content:center;
   box-shadow:0 1px 2px rgba(0,0,0,.4), inset 0 0 0 .5px rgba(255,255,255,.07);}
 .mark b{font-size:16px; font-weight:700; font-style:italic; letter-spacing:-1px;
-  background:linear-gradient(105deg,#8a5cf6,#3b82f6,#06b6d4,#34d399);
+  background:linear-gradient(105deg,#b14fff,#22d3ee,#ff4fd8,#ff6fa3);
   -webkit-background-clip:text; background-clip:text; color:transparent;}
 .ht{display:flex; flex-direction:column; line-height:1.25;}
 .ht .title{font-size:15px; font-weight:700;}

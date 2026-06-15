@@ -27,9 +27,15 @@ const splashMaxVisible = 5 * time.Minute
 // by the Objective-C bridge. It is driven by the notification state machine
 // (Show on Start, Hide on the first healthy edge). All AppKit work happens on
 // the main thread inside the bridge (see runOnMain in ui_bridge_darwin.m).
+// splashMinVisible guarantees the splash stays up long enough to be seen and to
+// let the one-shot shimmer (which begins 1s in) play out, even if the VM goes
+// healthy almost immediately.
+const splashMinVisible = 3 * time.Second
+
 type cgoSplash struct {
-	mu    sync.Mutex
-	timer *time.Timer
+	mu      sync.Mutex
+	timer   *time.Timer // safety auto-dismiss
+	shownAt time.Time
 }
 
 // defaultSplash returns the real cgo splash window. (Overrides the no-op stub
@@ -45,6 +51,7 @@ func (s *cgoSplash) Show() {
 
 	// (Re)arm the safety auto-dismiss so a failed boot can't leave it stuck.
 	s.mu.Lock()
+	s.shownAt = time.Now()
 	if s.timer != nil {
 		s.timer.Stop()
 	}
@@ -58,7 +65,15 @@ func (s *cgoSplash) Hide() {
 		s.timer.Stop()
 		s.timer = nil
 	}
+	// Enforce the minimum on-screen time: if the splash has been up for less
+	// than splashMinVisible, defer the actual hide so a fast boot doesn't make it
+	// flash by before the shimmer plays.
+	remaining := splashMinVisible - time.Since(s.shownAt)
 	s.mu.Unlock()
+	if remaining > 0 {
+		time.AfterFunc(remaining, func() { C.brHideSplash() })
+		return
+	}
 	C.brHideSplash()
 }
 
