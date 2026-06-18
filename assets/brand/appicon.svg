@@ -1,6 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+    <!-- Brand vaporwave ramp, spanning the mark left->right in its local
+         (pre-transform) coordinate space so each slash picks up a different
+         band of the ramp: violet -> ice-cyan -> magenta -> pink. -->
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="69" y2="0">
       <stop offset="0" stop-color="#B14FFF"/>
       <stop offset="0.2" stop-color="#6E5BFF"/>
       <stop offset="0.4" stop-color="#2BD4FF"/>
@@ -10,12 +13,13 @@
     </linearGradient>
   </defs>
   <rect width="1024" height="1024" rx="229" fill="#0B0F14"/>
-  <!-- Clean bold 'br' monogram, slightly slanted to echo the brand's slant
-       motif, in the brand's vaporwave gradient. Legible at every icon size. -->
-  <g transform="translate(512 560) skewX(-8) translate(-512 -560)">
-    <text x="512" y="742" text-anchor="middle"
-          font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
-          font-weight="800" font-size="620" letter-spacing="-8"
-          fill="url(#g)">br</text>
+  <!-- Four forward-leaning slashes (motion lines): action / machinery /
+       digital / forward-motion. Geometry from the source mark (viewBox 69x48),
+       centered and scaled into the icon's safe area. -->
+  <g transform="translate(191 289) scale(9.3)" fill="url(#g)">
+    <path d="M19.038 0H22L2.96203 48H0L19.038 0Z"/>
+    <path d="M26.038 0H33L13.962 48H7L26.038 0Z"/>
+    <path d="M37 0H48.9998L29.9618 48H17.962L37 0Z"/>
+    <path d="M52.5 0H69.0001L49.9621 48H33.462L52.5 0Z"/>
   </g>
 </svg>
