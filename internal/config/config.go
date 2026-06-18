@@ -31,6 +31,7 @@ const (
 	// Port assignments (avoid conflicts with common services)
 	DefaultLocalSSHPort  = 6022
 	DefaultLocalAPIPort  = 18443
+	DefaultLocalWebPort  = 18444
 	DefaultLocalOIDCPort = 15556
 	DefaultVsockSSHPort  = 10022
 	DefaultVsockAPIPort  = 18443
@@ -138,6 +139,7 @@ type Config struct {
 	TrustPassword           string
 	LocalSSHPort            int
 	LocalAPIPort            int
+	LocalWebPort            int
 	LocalOIDCPort           int
 	VsockSSHPort            uint32
 	VsockAPIPort            uint32
@@ -332,6 +334,7 @@ func Default(baseDir string) (*Config, error) {
 		TrustPassword:       trustPassword,
 		LocalSSHPort:        DefaultLocalSSHPort,
 		LocalAPIPort:        DefaultLocalAPIPort,
+		LocalWebPort:        DefaultLocalWebPort,
 		LocalOIDCPort:       DefaultLocalOIDCPort,
 		VsockSSHPort:        DefaultVsockSSHPort,
 		VsockAPIPort:        DefaultVsockAPIPort,
@@ -348,7 +351,7 @@ func Default(baseDir string) (*Config, error) {
 		AuthMode:            AuthModeOIDC,
 		NetworkMode:         NetworkModeShared,
 		BridgeInterface:     DefaultBridgeInterface,
-		GUI:                 true,
+		GUI:                 false, // off by default; opt in via Settings.ShowConsole or --gui
 		UseHostedGuestImage: useHosted,
 		CPUs:                DefaultCPUs,
 		MemoryGiB:           DefaultMemoryGiB,

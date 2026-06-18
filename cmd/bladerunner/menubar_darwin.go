@@ -17,6 +17,7 @@ import (
 
 	"fyne.io/systray"
 
+	"github.com/stuffbucket/bladerunner/internal/bootstage"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 )
@@ -133,13 +134,21 @@ func onMenubarReady() {
 		systray.SetIcon(statusIcon(st))
 		switch st {
 		case vmStopped:
-			mStatus.SetTitle("bladerunner: stopped")
+			mStatus.SetTitle("Stopped")
 		case vmHealthy:
-			mStatus.SetTitle("bladerunner: running")
-		case vmWedged:
-			mStatus.SetTitle("bladerunner: running (unresponsive — try Restart)")
-		case vmUnknown:
-			mStatus.SetTitle("bladerunner: running (status unknown)")
+			mStatus.SetTitle("Running — healthy")
+		case vmWedged, vmUnknown:
+			// While a boot is in progress, surface the live, friendly phase
+			// ("Booting Linux…", "Starting Incus…") instead of a scary
+			// "unresponsive" — the guest simply isn't answering yet. A
+			// stale/absent boot-stage file means it's a genuine wedge.
+			if msg, ok := bootingPhase(); ok {
+				mStatus.SetTitle(msg)
+			} else if st == vmWedged {
+				mStatus.SetTitle("Running — not responding")
+			} else {
+				mStatus.SetTitle("Running — status unknown")
+			}
 		}
 		running := st != vmStopped
 		setEnabled(mStart, st == vmStopped)
@@ -335,6 +344,18 @@ func vmHealth() vmState {
 	default:
 		return vmUnknown
 	}
+}
+
+// bootingPhase returns the live, human-friendly boot phase published by the
+// running `br start` (e.g. "Starting Incus…") while a boot is in progress. ok
+// is false when there is no recent boot-stage file — meaning either no boot is
+// underway or it finished, so callers fall back to the steady-state label.
+func bootingPhase() (string, bool) {
+	s, ok := bootstage.Read(config.DefaultStateDir())
+	if !ok || time.Since(s.UpdatedAt) > 90*time.Second {
+		return "", false
+	}
+	return bootstage.Message(s.Stage), true
 }
 
 // restartVM stops the VM (graceful, forcing after a timeout) then starts a fresh

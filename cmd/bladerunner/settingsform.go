@@ -64,8 +64,16 @@ const (
 	fImagePath     = "imagePath"
 	fNestedVirt    = "nestedVirt"
 	fUseGuestAgent = "useGuestAgent"
+	fShowConsole   = "showConsole"
 	fWaitForIncus  = "waitForIncus"
+
+	// valTrue is the canonical checked value emitted by the form's checkboxes.
+	valTrue = "true"
 )
+
+// boolFromForm parses a checkbox/boolean form value, accepting the several
+// truthy spellings a browser may submit.
+func boolFromForm(v string) bool { return v == valTrue || v == "on" || v == "1" }
 
 // valuesFromSettings flattens a Settings into the string form values the HTML
 // inputs hold, so generation and round-trip tests share one mapping.
@@ -83,6 +91,7 @@ func valuesFromSettings(s config.Settings) map[string]string {
 		fImagePath:     s.Image.Path,
 		fNestedVirt:    string(s.NestedVirt),
 		fUseGuestAgent: strconv.FormatBool(s.UseGuestAgent),
+		fShowConsole:   strconv.FormatBool(s.ShowConsole),
 		fWaitForIncus:  time.Duration(s.WaitForIncus).String(),
 	}
 }
@@ -137,7 +146,10 @@ func parseSettingsForm(posted map[string]string, base config.Settings) (config.S
 		s.DiskSizeGiB = n
 	}
 	if v, ok := get(fUseGuestAgent); ok {
-		s.UseGuestAgent = v == "true" || v == "on" || v == "1"
+		s.UseGuestAgent = boolFromForm(v)
+	}
+	if v, ok := get(fShowConsole); ok {
+		s.ShowConsole = boolFromForm(v)
 	}
 	if v, ok := get(fWaitForIncus); ok {
 		d, err := time.ParseDuration(v)
@@ -219,6 +231,7 @@ func settingsRequiresRestart(old, neu config.Settings) bool {
 		old.AuthMode != neu.AuthMode ||
 		old.NestedVirt != neu.NestedVirt ||
 		old.UseGuestAgent != neu.UseGuestAgent ||
+		old.ShowConsole != neu.ShowConsole ||
 		old.Image != neu.Image
 }
 
@@ -332,11 +345,17 @@ func settingsFormHTML(s config.Settings) string {
 		{string(config.NestedDisabled), "Disabled"},
 	})))
 	checked := ""
-	if v[fUseGuestAgent] == "true" {
+	if v[fUseGuestAgent] == valTrue {
 		checked = " checked"
 	}
 	b.WriteString(srow("", "In-guest boot agent",
 		fmt.Sprintf(`<input class="sw" type="checkbox" name=%q%s>`, fUseGuestAgent, checked)))
+	consoleChecked := ""
+	if v[fShowConsole] == valTrue {
+		consoleChecked = " checked"
+	}
+	b.WriteString(srow("", "Show console window",
+		fmt.Sprintf(`<input class="sw" type="checkbox" name=%q%s>`, fShowConsole, consoleChecked)))
 	b.WriteString(srow("", "Wait for Incus", textCtl(fWaitForIncus, fWaitForIncus)))
 	b.WriteString(`</div></div>`)
 

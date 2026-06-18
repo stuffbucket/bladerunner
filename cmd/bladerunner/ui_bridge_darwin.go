@@ -15,6 +15,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/stuffbucket/bladerunner/internal/bootstage"
+	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/ui"
 )
 
@@ -33,9 +35,10 @@ const splashMaxVisible = 5 * time.Minute
 const splashMinVisible = 3 * time.Second
 
 type cgoSplash struct {
-	mu      sync.Mutex
-	timer   *time.Timer // safety auto-dismiss
-	shownAt time.Time
+	mu       sync.Mutex
+	timer    *time.Timer // safety auto-dismiss
+	shownAt  time.Time
+	pollStop chan struct{} // closed to stop the boot-phase poller
 }
 
 // defaultSplash returns the real cgo splash window. (Overrides the no-op stub
@@ -49,14 +52,55 @@ func (s *cgoSplash) Show() {
 	C.brShowSplash(cbanner)
 	C.free(unsafe.Pointer(cbanner))
 
-	// (Re)arm the safety auto-dismiss so a failed boot can't leave it stuck.
+	// (Re)arm the safety auto-dismiss so a failed boot can't leave it stuck, and
+	// (re)start the boot-phase poller that feeds the live status line.
 	s.mu.Lock()
 	s.shownAt = time.Now()
 	if s.timer != nil {
 		s.timer.Stop()
 	}
 	s.timer = time.AfterFunc(splashMaxVisible, func() { C.brHideSplash() })
+	if s.pollStop != nil {
+		close(s.pollStop)
+	}
+	stop := make(chan struct{})
+	s.pollStop = stop
 	s.mu.Unlock()
+	go s.pollBootStage(stop)
+}
+
+// SetStatus updates the splash phase line (e.g. "Starting Incus…").
+func (s *cgoSplash) SetStatus(msg string) {
+	cmsg := C.CString(msg)
+	C.brSetSplashStatus(cmsg)
+	C.free(unsafe.Pointer(cmsg))
+}
+
+// pollBootStage reads the live boot phase published by `br start` and pushes
+// the friendly message onto the splash, so its caption tracks the real boot
+// (Booting Linux… -> Setting up… -> Starting Incus…) instead of a static line.
+// Returns when stop is closed (Hide) or the channel is replaced (a new Show).
+func (s *cgoSplash) pollBootStage(stop <-chan struct{}) {
+	stateDir := config.DefaultStateDir()
+	last := ""
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			st, ok := bootstage.Read(stateDir)
+			// Ignore a stale file left by a previous run that wasn't cleared.
+			if !ok || time.Since(st.UpdatedAt) > 2*time.Minute {
+				continue
+			}
+			if msg := bootstage.Message(st.Stage); msg != last {
+				last = msg
+				s.SetStatus(msg)
+			}
+		}
+	}
 }
 
 func (s *cgoSplash) Hide() {
@@ -64,6 +108,10 @@ func (s *cgoSplash) Hide() {
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil
+	}
+	if s.pollStop != nil {
+		close(s.pollStop)
+		s.pollStop = nil
 	}
 	// Enforce the minimum on-screen time: if the splash has been up for less
 	// than splashMinVisible, defer the actual hide so a fast boot doesn't make it
