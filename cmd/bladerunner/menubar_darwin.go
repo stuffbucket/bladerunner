@@ -43,7 +43,7 @@ const (
 	// the guest is not answering — "wedged" — or status unknown).
 	grayR, grayG, grayB    = 0x9A, 0xA4, 0xA8
 	greenR, greenG, greenB = 0x27, 0xC9, 0x3F
-	amberR, amberG, amberB = 0xFF, 0xBD, 0x2E
+	amberR, amberG, amberB = 0xF0, 0x97, 0x3A
 )
 
 // menubarGlyphPNG is the bladerunner "b" mark (44x44, black on transparent).

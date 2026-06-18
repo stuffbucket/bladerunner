@@ -4,19 +4,22 @@
          (pre-transform) coordinate space so each slash picks up a different
          band of the ramp: violet -> ice-cyan -> magenta -> pink. -->
     <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="69" y2="0">
-      <stop offset="0" stop-color="#B14FFF"/>
-      <stop offset="0.2" stop-color="#6E5BFF"/>
-      <stop offset="0.4" stop-color="#2BD4FF"/>
-      <stop offset="0.6" stop-color="#22D3EE"/>
-      <stop offset="0.8" stop-color="#FF4FD8"/>
-      <stop offset="1" stop-color="#FF6FA3"/>
+      <stop offset="0" stop-color="#A06BDE"/>
+      <stop offset="0.2" stop-color="#6E6FE0"/>
+      <stop offset="0.4" stop-color="#4FBFD8"/>
+      <stop offset="0.6" stop-color="#46C2CE"/>
+      <stop offset="0.8" stop-color="#D766BE"/>
+      <stop offset="1" stop-color="#DD83AC"/>
     </linearGradient>
   </defs>
-  <rect width="1024" height="1024" rx="229" fill="#0B0F14"/>
+  <!-- Apple HIG macOS grid: the rounded rect is 824x824 centered in the 1024
+       canvas (100px margin all round for the system drop shadow), corner
+       radius 185 (= 824 * 0.2245). -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#0B0F14"/>
   <!-- Four forward-leaning slashes (motion lines): action / machinery /
        digital / forward-motion. Geometry from the source mark (viewBox 69x48),
-       centered and scaled into the icon's safe area. -->
-  <g transform="translate(191 289) scale(9.3)" fill="url(#g)">
+       centered within the rounded rect. -->
+  <g transform="translate(257 334) scale(7.4)" fill="url(#g)">
     <path d="M19.038 0H22L2.96203 48H0L19.038 0Z"/>
     <path d="M26.038 0H33L13.962 48H7L26.038 0Z"/>
     <path d="M37 0H48.9998L29.9618 48H17.962L37 0Z"/>
