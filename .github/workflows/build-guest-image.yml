@@ -79,16 +79,26 @@ jobs:
 
       - name: Build image
         id: build
+        env:
+          # Force libguestfs's appliance network onto the SLIRP backend. The
+          # default `passt` backend (libguestfs 1.52 on ubuntu-24.04) fails to
+          # start in the Actions sandbox — "passt exited with status 1" — which
+          # aborts virt-customize before its in-appliance `--install` apt step
+          # can fetch incus/etc. SLIRP needs no host privileges and works in CI.
+          LIBGUESTFS_BACKEND_SETTINGS: network=slirp
         run: |
           mkdir -p out
           OUT="out/bladerunner-guest-${{ matrix.arch }}${{ steps.agent.outputs.suffix }}.qcow2"
+          # sudo strips the environment, so pass the libguestfs backend setting
+          # through explicitly (sudo -E would also leak the rest of the env).
+          SUDO=(sudo "LIBGUESTFS_BACKEND_SETTINGS=${LIBGUESTFS_BACKEND_SETTINGS}")
           if [ -n "${{ steps.agent.outputs.binary }}" ]; then
-            sudo bash scripts/build-guest-image.sh \
+            "${SUDO[@]}" bash scripts/build-guest-image.sh \
               --arch ${{ matrix.arch }} \
               --output "${OUT}" \
               --br-agent-binary "${{ steps.agent.outputs.binary }}"
           else
-            sudo bash scripts/build-guest-image.sh \
+            "${SUDO[@]}" bash scripts/build-guest-image.sh \
               --arch ${{ matrix.arch }} \
               --output "${OUT}"
           fi
