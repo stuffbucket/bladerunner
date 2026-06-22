@@ -89,6 +89,11 @@ jobs:
           # and needs no host privileges, so it works in CI.
           LIBGUESTFS_BACKEND: direct
           LIBGUESTFS_BACKEND_SETTINGS: network=slirp
+          # DIAGNOSTIC: surface passt's own stderr + the full appliance trace so
+          # we can see *why* passt exits 1 (the error above is opaque). Remove
+          # once the network backend is sorted.
+          LIBGUESTFS_DEBUG: 1
+          LIBGUESTFS_TRACE: 1
         run: |
           mkdir -p out
           OUT="out/bladerunner-guest-${{ matrix.arch }}${{ steps.agent.outputs.suffix }}.qcow2"
@@ -96,7 +101,9 @@ jobs:
           # explicitly (sudo -E would also leak the rest of the env).
           SUDO=(sudo
             "LIBGUESTFS_BACKEND=${LIBGUESTFS_BACKEND}"
-            "LIBGUESTFS_BACKEND_SETTINGS=${LIBGUESTFS_BACKEND_SETTINGS}")
+            "LIBGUESTFS_BACKEND_SETTINGS=${LIBGUESTFS_BACKEND_SETTINGS}"
+            "LIBGUESTFS_DEBUG=${LIBGUESTFS_DEBUG}"
+            "LIBGUESTFS_TRACE=${LIBGUESTFS_TRACE}")
           if [ -n "${{ steps.agent.outputs.binary }}" ]; then
             "${SUDO[@]}" bash scripts/build-guest-image.sh \
               --arch ${{ matrix.arch }} \
