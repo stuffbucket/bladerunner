@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.7](https://github.com/stuffbucket/bladerunner/compare/v0.4.6...v0.4.7) (2026-06-22)
+
+
+### Features
+
+* **config:** persisted closed-union Settings layer (menubar-app 1/N) ([#105](https://github.com/stuffbucket/bladerunner/issues/105)) ([9ce2591](https://github.com/stuffbucket/bladerunner/commit/9ce25916dc3499a8d49a259e991bd424f5ca2b87))
+* **menubar:** branded UNUserNotificationCenter banners ([#110](https://github.com/stuffbucket/bladerunner/issues/110)) ([7447360](https://github.com/stuffbucket/bladerunner/commit/744736050d0dddf4bb1a4f0ce1ead4ae6f5cefb0))
+* **menubar:** cgo splash window (floating HUD) ([#109](https://github.com/stuffbucket/bladerunner/issues/109)) ([9ac1198](https://github.com/stuffbucket/bladerunner/commit/9ac1198f27447bafa65ddf5f4bec01fe0d993070))
+* **menubar:** edge-triggered VM-state notification state machine ([#107](https://github.com/stuffbucket/bladerunner/issues/107)) ([3f55c43](https://github.com/stuffbucket/bladerunner/commit/3f55c43878da6d808bb2fae227da64c3768d9259))
+* **menubar:** settings window (WKWebView form over closed-union config) ([#112](https://github.com/stuffbucket/bladerunner/issues/112)) ([f510a86](https://github.com/stuffbucket/bladerunner/commit/f510a863e2d43900b22b606c673d90403fca2c14))
+* **menubar:** single-instance guard with present-handoff socket ([#108](https://github.com/stuffbucket/bladerunner/issues/108)) ([20be2c6](https://github.com/stuffbucket/bladerunner/commit/20be2c6435d8ff0d3d176221ed61a23cadcf600e))
+* **menubar:** version-aware single-instance handoff + engine-update surfacing ([#115](https://github.com/stuffbucket/bladerunner/issues/115)) ([edea5f2](https://github.com/stuffbucket/bladerunner/commit/edea5f27a5849d75c720c8b01496c8cf0dc12896))
+* **menubar:** wire start-VM policy (manual/on-launch/on-first-action) ([#111](https://github.com/stuffbucket/bladerunner/issues/111)) ([87ee45b](https://github.com/stuffbucket/bladerunner/commit/87ee45b83eea7e82d5a2988b628955a3751d3c41))
+* **start:** overlay persisted Settings into start reconciliation ([#106](https://github.com/stuffbucket/bladerunner/issues/106)) ([5d6fe15](https://github.com/stuffbucket/bladerunner/commit/5d6fe1533fabf28ff49ce4474f92c92c08be9be7))
+* **ui:** banner-driven shimmer splash + clean 'br' icons ([#114](https://github.com/stuffbucket/bladerunner/issues/114)) ([fe79b82](https://github.com/stuffbucket/bladerunner/commit/fe79b822001c228d66606bb0060b8a9a4c6a0cea))
+* **ui:** redo dock + menubar icons in the banner's slant style ([#103](https://github.com/stuffbucket/bladerunner/issues/103)) ([479aeca](https://github.com/stuffbucket/bladerunner/commit/479aeca8ecb9e845483beb6ee75108a55bab952a))
+* **ui:** shrink the CLI banner from 'bladerunner' to 'br' ([#113](https://github.com/stuffbucket/bladerunner/issues/113)) ([518ff6f](https://github.com/stuffbucket/bladerunner/commit/518ff6f51d856a8e4223a4ecbd6c9eb2abef76a0))
+* **ui:** splash re-palette + four-slash app icon polish ([#121](https://github.com/stuffbucket/bladerunner/issues/121)) ([f08b2ed](https://github.com/stuffbucket/bladerunner/commit/f08b2ed921b3bf49fe89bf311d4addcd9082e983))
+* **ui:** web proxy, console-off default, live splash + brand refresh ([#124](https://github.com/stuffbucket/bladerunner/issues/124)) ([8a4fbae](https://github.com/stuffbucket/bladerunner/commit/8a4fbaeca6f8e725598dbe360bff2b46b1ef355d))
+
 ## [0.4.6](https://github.com/stuffbucket/bladerunner/compare/v0.4.5...v0.4.6) (2026-06-10)
 
 
