@@ -3,7 +3,7 @@ module github.com/stuffbucket/bladerunner
 go 1.25.6
 
 require (
-	fyne.io/systray v1.12.1
+	fyne.io/systray v1.12.2
 	github.com/Code-Hex/vz/v3 v3.7.1
 	github.com/blang/semver/v4 v4.0.0
 	github.com/charmbracelet/lipgloss v1.1.0

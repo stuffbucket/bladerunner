@@ -45,7 +45,7 @@ jobs:
       version: ${{ steps.rp.outputs.version }}
     steps:
       - id: rp
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
@@ -82,7 +82,7 @@ jobs:
           cache: true
 
       - name: Build release artifacts (goreleaser, no publish)
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
