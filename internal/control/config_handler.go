@@ -38,6 +38,7 @@ func NewConfigRouter(cfg *config.Config) *ConfigRouter {
 			ConfigKeySSHPrivateKeyPath: {getter: func() string { return cfg.SSHPrivateKeyPath }, deferred: true},
 			ConfigKeyLocalSSHPort:      {getter: func() string { return strconv.Itoa(cfg.LocalSSHPort) }},
 			ConfigKeyLocalAPIPort:      {getter: func() string { return strconv.Itoa(cfg.LocalAPIPort) }},
+			ConfigKeyLocalWebPort:      {getter: func() string { return strconv.Itoa(cfg.LocalWebPort) }},
 			ConfigKeyLocalOIDCPort:     {getter: func() string { return strconv.Itoa(cfg.LocalOIDCPort) }},
 			ConfigKeyName:              {getter: func() string { return cfg.Name }},
 			ConfigKeyVMDir:             {getter: func() string { return cfg.VMDir }},

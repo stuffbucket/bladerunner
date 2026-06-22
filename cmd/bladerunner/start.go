@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/boot"
+	"github.com/stuffbucket/bladerunner/internal/bootstage"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/logging"
@@ -23,6 +25,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/ui"
 	"github.com/stuffbucket/bladerunner/internal/ui/board"
 	"github.com/stuffbucket/bladerunner/internal/vm"
+	"github.com/stuffbucket/bladerunner/internal/webproxy"
 	"golang.org/x/term"
 )
 
@@ -339,17 +342,35 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	// Publish coarse, human-friendly boot phase to the bootstage file for the
+	// menubar's starting splash. Driven by the runner's own stage events — which
+	// fire in every mode (GUI, headless, detached menubar boot) and don't depend
+	// on racing/parsing the serial console — so a separate process that only sees
+	// the control socket can still show "Booting Linux… / Setting up… / Starting
+	// Incus…" as the guest comes up. Cleared on the way out.
+	bootPub := newBootStagePublisher(cfg.VMDir)
+	defer bootstage.Clear(cfg.VMDir)
+
 	// Build the buildx-style boot board when stderr is a TTY. It shows
 	// stage state on top and a live tail of the guest serial console
 	// underneath. Non-TTY callers (CI, log capture) still get plain slog
 	// output via the noop board path. In --json mode we skip it entirely so
 	// the only stdout output is the final JSON report.
 	var brd *board.Board
+	var boardProg vm.Progress
 	tailCancel := context.CancelFunc(func() {})
 	if !jsonOutput {
-		brd, tailCancel = startBootBoard(ctx, cfg, runner)
+		brd, boardProg, tailCancel = startBootBoard(ctx, cfg)
 	}
 	defer tailCancel()
+
+	// Attach progress sinks: always the bootstage file publisher, plus the TTY
+	// board when present.
+	reporters := []vm.Progress{&bootStageProgress{pub: bootPub}}
+	if boardProg != nil {
+		reporters = append(reporters, boardProg)
+	}
+	runner.SetProgress(teeProgress(reporters))
 
 	result, err := runner.StartVM(ctx)
 	if err != nil {
@@ -382,6 +403,25 @@ func runStart(cmd *cobra.Command, args []string) error {
 		cfgHandler.Lock()
 		cfg.SSHConfigPath = sshConfigPath
 		cfgHandler.Unlock()
+	}
+
+	// Start the host-side web-UI proxy. It terminates the browser's TLS WITHOUT
+	// requesting a client certificate (so the browser never shows the cert
+	// picker), forwarding to Incus over loopback with no client cert of its own
+	// — so Incus authenticates the browser via OIDC. `br web` points the browser
+	// here (LocalWebPort) instead of straight at Incus. Non-fatal: a failure just
+	// means `br web` falls back to the direct Incus URL (with the cert prompt).
+	if webProxy, werr := webproxy.New(webproxy.Options{
+		ListenAddr:   fmt.Sprintf("127.0.0.1:%d", cfg.LocalWebPort),
+		UpstreamAddr: fmt.Sprintf("127.0.0.1:%d", cfg.LocalAPIPort),
+		CertPath:     filepath.Join(cfg.VMDir, "webproxy.crt"),
+		KeyPath:      filepath.Join(cfg.VMDir, "webproxy.key"),
+	}); werr != nil {
+		logging.L().Warn("web proxy not created", "err", werr)
+	} else if werr := webProxy.Start(); werr != nil {
+		logging.L().Warn("web proxy not started", "err", werr)
+	} else {
+		defer func() { _ = webProxy.Close() }()
 	}
 
 	// In headless mode we block the foreground on Incus readiness so the
@@ -497,9 +537,9 @@ const (
 // feeds raw lines into the tail panel and advances stage state from parsed
 // cloud-init / ssh markers. Returns the board (nil when stderr is not a
 // TTY) and a cancel function for the tailer goroutine.
-func startBootBoard(ctx context.Context, cfg *config.Config, runner *vm.Runner) (*board.Board, context.CancelFunc) {
+func startBootBoard(ctx context.Context, cfg *config.Config) (*board.Board, vm.Progress, context.CancelFunc) {
 	if !term.IsTerminal(int(os.Stderr.Fd())) {
-		return nil, func() {}
+		return nil, nil, func() {}
 	}
 	stages := []board.Stage{
 		{ID: boardStageVMBoot, Label: "VM running"},
@@ -513,11 +553,10 @@ func startBootBoard(ctx context.Context, cfg *config.Config, runner *vm.Runner) 
 		ConsoleLogPath: cfg.ConsoleLogPath,
 	})
 	brd.Start()
-	runner.SetProgress(newBoardAdapter(brd))
 
 	tailCtx, cancel := context.WithCancel(ctx)
 	go tailConsoleIntoBoard(tailCtx, brd, cfg.ConsoleLogPath)
-	return brd, cancel
+	return brd, newBoardAdapter(brd), cancel
 }
 
 // boardAdapter maps the runner's stage IDs (vm.StageVMBoot, vm.StageIncusWait)
@@ -594,6 +633,79 @@ func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
 			seenSSH = true
 			b.Complete(boardStageSSH)
 		}
+	}
+}
+
+// bootStagePublisher writes the coarse boot phase to the bootstage file,
+// advancing monotonically (rank-gated; Failed is terminal). Safe for the
+// concurrent Begin/Done calls the runner makes from its wait goroutines.
+type bootStagePublisher struct {
+	mu       sync.Mutex
+	stateDir string
+	cur      bootstage.Stage
+}
+
+// newBootStagePublisher creates the publisher and writes the initial Boot phase
+// immediately, so the menubar shows "Booting Linux…" the moment a start begins.
+func newBootStagePublisher(stateDir string) *bootStagePublisher {
+	p := &bootStagePublisher{stateDir: stateDir}
+	p.advance(bootstage.Boot)
+	return p
+}
+
+func (p *bootStagePublisher) advance(to bootstage.Stage) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if to != bootstage.Failed && bootstage.Rank(to) <= bootstage.Rank(p.cur) {
+		return
+	}
+	p.cur = to
+	_ = bootstage.Write(p.stateDir, to, time.Now())
+}
+
+// bootStageProgress is a vm.Progress sink that maps the runner's stage events
+// onto bootstage phases. VMBoot done -> Setup covers the guest's own boot
+// (kernel/cloud-init/ssh) between the VM reaching "running" and the Incus wait.
+type bootStageProgress struct{ pub *bootStagePublisher }
+
+func (p *bootStageProgress) Begin(stage, _ string, _ time.Duration) {
+	switch stage {
+	case vm.StageVMBoot:
+		p.pub.advance(bootstage.Boot)
+	case vm.StageIncusWait:
+		p.pub.advance(bootstage.Incus)
+	}
+}
+func (p *bootStageProgress) Substatus(string, string) {}
+func (p *bootStageProgress) Done(stage string) {
+	if stage == vm.StageVMBoot {
+		p.pub.advance(bootstage.Setup)
+	}
+}
+func (p *bootStageProgress) Fail(string, error) { p.pub.advance(bootstage.Failed) }
+
+// teeProgress fans every progress event out to several sinks (the bootstage
+// file publisher plus the optional TTY board).
+type teeProgress []vm.Progress
+
+func (t teeProgress) Begin(s, l string, b time.Duration) {
+	for _, p := range t {
+		p.Begin(s, l, b)
+	}
+}
+func (t teeProgress) Substatus(s, m string) {
+	for _, p := range t {
+		p.Substatus(s, m)
+	}
+}
+func (t teeProgress) Done(s string) {
+	for _, p := range t {
+		p.Done(s)
+	}
+}
+func (t teeProgress) Fail(s string, e error) {
+	for _, p := range t {
+		p.Fail(s, e)
 	}
 }
 

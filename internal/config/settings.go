@@ -204,6 +204,12 @@ type Settings struct {
 	NestedVirt    NestedVirtSetting `json:"nestedVirt"`
 	UseGuestAgent bool              `json:"useGuestAgent"`
 	WaitForIncus  Duration          `json:"waitForIncus"`
+
+	// ShowConsole opens the VZ serial/framebuffer console window on start. Off by
+	// default: the window freezes at the kernel hand-off (the cloud kernel logs
+	// to the serial port, not the framebuffer), which reads as a hang. Boot
+	// progress is on the splash + `br logs`; this is for low-level debugging.
+	ShowConsole bool `json:"showConsole"`
 }
 
 // DefaultSettings returns the user-settings document that reproduces
@@ -223,6 +229,7 @@ func DefaultSettings() Settings {
 		NestedVirt:      NestedAuto,
 		UseGuestAgent:   false,
 		WaitForIncus:    Duration(DefaultTimeout),
+		ShowConsole:     false,
 	}
 }
 
@@ -367,6 +374,7 @@ func (s Settings) ApplyTo(cfg *Config) {
 	cfg.NestedVirtDisabled = s.NestedVirt == NestedDisabled
 	cfg.UseGuestAgent = s.UseGuestAgent
 	cfg.WaitForIncus = time.Duration(s.WaitForIncus)
+	cfg.GUI = s.ShowConsole
 
 	switch s.Image.Kind {
 	case ImageHosted:

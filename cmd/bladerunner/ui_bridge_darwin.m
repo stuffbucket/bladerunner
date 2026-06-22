@@ -8,6 +8,14 @@
 static NSWindow *gSplashWindow = nil;
 // The shimmer band layer, swept once per show by startSplashShimmer.
 static CAGradientLayer *gShineLayer = nil;
+// The dynamically-updated status line beneath the banner ("Booting Linux…",
+// "Starting Incus…", …) and the subtle close button. gSplashDismissable gates
+// the manual dismiss so an accidental click in the first ~2s can't kill a
+// just-shown splash; gSplashKeyMonitor is the (best-effort) Esc handler.
+static NSTextField *gSplashStatusLabel = nil;
+static NSButton *gSplashCloseButton = nil;
+static BOOL gSplashDismissable = NO;
+static id gSplashKeyMonitor = nil;
 
 // startSplashShimmer runs the highlight sweep exactly once, beginning one
 // second after the splash appears (the band rests off-screen the rest of the
@@ -39,6 +47,44 @@ static void runOnMain(void (^block)(void)) {
     dispatch_async(dispatch_get_main_queue(), block);
   }
 }
+
+// styledSplashStatus formats the status line: monospaced, lightly tracked,
+// dimmed — a quiet caption that belongs with the figlet. Sentence case (the
+// phases read "Booting Linux…", not "BOOTING LINUX…").
+static NSAttributedString *styledSplashStatus(NSString *text) {
+  NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+  para.alignment = NSTextAlignmentCenter;
+  return [[NSAttributedString alloc]
+      initWithString:text
+          attributes:@{
+            NSFontAttributeName : [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightSemibold],
+            NSForegroundColorAttributeName : [NSColor colorWithWhite:0.62 alpha:1.0],
+            NSKernAttributeName : @2.0,
+            NSParagraphStyleAttributeName : para,
+          }];
+}
+
+// BRSplashControls is the target for the close button and the click-to-dismiss
+// gesture. Both are gated by gSplashDismissable (armed ~2s after show).
+@interface BRSplashControls : NSObject
+- (void)dismiss:(id)sender;
+- (void)backgroundClicked:(NSClickGestureRecognizer *)gr;
+@end
+
+@implementation BRSplashControls
+- (void)dismiss:(id)sender {
+  (void)sender;
+  brHideSplash();
+}
+- (void)backgroundClicked:(NSClickGestureRecognizer *)gr {
+  (void)gr;
+  if (gSplashDismissable) {
+    brHideSplash();
+  }
+}
+@end
+
+static BRSplashControls *gSplashControls = nil;
 
 // brandGradientColors is the vaporwave ramp shared with the CLI banner:
 // ultraviolet -> ice-cyan -> magenta/pink. The cyan<->magenta pivot is the
@@ -100,7 +146,10 @@ static NSWindow *buildSplashWindow(NSString *banner) {
   // splash is informational and the app runs as an LSUIElement accessory).
   win.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
                            NSWindowCollectionBehaviorFullScreenAuxiliary;
-  win.ignoresMouseEvents = YES;
+  // Interactive so the user can drag it aside or dismiss it (close button +
+  // click gesture below). It never becomes key, so it won't steal focus.
+  win.ignoresMouseEvents = NO;
+  win.movableByWindowBackground = YES;
 
   CGFloat scale = NSScreen.mainScreen.backingScaleFactor > 0
                       ? NSScreen.mainScreen.backingScaleFactor
@@ -168,18 +217,32 @@ static NSWindow *buildSplashWindow(NSString *banner) {
   label.bordered = NO;
   label.drawsBackground = NO;
   label.alignment = NSTextAlignmentCenter;
-  NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
-  para.alignment = NSTextAlignmentCenter;
-  label.attributedStringValue = [[NSAttributedString alloc]
-      initWithString:@"STARTING"
-          attributes:@{
-            NSFontAttributeName : [NSFont monospacedSystemFontOfSize:11
-                                                              weight:NSFontWeightSemibold],
-            NSForegroundColorAttributeName : [NSColor colorWithWhite:0.60 alpha:1.0],
-            NSKernAttributeName : @4.5,
-            NSParagraphStyleAttributeName : para,
-          }];
+  label.attributedStringValue = styledSplashStatus(@"Starting…");
   [bg addSubview:label];
+  gSplashStatusLabel = label;
+
+  // Subtle close button, top-right. Hidden until the splash has been up ~2s
+  // (see brShowSplash) so it never invites an instant accidental dismiss.
+  NSButton *closeBtn = [NSButton buttonWithTitle:@"✕"
+                                          target:gSplashControls
+                                          action:@selector(dismiss:)];
+  closeBtn.bordered = NO;
+  closeBtn.frame = NSMakeRect(W - 30, H - 30, 22, 22);
+  closeBtn.attributedTitle = [[NSAttributedString alloc]
+      initWithString:@"✕"
+          attributes:@{
+            NSFontAttributeName : [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
+            NSForegroundColorAttributeName : [NSColor colorWithWhite:1.0 alpha:0.5],
+          }];
+  closeBtn.hidden = YES;
+  [bg addSubview:closeBtn];
+  gSplashCloseButton = closeBtn;
+
+  // Click anywhere on the panel to dismiss (also gated by gSplashDismissable).
+  NSClickGestureRecognizer *click =
+      [[NSClickGestureRecognizer alloc] initWithTarget:gSplashControls
+                                                action:@selector(backgroundClicked:)];
+  [bg addGestureRecognizer:click];
 
   return win;
 }
@@ -187,19 +250,68 @@ static NSWindow *buildSplashWindow(NSString *banner) {
 void brShowSplash(const char *banner) {
   NSString *b = banner ? [NSString stringWithUTF8String:banner] : @"";
   runOnMain(^{
+    if (gSplashControls == nil) {
+      gSplashControls = [[BRSplashControls alloc] init];
+    }
     if (gSplashWindow == nil) {
       gSplashWindow = buildSplashWindow(b);
     }
+    // Reset to the first phase and re-arm the dismiss gate for this show.
+    if (gSplashStatusLabel != nil) {
+      gSplashStatusLabel.attributedStringValue = styledSplashStatus(@"Starting…");
+    }
+    gSplashDismissable = NO;
+    gSplashCloseButton.hidden = YES;
     [gSplashWindow center];
     [gSplashWindow orderFrontRegardless];
     startSplashShimmer(); // one sweep, 1s after it appears
+
+    // After ~2s on screen, allow manual dismissal (close button, click, Esc).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                     if (gSplashWindow.isVisible) {
+                       gSplashDismissable = YES;
+                       gSplashCloseButton.hidden = NO;
+                     }
+                   });
+
+    // Esc dismisses while our app holds the keys (best-effort: a local monitor
+    // only sees events routed to this app, so it won't intercept keystrokes in
+    // whatever the user is actively typing).
+    if (gSplashKeyMonitor == nil) {
+      gSplashKeyMonitor = [NSEvent
+          addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                       handler:^NSEvent *(NSEvent *e) {
+                                         if (gSplashDismissable &&
+                                             gSplashWindow.isVisible &&
+                                             e.keyCode == 53) { // Esc
+                                           brHideSplash();
+                                           return nil;
+                                         }
+                                         return e;
+                                       }];
+    }
   });
 }
 
 void brHideSplash(void) {
   runOnMain(^{
+    gSplashDismissable = NO;
+    gSplashCloseButton.hidden = YES;
     if (gSplashWindow != nil) {
       [gSplashWindow orderOut:nil];
+    }
+  });
+}
+
+void brSetSplashStatus(const char *status) {
+  NSString *s = status ? [NSString stringWithUTF8String:status] : @"";
+  if (s.length == 0) {
+    return;
+  }
+  runOnMain(^{
+    if (gSplashStatusLabel != nil) {
+      gSplashStatusLabel.attributedStringValue = styledSplashStatus(s);
     }
   });
 }

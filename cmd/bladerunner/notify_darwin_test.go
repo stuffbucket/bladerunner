@@ -13,14 +13,16 @@ type fakeNotifier struct{ bodies []string }
 
 func (f *fakeNotifier) notify(_, body string) { f.bodies = append(f.bodies, body) }
 
-// fakeSplash records Show/Hide calls.
+// fakeSplash records Show/Hide/SetStatus calls.
 type fakeSplash struct {
-	shows int
-	hides int
+	shows  int
+	hides  int
+	status string
 }
 
-func (s *fakeSplash) Show() { s.shows++ }
-func (s *fakeSplash) Hide() { s.hides++ }
+func (s *fakeSplash) Show()              { s.shows++ }
+func (s *fakeSplash) Hide()              { s.hides++ }
+func (s *fakeSplash) SetStatus(m string) { s.status = m }
 
 // harness builds a vmNotifier with fakes and a controllable clock.
 type harness struct {

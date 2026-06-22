@@ -124,6 +124,7 @@ const (
 	ConfigKeySSHPrivateKeyPath = "ssh-private-key-path"
 	ConfigKeyLocalSSHPort      = "local-ssh-port"
 	ConfigKeyLocalAPIPort      = "local-api-port"
+	ConfigKeyLocalWebPort      = "local-web-port"
 	ConfigKeyLocalOIDCPort     = "local-oidc-port"
 	ConfigKeyName              = "name"
 	ConfigKeyVMDir             = "vm-dir"
@@ -186,6 +187,7 @@ func ConfigKeyRegistry() []ConfigKeyMeta {
 		{Key: ConfigKeyLocalAPIPort, RequiresReset: true, Description: "Local API port"},
 		{Key: ConfigKeyLocalOIDCPort, RequiresReset: true, Description: "Local OIDC provider port"},
 		{Key: ConfigKeyLocalSSHPort, RequiresReset: true, Description: "Local SSH port"},
+		{Key: ConfigKeyLocalWebPort, RequiresReset: true, Description: "Local web UI port"},
 		{Key: ConfigKeyLogPath, Description: "Log file path"},
 		{Key: ConfigKeyMemoryGiB, RequiresReset: true, Description: "Memory in GiB"},
 		{Key: ConfigKeyName, Description: "Instance name"},

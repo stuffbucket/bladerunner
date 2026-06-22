@@ -221,8 +221,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.DiskSizeGiB != 64 {
 		t.Errorf("DiskSizeGiB = %v, want 64", cfg.DiskSizeGiB)
 	}
-	if !cfg.GUI {
-		t.Error("GUI should be enabled by default")
+	if cfg.GUI {
+		t.Error("GUI (serial console window) should be OFF by default; opt in via Settings.ShowConsole or --gui")
 	}
 
 	if cfg.VMDir != tmpDir {

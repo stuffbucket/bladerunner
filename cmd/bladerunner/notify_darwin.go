@@ -91,6 +91,8 @@ func isAppBundlePath(exe string) bool {
 type splashController interface {
 	Show()
 	Hide()
+	// SetStatus updates the splash's phase line (e.g. "Booting Linux…").
+	SetStatus(msg string)
 }
 
 // vmNotifier is the edge-triggered notification + splash state machine. It is
@@ -200,6 +202,15 @@ func (m *vmNotifier) observe(st vmState, now time.Time) {
 	// whether this is a real transition — otherwise a splash shown over an
 	// already-running VM would be stranded. Idempotent via the splashUp guard.
 	if st == vmHealthy {
+		m.expectingStart = false
+		m.splash.SetStatus("Ready") // flashes before the min-visible hide
+		m.hideSplash()
+	}
+
+	// A start that stops before ever reaching healthy (aborted boot, user hit
+	// Stop, VZ failed) must also clear the splash — otherwise it strands on
+	// screen until the multi-minute safety timeout. hideSplash is idempotent.
+	if st == vmStopped {
 		m.expectingStart = false
 		m.hideSplash()
 	}

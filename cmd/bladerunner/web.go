@@ -93,11 +93,17 @@ func init() {
 	webCmd.AddCommand(webTrustCmd, webUntrustCmd)
 }
 
-// incusAPIHostPort returns "127.0.0.1:<api-port>" for the running VM's Incus API.
-func incusAPIHostPort() (string, error) {
+// webHostPort returns "127.0.0.1:<web-port>" for the running VM's web proxy —
+// the endpoint the browser actually connects to, and whose certificate must be
+// trusted to silence the "not private" warning. Falls back to the Incus API
+// port when the proxy port isn't published (older engine).
+func webHostPort() (string, error) {
 	client, err := requireRunningVM()
 	if err != nil {
 		return "", err
+	}
+	if port, perr := client.GetConfig(control.ConfigKeyLocalWebPort); perr == nil && port != "" {
+		return "127.0.0.1:" + port, nil
 	}
 	port, err := client.GetConfig(control.ConfigKeyLocalAPIPort)
 	if err != nil || port == "" {
@@ -131,7 +137,7 @@ func fetchIncusServerCertPEM(hostPort string) ([]byte, error) {
 }
 
 func runWebTrust(_ *cobra.Command, _ []string) error {
-	hostPort, err := incusAPIHostPort()
+	hostPort, err := webHostPort()
 	if err != nil {
 		return err
 	}
@@ -190,11 +196,19 @@ func webEndpoints() (providerBase, incusUI, incusLogin, keyPath string, err erro
 		logging.L().Debug("get local-api-port failed", "err", err)
 		return "", "", "", "", errVMNotRunning
 	}
+	// The browser talks to the host web proxy (which strips Incus's TLS
+	// client-cert request, so there's no certificate picker), not Incus directly.
+	// Fall back to the Incus API port if the proxy port isn't published (older
+	// engine) — the SSO still works, just with the cert prompt.
+	webPort, werr := client.GetConfig(control.ConfigKeyLocalWebPort)
+	if werr != nil || webPort == "" {
+		webPort = apiPort
+	}
 	keyPath, _ = client.GetConfig(control.ConfigKeySSHPrivateKeyPath)
 
 	providerBase = fmt.Sprintf("http://127.0.0.1:%s", oidcPort)
-	incusUI = fmt.Sprintf("https://127.0.0.1:%s/ui/", apiPort)
-	incusLogin = fmt.Sprintf("https://127.0.0.1:%s/oidc/login", apiPort)
+	incusUI = fmt.Sprintf("https://127.0.0.1:%s/ui/", webPort)
+	incusLogin = fmt.Sprintf("https://127.0.0.1:%s/oidc/login", webPort)
 	return providerBase, incusUI, incusLogin, keyPath, nil
 }
 
