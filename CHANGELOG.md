@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.8](https://github.com/stuffbucket/bladerunner/compare/v0.4.7...v0.4.8) (2026-06-22)
+
+
+### Bug Fixes
+
+* **image:** streamline the Incus base image ([#57](https://github.com/stuffbucket/bladerunner/issues/57), [#45](https://github.com/stuffbucket/bladerunner/issues/45)) ([#125](https://github.com/stuffbucket/bladerunner/issues/125)) ([29d0a8c](https://github.com/stuffbucket/bladerunner/commit/29d0a8cc462aa833fd48db1c7a8ba6a78bc5b786))
+
 ## [0.4.7](https://github.com/stuffbucket/bladerunner/compare/v0.4.6...v0.4.7) (2026-06-22)
 
 
