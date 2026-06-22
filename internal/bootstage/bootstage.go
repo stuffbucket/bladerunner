@@ -108,7 +108,11 @@ func Write(stateDir string, stage Stage, now time.Time) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // Read returns the recorded state, or ok=false when the file is absent or

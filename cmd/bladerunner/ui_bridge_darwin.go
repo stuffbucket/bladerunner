@@ -116,10 +116,21 @@ func (s *cgoSplash) Hide() {
 	// Enforce the minimum on-screen time: if the splash has been up for less
 	// than splashMinVisible, defer the actual hide so a fast boot doesn't make it
 	// flash by before the shimmer plays.
+	// gen tags this hide to the current show; if a new Show() lands during the
+	// min-visible deferral below, shownAt changes and the stale timer no-ops
+	// instead of hiding the freshly-shown splash.
+	gen := s.shownAt
 	remaining := splashMinVisible - time.Since(s.shownAt)
 	s.mu.Unlock()
 	if remaining > 0 {
-		time.AfterFunc(remaining, func() { C.brHideSplash() })
+		time.AfterFunc(remaining, func() {
+			s.mu.Lock()
+			stale := !s.shownAt.Equal(gen)
+			s.mu.Unlock()
+			if !stale {
+				C.brHideSplash()
+			}
+		})
 		return
 	}
 	C.brHideSplash()
