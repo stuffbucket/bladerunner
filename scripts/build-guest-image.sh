@@ -316,6 +316,9 @@ systemctl enable bladerunner-vsock-ntp.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
 update-initramfs -u
+# Drop the apt cache so it isn't carried in the baked image.
+apt-get clean
+rm -rf /var/lib/apt/lists/*
 EOS
 
     if [[ -n "${BR_AGENT_BINARY}" ]]; then
@@ -331,16 +334,30 @@ EOS
     if [[ -e "${RESOLV_BAK}" || -L "${RESOLV_BAK}" ]]; then
         cp -a "${RESOLV_BAK}" "${RESOLV}"
     fi
+
+    # Zero the free space so qemu-img -c can compress it away: virt-sparsify
+    # (which would discard unused blocks) can't run here because the libguestfs
+    # appliance won't launch on the runner. Best-effort; ENOSPC just stops dd.
+    log "zero-filling free space to aid compression"
+    dd if=/dev/zero of="${MNT}/ZEROFILL" bs=1M 2>/dev/null || true
+    rm -f "${MNT}/ZEROFILL"
+    sync
+
+    # Detach the image NOW (not just on the EXIT trap) so the compress step below
+    # reads a consistent, fully-flushed qcow2 rather than one qemu-nbd still holds.
+    cleanup_nbd
 fi
 
 # ----- sparsify and compress ----------------------------------------------
 
 OUT_TMP="${WORK_DIR}/out.qcow2"
-if command -v virt-sparsify >/dev/null 2>&1; then
+if [[ ${USE_GUESTFISH} -eq 1 ]] && command -v virt-sparsify >/dev/null 2>&1; then
     log "sparsifying with virt-sparsify"
     virt-sparsify --compress "${BASE_IMAGE}" "${OUT_TMP}"
 else
-    log "virt-sparsify not available; falling back to qemu-img convert"
+    # nbd path (or no libguestfs): the appliance is unavailable, so compress with
+    # qemu-img. Free space was zeroed above, so -c shrinks it effectively.
+    log "compressing with qemu-img convert (virt-sparsify unavailable: no libguestfs appliance)"
     qemu-img convert -O qcow2 -c "${BASE_IMAGE}" "${OUT_TMP}"
 fi
 
