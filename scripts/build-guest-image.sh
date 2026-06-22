@@ -31,6 +31,12 @@ OUTPUT=""
 BR_AGENT_BINARY=""
 DEBIAN_RELEASE="${DEBIAN_RELEASE:-trixie}"
 TARGET_SIZE_GIB="${TARGET_SIZE_GIB:-8}"
+# Customize method: auto (prefer libguestfs), guestfish (force libguestfs), or
+# nbd (force the qemu-nbd + chroot path). The chroot path runs apt over the
+# HOST network namespace and never boots a libguestfs appliance, so it sidesteps
+# the "passt exited with status 1" appliance-networking failure that libguestfs
+# 1.52 hits on GitHub-hosted runners (#45).
+METHOD="${GUEST_IMAGE_METHOD:-auto}"
 
 log()   { printf '[build-guest-image] %s\n' "$*" >&2; }
 fatal() { log "ERROR: $*"; exit 1; }
@@ -46,6 +52,10 @@ usage: $0 --arch arm64|amd64 --output PATH [--br-agent-binary PATH]
                            with -no-agent at the caller).
   --debian-release NAME    Override Debian release (default: trixie).
   --size GIB               Resize working image to this GiB (default: 8).
+  --method METHOD          Customize method: auto|guestfish|nbd (default: auto).
+                           'nbd' forces the qemu-nbd + chroot path, which avoids
+                           the libguestfs appliance network (passt) failure on
+                           GitHub-hosted runners.
 USAGE
     exit 2
 }
@@ -57,6 +67,7 @@ while [[ $# -gt 0 ]]; do
         --br-agent-binary)   BR_AGENT_BINARY="${2:?--br-agent-binary needs a value}"; shift 2;;
         --debian-release)    DEBIAN_RELEASE="${2:?}"; shift 2;;
         --size)              TARGET_SIZE_GIB="${2:?}"; shift 2;;
+        --method)            METHOD="${2:?--method needs a value}"; shift 2;;
         -h|--help)           usage;;
         *)                   fatal "unknown argument: $1";;
     esac
@@ -82,15 +93,39 @@ require_tool qemu-img    "qemu-utils"
 require_tool curl        "curl"
 require_tool sha256sum   "coreutils"
 
-USE_GUESTFISH=0
+case "${METHOD}" in
+    auto|guestfish|nbd) ;;
+    *) fatal "unsupported --method: ${METHOD} (expected auto, guestfish, or nbd)";;
+esac
+
+have_guestfish=0
 if command -v guestfish >/dev/null 2>&1 && command -v virt-customize >/dev/null 2>&1; then
-    USE_GUESTFISH=1
-    log "using libguestfs (guestfish + virt-customize)"
-else
-    log "libguestfs not detected; falling back to qemu-nbd + chroot path"
-    require_tool qemu-nbd "qemu-utils"
-    require_tool chroot   "coreutils"
+    have_guestfish=1
 fi
+
+USE_GUESTFISH=0
+case "${METHOD}" in
+    guestfish)
+        [[ ${have_guestfish} -eq 1 ]] || fatal "--method guestfish but libguestfs not installed"
+        USE_GUESTFISH=1
+        log "customize method: libguestfs (guestfish + virt-customize), forced"
+        ;;
+    nbd)
+        log "customize method: qemu-nbd + chroot, forced (avoids libguestfs appliance passt failure)"
+        require_tool qemu-nbd "qemu-utils"
+        require_tool chroot   "coreutils"
+        ;;
+    auto)
+        if [[ ${have_guestfish} -eq 1 ]]; then
+            USE_GUESTFISH=1
+            log "customize method: libguestfs (guestfish + virt-customize), auto-selected"
+        else
+            log "customize method: qemu-nbd + chroot (libguestfs not detected)"
+            require_tool qemu-nbd "qemu-utils"
+            require_tool chroot   "coreutils"
+        fi
+        ;;
+esac
 
 # ----- download base image ------------------------------------------------
 
@@ -180,7 +215,22 @@ else
     trap 'cleanup_nbd; rm -rf "${WORK_DIR}"' EXIT
 
     sleep 2  # let kernel surface partitions
-    ROOT_PART="${NBD_DEV}p1"
+    log "partition layout of ${NBD_DEV}:"
+    lsblk -o NAME,SIZE,FSTYPE,PARTLABEL "${NBD_DEV}" >&2 || true
+
+    # Pick the root partition by filesystem rather than hardcoding p1: Debian
+    # genericcloud carries a small FAT ESP and a BIOS-boot partition alongside
+    # the ext4 root, and their ordering is not guaranteed across releases.
+    ROOT_PART=""
+    for part in "${NBD_DEV}"p*; do
+        [[ -b "${part}" ]] || continue
+        if [[ "$(blkid -o value -s TYPE "${part}" 2>/dev/null || true)" == "ext4" ]]; then
+            ROOT_PART="${part}"
+            break
+        fi
+    done
+    [[ -n "${ROOT_PART}" ]] || ROOT_PART="${NBD_DEV}p1"  # last-resort fallback
+    log "mounting root partition ${ROOT_PART}"
     mount "${ROOT_PART}" "${MNT}"
     mount --bind /dev  "${MNT}/dev"
     mount --bind /proc "${MNT}/proc"
