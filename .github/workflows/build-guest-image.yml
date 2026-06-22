@@ -51,6 +51,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-utils libguestfs-tools curl coreutils
+          # libguestfs builds its appliance with supermin, which reads the host
+          # kernel at /boot/vmlinuz-*. On Ubuntu that image is mode 0600
+          # root:root, so an unprivileged build (required so passt can drop
+          # privileges — see "Build image") can't read it: "cp: cannot open
+          # '/boot/vmlinuz-...' for reading: Permission denied". Make it
+          # world-readable. This is the standard libguestfs-in-CI workaround.
+          sudo chmod 0644 /boot/vmlinuz-* || true
 
       - name: Resolve build metadata
         id: meta
