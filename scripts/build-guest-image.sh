@@ -2,7 +2,7 @@
 # scripts/build-guest-image.sh
 #
 # Build a pre-baked bladerunner guest image starting from the Debian Trixie
-# genericcloud qcow2. The output image has incus + incus-ui-canonical, socat,
+# genericcloud qcow2. The output image has incus + incus-client, socat,
 # jq pre-installed, vsock kernel modules baked into the initramfs, and (when
 # --br-agent-binary is supplied) the br-agent systemd unit ready to run on
 # first boot.
@@ -52,7 +52,7 @@ usage: $0 --arch arm64|amd64 --output PATH [--br-agent-binary PATH]
                            libguestfs `passt`/SLIRP network helper never runs —
                            the reliable path on GitHub-hosted runners. The dir
                            must contain the full dependency closure of
-                           incus, incus-ui-canonical, socat, jq, openssh-server,
+                           incus, incus-client, socat, jq, openssh-server,
                            chrony (e.g. produced by `apt-get download` of the
                            closure inside a debian:${DEBIAN_RELEASE} container).
   --debian-release NAME    Override Debian release (default: trixie).
@@ -159,7 +159,7 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         )
     else
         CUSTOMIZE_ARGS+=(
-            --install "incus,incus-ui-canonical,socat,jq,openssh-server,chrony"
+            --install "incus,incus-client,socat,jq,openssh-server,chrony"
         )
     fi
     CUSTOMIZE_ARGS+=(
@@ -238,7 +238,7 @@ else
     chroot "${MNT}" /bin/bash -eu <<EOS
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y incus incus-ui-canonical socat jq openssh-server chrony
+apt-get install -y incus incus-client socat jq openssh-server chrony
 systemctl enable incus incus.socket ssh
 # chrony swap: install our suspend-tuned conf (overwriting the package default),
 # enable chrony, then mask timesyncd ONLY if chrony is active (half-removal

@@ -95,7 +95,12 @@ jobs:
           # runners ("passt exited with status 1": passt can't write its PID
           # file under the runner's restricted runtime dir). Each matrix job
           # runs on its native arch, so --platform needs no emulation.
-          PKGS="incus incus-ui-canonical socat jq openssh-server chrony"
+          # Core packages, all in Debian trixie main. NB: the Incus web UI
+          # package `incus-ui-canonical` is NOT in Debian (it ships from the
+          # Zabbly repo) and the legacy cloud-init path treats it as optional /
+          # non-fatal, so it is intentionally excluded here — the image is
+          # functional without the bundled UI. `incus-client` is the CLI.
+          PKGS="incus incus-client socat jq openssh-server chrony"
           DEST="$(pwd)/guest-debs-${{ matrix.arch }}"
           mkdir -p "${DEST}"
           docker run --rm --platform "linux/${{ matrix.arch }}" \
