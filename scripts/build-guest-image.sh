@@ -157,7 +157,11 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
     # virt-customize wraps guestfish for declarative image edits. It is
     # idempotent across reruns and handles the initrd regeneration.
     CUSTOMIZE_ARGS=(
-        --install "incus,incus-ui-canonical,socat,jq,openssh-server,chrony"
+        # incus-ui-canonical is intentionally absent: it is not in Debian main
+        # and apt-installing the Zabbly build would swap Debian's incus. The nbd
+        # path bakes the UI as extracted static files; the libguestfs path keeps
+        # the daemon only (dev convenience; CI uses --method nbd).
+        --install "incus,incus-client,socat,jq,openssh-server,chrony"
         --run-command "systemctl enable incus incus.socket ssh"
         # chrony swap (suspend-tuned makestep) + guest-local wake-heal watchdog.
         # Single source of truth: scripts/chrony.conf + scripts/bladerunner-watchdog.{sh,service}.
@@ -261,8 +265,43 @@ else
     chroot "${MNT}" /bin/bash -eu <<EOS
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y incus incus-ui-canonical socat jq openssh-server chrony
+# Core packages from Debian trixie main. Do NOT apt-install incus-ui-canonical:
+# it is not in main, and pulling it from Zabbly would swap Debian's incus to
+# satisfy its "Depends: incus". The UI is baked below as static files instead.
+apt-get install -y incus incus-client socat jq openssh-server chrony
 systemctl enable incus incus.socket ssh
+# Incus web UI (best-effort, matches the cloud-init path): download the Zabbly
+# .deb and extract its static files to /opt/incus/ui WITHOUT installing the
+# package, then point incusd at it via INCUS_UI. Entirely non-fatal so a missing
+# Zabbly suite never fails the image build.
+if [ ! -e /etc/apt/keyrings/zabbly.asc ]; then
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc || true
+fi
+cat >/etc/apt/sources.list.d/zabbly-incus-stable.sources <<SRC || true
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: trixie
+Components: main
+Architectures: \$(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+SRC
+apt-get update || true
+( cd /tmp && apt-get download incus-ui-canonical ) >/dev/null 2>&1 || true
+UI_DEB=\$(ls -1 /tmp/incus-ui-canonical_*.deb 2>/dev/null | head -1)
+if [ -n "\$UI_DEB" ]; then
+  dpkg-deb -x "\$UI_DEB" / || true
+  rm -f "\$UI_DEB"
+  mkdir -p /etc/systemd/system/incus.service.d
+  printf '[Service]\nEnvironment=INCUS_UI=/opt/incus/ui\n' >/etc/systemd/system/incus.service.d/10-bladerunner-ui.conf
+  echo "baked Incus web UI to /opt/incus/ui"
+else
+  echo "incus-ui-canonical unavailable; web UI not baked (non-fatal)" >&2
+fi
+# Drop the Zabbly source so the baked image never carries it (UI files are
+# already extracted; apt must never pull Zabbly's incus at runtime).
+rm -f /etc/apt/sources.list.d/zabbly-incus-stable.sources
 # chrony swap: install our suspend-tuned conf (overwriting the package default),
 # enable chrony, then mask timesyncd ONLY if chrony is active (half-removal
 # guard — never leave the guest with zero time sync).
