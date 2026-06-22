@@ -29,6 +29,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 ARCH=""
 OUTPUT=""
 BR_AGENT_BINARY=""
+PACKAGES_DIR=""
 DEBIAN_RELEASE="${DEBIAN_RELEASE:-trixie}"
 TARGET_SIZE_GIB="${TARGET_SIZE_GIB:-8}"
 
@@ -44,6 +45,16 @@ usage: $0 --arch arm64|amd64 --output PATH [--br-agent-binary PATH]
   --br-agent-binary PATH   Optional br-agent binary; if absent the image is
                            built without the agent (suffix the artifact name
                            with -no-agent at the caller).
+  --packages-dir DIR       Optional dir of pre-downloaded .deb files. When set,
+                           the libguestfs path installs these OFFLINE (copy-in +
+                           dpkg) instead of running apt inside the appliance.
+                           This avoids appliance networking entirely, so the
+                           libguestfs `passt`/SLIRP network helper never runs —
+                           the reliable path on GitHub-hosted runners. The dir
+                           must contain the full dependency closure of
+                           incus, incus-ui-canonical, socat, jq, openssh-server,
+                           chrony (e.g. produced by `apt-get download` of the
+                           closure inside a debian:${DEBIAN_RELEASE} container).
   --debian-release NAME    Override Debian release (default: trixie).
   --size GIB               Resize working image to this GiB (default: 8).
 USAGE
@@ -55,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --arch)              ARCH="${2:?--arch needs a value}"; shift 2;;
         --output)            OUTPUT="${2:?--output needs a value}"; shift 2;;
         --br-agent-binary)   BR_AGENT_BINARY="${2:?--br-agent-binary needs a value}"; shift 2;;
+        --packages-dir)      PACKAGES_DIR="${2:?--packages-dir needs a value}"; shift 2;;
         --debian-release)    DEBIAN_RELEASE="${2:?}"; shift 2;;
         --size)              TARGET_SIZE_GIB="${2:?}"; shift 2;;
         -h|--help)           usage;;
@@ -121,8 +133,36 @@ fi
 if [[ ${USE_GUESTFISH} -eq 1 ]]; then
     # virt-customize wraps guestfish for declarative image edits. It is
     # idempotent across reruns and handles the initrd regeneration.
-    CUSTOMIZE_ARGS=(
-        --install "incus,incus-ui-canonical,socat,jq,openssh-server,chrony"
+    #
+    # Package install has two modes:
+    #   - default: --install pulls packages with apt INSIDE the appliance,
+    #     which requires appliance networking (the libguestfs passt/SLIRP
+    #     helper). That helper is unreliable on GitHub-hosted runners.
+    #   - --packages-dir: copy pre-downloaded .debs into the appliance and
+    #     `dpkg -i` them OFFLINE, so virt-customize never enables networking
+    #     and passt never runs. Preferred in CI.
+    CUSTOMIZE_ARGS=()
+    if [[ -n "${PACKAGES_DIR}" ]]; then
+        [[ -d "${PACKAGES_DIR}" ]] || fatal "packages dir not found: ${PACKAGES_DIR}"
+        shopt -s nullglob
+        debs=("${PACKAGES_DIR}"/*.deb)
+        shopt -u nullglob
+        [[ ${#debs[@]} -gt 0 ]] || fatal "no .deb files in ${PACKAGES_DIR}"
+        log "offline install: ${#debs[@]} .debs from ${PACKAGES_DIR} (no appliance network)"
+        CUSTOMIZE_ARGS+=(
+            --copy-in     "${PACKAGES_DIR}:/tmp"
+            # dpkg -i is order-sensitive; a second pass resolves install order
+            # within the closure. The set is self-contained (full dep closure),
+            # so no apt/network is needed to satisfy dependencies.
+            --run-command "dpkg -i /tmp/$(basename "${PACKAGES_DIR}")/*.deb || dpkg -i /tmp/$(basename "${PACKAGES_DIR}")/*.deb"
+            --run-command "rm -rf /tmp/$(basename "${PACKAGES_DIR}")"
+        )
+    else
+        CUSTOMIZE_ARGS+=(
+            --install "incus,incus-ui-canonical,socat,jq,openssh-server,chrony"
+        )
+    fi
+    CUSTOMIZE_ARGS+=(
         --run-command "systemctl enable incus incus.socket ssh"
         # chrony swap (suspend-tuned makestep) + guest-local wake-heal watchdog.
         # Single source of truth: scripts/chrony.conf + scripts/bladerunner-watchdog.{sh,service}.

@@ -84,33 +84,57 @@ jobs:
             echo "suffix=-no-agent" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Download guest packages (offline closure)
+        id: pkgs
+        run: |
+          # Download the FULL dependency closure of the guest packages from a
+          # debian container matching the guest's release + arch, so the image
+          # build can dpkg-install them OFFLINE inside the appliance. This
+          # removes the appliance's need for networking, so the libguestfs
+          # passt/SLIRP helper never runs — it is unreliable on GitHub-hosted
+          # runners ("passt exited with status 1": passt can't write its PID
+          # file under the runner's restricted runtime dir). Each matrix job
+          # runs on its native arch, so --platform needs no emulation.
+          PKGS="incus incus-ui-canonical socat jq openssh-server chrony"
+          DEST="$(pwd)/guest-debs-${{ matrix.arch }}"
+          mkdir -p "${DEST}"
+          docker run --rm --platform "linux/${{ matrix.arch }}" \
+            -v "${DEST}:/debs" debian:trixie bash -euxc "
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              # --download-only populates the apt cache with the EXACT closure
+              # apt would install (all transitive deps), already arch/release
+              # consistent — no manual dep resolution needed.
+              apt-get install -y --no-install-recommends --download-only ${PKGS}
+              cp /var/cache/apt/archives/*.deb /debs/
+              chmod -R a+r /debs
+            "
+          COUNT="$(find "${DEST}" -maxdepth 1 -name '*.deb' | wc -l | tr -d ' ')"
+          echo "downloaded ${COUNT} .debs to ${DEST}"
+          [ "${COUNT}" -gt 0 ] || { echo '::error::no .debs downloaded'; exit 1; }
+          echo "dir=${DEST}" >> "${GITHUB_OUTPUT}"
+
       - name: Build image
         id: build
-        env:
-          # DIAGNOSTIC (temporary): libguestfs debug+trace, kept for one
-          # confirming run that the rootless fix works. Remove afterwards.
-          LIBGUESTFS_DEBUG: 1
-          LIBGUESTFS_TRACE: 1
         run: |
           mkdir -p out
           OUT="out/bladerunner-guest-${{ matrix.arch }}${{ steps.agent.outputs.suffix }}.qcow2"
           # Run WITHOUT sudo. The libguestfs path (guestfish + virt-customize)
           # is fully unprivileged — every privileged op runs inside the guest
-          # appliance, not on the host. Running the build as root broke passt:
-          # it drops privileges to `nobody` for security, then fails to write
-          # its PID file into the root-owned temp dir ("PID file open:
-          # Permission denied" → "passt exited with status 1"). As a normal
-          # user the temp dir is user-owned and passt starts cleanly. (sudo is
-          # only needed for the nbd+chroot fallback, which CI never hits since
-          # libguestfs-tools is installed.)
+          # appliance, not on the host. Running as root breaks passt's privilege
+          # drop; running rootless needs a readable host kernel (chmod'd above).
+          # With --packages-dir the appliance installs offline (no apt, no
+          # network, no passt at all) — the reliable CI path.
           if [ -n "${{ steps.agent.outputs.binary }}" ]; then
             bash scripts/build-guest-image.sh \
               --arch ${{ matrix.arch }} \
+              --packages-dir "${{ steps.pkgs.outputs.dir }}" \
               --output "${OUT}" \
               --br-agent-binary "${{ steps.agent.outputs.binary }}"
           else
             bash scripts/build-guest-image.sh \
               --arch ${{ matrix.arch }} \
+              --packages-dir "${{ steps.pkgs.outputs.dir }}" \
               --output "${OUT}"
           fi
           echo "out=${OUT}" >> "${GITHUB_OUTPUT}"
