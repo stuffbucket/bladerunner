@@ -32,9 +32,10 @@ func testConfig() *config.Config {
 
 // TestBuildCloudInit_FirstBootConsoleDropIn verifies that the user-data
 // emitted by BuildCloudInit installs the /etc/default/grub.d/99_bladerunner.cfg
-// drop-in that appends console=hvc0 to GRUB_CMDLINE_LINUX, so the first user-
-// visible boot has /dev/console wired to the VZ-captured serial device. This
-// is the fix for #55.
+// drop-in that appends console=hvc0 to GRUB_CMDLINE_LINUX, so the KERNEL's own
+// console is wired to the VZ-captured serial device from the next natural boot
+// onward (#55). First-boot userspace breadcrumbs reach hvc0 directly without
+// waiting for this (#57).
 func TestBuildCloudInit_FirstBootConsoleDropIn(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
@@ -52,25 +53,25 @@ func TestBuildCloudInit_FirstBootConsoleDropIn(t *testing.T) {
 	}
 }
 
-// TestBuildCloudInit_FirstBootRebootSentinel verifies that the bootcmd block
-// reboots exactly once, guarded by a sentinel file, so the regenerated
-// grub.cfg (carrying console=hvc0) is active before runcmd executes the
-// bootstrap script. Without this reboot the grub.d drop-in only takes effect
-// on the second boot, which defeats the purpose.
-func TestBuildCloudInit_FirstBootRebootSentinel(t *testing.T) {
+// TestBuildCloudInit_NoFirstBootReboot guards #57: there must be NO forced
+// first-boot reboot. The old bootcmd reboot (touch .boot1-rebooted +
+// systemctl reboot) never fired reliably and doubled cold-boot time. First-boot
+// visibility now comes from br_stage writing straight to /dev/hvc0, so the
+// reboot is unnecessary and must not return.
+func TestBuildCloudInit_NoFirstBootReboot(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
 	userData, _ := BuildCloudInit(cfg, "")
 
-	wants := []string{
-		"/var/lib/bladerunner/.boot1-rebooted",
-		"touch /var/lib/bladerunner/.boot1-rebooted",
+	forbidden := []string{
+		".boot1-rebooted",
 		"systemctl reboot",
+		"shutdown -r now",
 	}
-	for _, want := range wants {
-		if !strings.Contains(userData, want) {
-			t.Errorf("user-data missing expected sentinel/reboot snippet %q\n---\n%s\n---", want, userData)
+	for _, bad := range forbidden {
+		if strings.Contains(userData, bad) {
+			t.Errorf("user-data still contains forced first-boot reboot snippet %q; #57 reboot must be gone\n---\n%s\n---", bad, userData)
 		}
 	}
 }
@@ -155,7 +156,7 @@ func TestBuildCloudInit_BootBreadcrumbs(t *testing.T) {
 
 	wants := []string{
 		"br_stage() {",   // helper defined
-		">/dev/console",  // writes to the host-captured console
+		">/dev/hvc0",     // writes straight to the VZ-captured virtio console
 		"br_stage start", // first milestone
 		"br_stage apt-install-incus",
 		"br_stage incus-ready",
@@ -247,7 +248,8 @@ func TestBuildCloudInit_NoShareWhenDisabled(t *testing.T) {
 }
 
 // TestBuildCloudInit_UpdateGrubStillRuns ensures bootcmd still regenerates
-// /boot/grub/grub.cfg so the drop-in is picked up before the sentinel reboot.
+// /boot/grub/grub.cfg so the 99_bladerunner.cfg drop-in routes the kernel
+// console to hvc0 on the next natural boot (no forced reboot needed; see #57).
 func TestBuildCloudInit_UpdateGrubStillRuns(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
