@@ -80,42 +80,33 @@ jobs:
       - name: Build image
         id: build
         env:
-          # Force libguestfs to launch qemu directly (no libvirtd) with SLIRP
-          # user-mode networking. The default libvirt backend on ubuntu-24.04
-          # uses the `passt` network helper, which fails to start in the Actions
-          # sandbox ("passt exited with status 1") and aborts virt-customize
-          # before its in-appliance `--install` apt step can fetch incus/etc.
-          # The `direct` backend honors LIBGUESTFS_BACKEND_SETTINGS=network=slirp
-          # and needs no host privileges, so it works in CI.
-          LIBGUESTFS_BACKEND: direct
-          LIBGUESTFS_BACKEND_SETTINGS: network=slirp
-          # DIAGNOSTIC: surface passt's own stderr + the full appliance trace so
-          # we can see *why* passt exits 1 (the error above is opaque). Remove
-          # once the network backend is sorted.
+          # DIAGNOSTIC (temporary): libguestfs debug+trace, kept for one
+          # confirming run that the rootless fix works. Remove afterwards.
           LIBGUESTFS_DEBUG: 1
           LIBGUESTFS_TRACE: 1
         run: |
           mkdir -p out
           OUT="out/bladerunner-guest-${{ matrix.arch }}${{ steps.agent.outputs.suffix }}.qcow2"
-          # sudo strips the environment, so pass the libguestfs settings through
-          # explicitly (sudo -E would also leak the rest of the env).
-          SUDO=(sudo
-            "LIBGUESTFS_BACKEND=${LIBGUESTFS_BACKEND}"
-            "LIBGUESTFS_BACKEND_SETTINGS=${LIBGUESTFS_BACKEND_SETTINGS}"
-            "LIBGUESTFS_DEBUG=${LIBGUESTFS_DEBUG}"
-            "LIBGUESTFS_TRACE=${LIBGUESTFS_TRACE}")
+          # Run WITHOUT sudo. The libguestfs path (guestfish + virt-customize)
+          # is fully unprivileged — every privileged op runs inside the guest
+          # appliance, not on the host. Running the build as root broke passt:
+          # it drops privileges to `nobody` for security, then fails to write
+          # its PID file into the root-owned temp dir ("PID file open:
+          # Permission denied" → "passt exited with status 1"). As a normal
+          # user the temp dir is user-owned and passt starts cleanly. (sudo is
+          # only needed for the nbd+chroot fallback, which CI never hits since
+          # libguestfs-tools is installed.)
           if [ -n "${{ steps.agent.outputs.binary }}" ]; then
-            "${SUDO[@]}" bash scripts/build-guest-image.sh \
+            bash scripts/build-guest-image.sh \
               --arch ${{ matrix.arch }} \
               --output "${OUT}" \
               --br-agent-binary "${{ steps.agent.outputs.binary }}"
           else
-            "${SUDO[@]}" bash scripts/build-guest-image.sh \
+            bash scripts/build-guest-image.sh \
               --arch ${{ matrix.arch }} \
               --output "${OUT}"
           fi
           echo "out=${OUT}" >> "${GITHUB_OUTPUT}"
-          sudo chown "$(id -u):$(id -g)" "${OUT}" "${OUT}.sha256"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
