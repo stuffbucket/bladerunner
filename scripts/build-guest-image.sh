@@ -236,6 +236,19 @@ else
     mount --bind /proc "${MNT}/proc"
     mount --bind /sys  "${MNT}/sys"
 
+    # The Debian cloud image ships /etc/resolv.conf as a systemd-resolved symlink
+    # that dangles inside the chroot, so apt can't resolve the mirror. The chroot
+    # shares the host network namespace, so the host's resolver works here. Stash
+    # the original and restore it afterwards so the baked image is unchanged.
+    RESOLV="${MNT}/etc/resolv.conf"
+    RESOLV_BAK="${WORK_DIR}/resolv.conf.orig"
+    if [[ -e "${RESOLV}" || -L "${RESOLV}" ]]; then
+        cp -a "${RESOLV}" "${RESOLV_BAK}"
+    fi
+    rm -f "${RESOLV}"
+    cp -L /etc/resolv.conf "${RESOLV}" 2>/dev/null \
+        || printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "${RESOLV}"
+
     # Watchdog script/unit copied into the chroot BEFORE it runs (their target
     # dirs already exist in the base image). chrony.conf is written AFTER apt
     # installs chrony inside the chroot (its /etc/chrony dir is created by the
@@ -270,6 +283,14 @@ EOS
         install -m 0755 "${BR_AGENT_BINARY}" "${MNT}/usr/local/bin/br-agent"
         install -m 0644 "${SCRIPT_DIR}/br-agent.service" "${MNT}/etc/systemd/system/br-agent.service"
         chroot "${MNT}" systemctl enable br-agent.service
+    fi
+
+    # Restore the image's original /etc/resolv.conf (typically the
+    # systemd-resolved symlink) so the baked image resolves DNS at runtime the
+    # same way stock Debian does.
+    rm -f "${RESOLV}"
+    if [[ -e "${RESOLV_BAK}" || -L "${RESOLV_BAK}" ]]; then
+        cp -a "${RESOLV_BAK}" "${RESOLV}"
     fi
 fi
 
