@@ -10,14 +10,16 @@ import (
 //go:embed banner
 var bannerText string
 
-// gradientStops defines the blue-to-green color ramp (24-bit RGB).
+// gradientStops defines the brand's vaporwave ramp (24-bit RGB): ultraviolet
+// through ice-cyan, then a hard pivot into magenta/pink. The cyan<->magenta
+// tension is what reads as vaporwave; the dark canvas keeps it serious.
 var gradientStops = [][3]float64{
-	{138, 92, 246}, // purple
-	{88, 101, 242}, // indigo
-	{59, 130, 246}, // blue
-	{6, 182, 212},  // cyan
-	{16, 185, 129}, // emerald
-	{52, 211, 153}, // green
+	{177, 79, 255},  // uv-violet  #B14FFF
+	{110, 91, 255},  // indigo     #6E5BFF
+	{43, 212, 255},  // ice-cyan   #2BD4FF
+	{34, 211, 238},  // aqua       #22D3EE
+	{255, 79, 216},  // magenta    #FF4FD8
+	{255, 111, 163}, // pink      #FF6FA3
 }
 
 // Banner returns the ASCII banner with a horizontal gradient applied.

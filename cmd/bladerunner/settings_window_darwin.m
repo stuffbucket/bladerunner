@@ -45,7 +45,7 @@ void brShowSettings(const char *html) {
   NSString *h = html ? [NSString stringWithUTF8String:html] : @"";
   settingsRunOnMain(^{
     if (gSettingsWindow == nil) {
-      NSRect frame = NSMakeRect(0, 0, 460, 580);
+      NSRect frame = NSMakeRect(0, 0, 460, 680);
       gSettingsWindow = [[NSWindow alloc]
           initWithContentRect:frame
                     styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |

@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 744 116" role="img" aria-label="bladerunner">
   <defs>
     <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0" gradientUnits="objectBoundingBox">
-      <stop offset="0"   stop-color="#8A5CF6"/>
-      <stop offset="0.2" stop-color="#5865F2"/>
-      <stop offset="0.4" stop-color="#3B82F6"/>
-      <stop offset="0.6" stop-color="#06B6D4"/>
-      <stop offset="0.8" stop-color="#10B981"/>
-      <stop offset="1"   stop-color="#34D399"/>
+      <stop offset="0"   stop-color="#B14FFF"/>
+      <stop offset="0.2" stop-color="#6E5BFF"/>
+      <stop offset="0.4" stop-color="#2BD4FF"/>
+      <stop offset="0.6" stop-color="#22D3EE"/>
+      <stop offset="0.8" stop-color="#FF4FD8"/>
+      <stop offset="1"   stop-color="#FF6FA3"/>
     </linearGradient>
   </defs>
   <text xml:space="preserve" x="6" y="22"

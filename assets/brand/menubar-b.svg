@@ -1,9 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
-  <!-- Bold slanted 'b' matching the dock monogram, drawn in black: the Go
-       menubar uses this as an alpha mask and tints it by VM state. -->
-  <g transform="translate(22 26) skewX(-8) translate(-22 -26)">
-    <text x="22" y="38" text-anchor="middle"
-          font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
-          font-weight="800" font-size="46" fill="#000">b</text>
+  <!-- Three forward-leaning slashes echoing the dock icon's motion mark,
+       reduced from four to /// so the bars stay legible at 22pt. Drawn in
+       black: the Go menubar uses this as an alpha mask and tints it by VM
+       state (green = running, gray = stopped). -->
+  <g fill="#000">
+    <path d="M14 8 H19 L12 36 H7 Z"/>
+    <path d="M23.5 8 H28.5 L21.5 36 H16.5 Z"/>
+    <path d="M32 8 H37 L30 36 H25 Z"/>
   </g>
 </svg>
