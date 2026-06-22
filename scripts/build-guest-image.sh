@@ -264,6 +264,9 @@ else
 
     chroot "${MNT}" /bin/bash -eu <<EOS
 export DEBIAN_FRONTEND=noninteractive
+# Retry transient mirror/CDN resets (observed: a 'Connection reset by peer' on a
+# single .deb fetch failing the whole amd64 build while arm64 succeeded).
+echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-bladerunner-retries
 apt-get update
 # Core packages from Debian trixie main. Do NOT apt-install incus-ui-canonical:
 # it is not in main, and pulling it from Zabbly would swap Debian's incus to
@@ -316,9 +319,10 @@ systemctl enable bladerunner-vsock-ntp.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
 update-initramfs -u
-# Drop the apt cache so it isn't carried in the baked image.
+# Drop the apt cache + build-time retry config so the baked image stays pristine.
 apt-get clean
 rm -rf /var/lib/apt/lists/*
+rm -f /etc/apt/apt.conf.d/80-bladerunner-retries
 EOS
 
     if [[ -n "${BR_AGENT_BINARY}" ]]; then
