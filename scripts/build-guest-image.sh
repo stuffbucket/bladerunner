@@ -31,6 +31,12 @@ OUTPUT=""
 BR_AGENT_BINARY=""
 DEBIAN_RELEASE="${DEBIAN_RELEASE:-trixie}"
 TARGET_SIZE_GIB="${TARGET_SIZE_GIB:-8}"
+# Customize method: auto (prefer libguestfs), guestfish (force libguestfs), or
+# nbd (force the qemu-nbd + chroot path). The chroot path runs apt over the
+# HOST network namespace and never boots a libguestfs appliance, so it sidesteps
+# the "passt exited with status 1" appliance-networking failure that libguestfs
+# 1.52 hits on GitHub-hosted runners (#45).
+METHOD="${GUEST_IMAGE_METHOD:-auto}"
 
 log()   { printf '[build-guest-image] %s\n' "$*" >&2; }
 fatal() { log "ERROR: $*"; exit 1; }
@@ -46,6 +52,10 @@ usage: $0 --arch arm64|amd64 --output PATH [--br-agent-binary PATH]
                            with -no-agent at the caller).
   --debian-release NAME    Override Debian release (default: trixie).
   --size GIB               Resize working image to this GiB (default: 8).
+  --method METHOD          Customize method: auto|guestfish|nbd (default: auto).
+                           'nbd' forces the qemu-nbd + chroot path, which avoids
+                           the libguestfs appliance network (passt) failure on
+                           GitHub-hosted runners.
 USAGE
     exit 2
 }
@@ -57,6 +67,7 @@ while [[ $# -gt 0 ]]; do
         --br-agent-binary)   BR_AGENT_BINARY="${2:?--br-agent-binary needs a value}"; shift 2;;
         --debian-release)    DEBIAN_RELEASE="${2:?}"; shift 2;;
         --size)              TARGET_SIZE_GIB="${2:?}"; shift 2;;
+        --method)            METHOD="${2:?--method needs a value}"; shift 2;;
         -h|--help)           usage;;
         *)                   fatal "unknown argument: $1";;
     esac
@@ -82,15 +93,39 @@ require_tool qemu-img    "qemu-utils"
 require_tool curl        "curl"
 require_tool sha256sum   "coreutils"
 
-USE_GUESTFISH=0
+case "${METHOD}" in
+    auto|guestfish|nbd) ;;
+    *) fatal "unsupported --method: ${METHOD} (expected auto, guestfish, or nbd)";;
+esac
+
+have_guestfish=0
 if command -v guestfish >/dev/null 2>&1 && command -v virt-customize >/dev/null 2>&1; then
-    USE_GUESTFISH=1
-    log "using libguestfs (guestfish + virt-customize)"
-else
-    log "libguestfs not detected; falling back to qemu-nbd + chroot path"
-    require_tool qemu-nbd "qemu-utils"
-    require_tool chroot   "coreutils"
+    have_guestfish=1
 fi
+
+USE_GUESTFISH=0
+case "${METHOD}" in
+    guestfish)
+        [[ ${have_guestfish} -eq 1 ]] || fatal "--method guestfish but libguestfs not installed"
+        USE_GUESTFISH=1
+        log "customize method: libguestfs (guestfish + virt-customize), forced"
+        ;;
+    nbd)
+        log "customize method: qemu-nbd + chroot, forced (avoids libguestfs appliance passt failure)"
+        require_tool qemu-nbd "qemu-utils"
+        require_tool chroot   "coreutils"
+        ;;
+    auto)
+        if [[ ${have_guestfish} -eq 1 ]]; then
+            USE_GUESTFISH=1
+            log "customize method: libguestfs (guestfish + virt-customize), auto-selected"
+        else
+            log "customize method: qemu-nbd + chroot (libguestfs not detected)"
+            require_tool qemu-nbd "qemu-utils"
+            require_tool chroot   "coreutils"
+        fi
+        ;;
+esac
 
 # ----- download base image ------------------------------------------------
 
@@ -122,7 +157,11 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
     # virt-customize wraps guestfish for declarative image edits. It is
     # idempotent across reruns and handles the initrd regeneration.
     CUSTOMIZE_ARGS=(
-        --install "incus,incus-ui-canonical,socat,jq,openssh-server,chrony"
+        # incus-ui-canonical is intentionally absent: it is not in Debian main
+        # and apt-installing the Zabbly build would swap Debian's incus. The nbd
+        # path bakes the UI as extracted static files; the libguestfs path keeps
+        # the daemon only (dev convenience; CI uses --method nbd).
+        --install "incus,incus-client,socat,jq,openssh-server,chrony"
         --run-command "systemctl enable incus incus.socket ssh"
         # chrony swap (suspend-tuned makestep) + guest-local wake-heal watchdog.
         # Single source of truth: scripts/chrony.conf + scripts/bladerunner-watchdog.{sh,service}.
@@ -180,11 +219,39 @@ else
     trap 'cleanup_nbd; rm -rf "${WORK_DIR}"' EXIT
 
     sleep 2  # let kernel surface partitions
-    ROOT_PART="${NBD_DEV}p1"
+    log "partition layout of ${NBD_DEV}:"
+    lsblk -o NAME,SIZE,FSTYPE,PARTLABEL "${NBD_DEV}" >&2 || true
+
+    # Pick the root partition by filesystem rather than hardcoding p1: Debian
+    # genericcloud carries a small FAT ESP and a BIOS-boot partition alongside
+    # the ext4 root, and their ordering is not guaranteed across releases.
+    ROOT_PART=""
+    for part in "${NBD_DEV}"p*; do
+        [[ -b "${part}" ]] || continue
+        if [[ "$(blkid -o value -s TYPE "${part}" 2>/dev/null || true)" == "ext4" ]]; then
+            ROOT_PART="${part}"
+            break
+        fi
+    done
+    [[ -n "${ROOT_PART}" ]] || ROOT_PART="${NBD_DEV}p1"  # last-resort fallback
+    log "mounting root partition ${ROOT_PART}"
     mount "${ROOT_PART}" "${MNT}"
     mount --bind /dev  "${MNT}/dev"
     mount --bind /proc "${MNT}/proc"
     mount --bind /sys  "${MNT}/sys"
+
+    # The Debian cloud image ships /etc/resolv.conf as a systemd-resolved symlink
+    # that dangles inside the chroot, so apt can't resolve the mirror. The chroot
+    # shares the host network namespace, so the host's resolver works here. Stash
+    # the original and restore it afterwards so the baked image is unchanged.
+    RESOLV="${MNT}/etc/resolv.conf"
+    RESOLV_BAK="${WORK_DIR}/resolv.conf.orig"
+    if [[ -e "${RESOLV}" || -L "${RESOLV}" ]]; then
+        cp -a "${RESOLV}" "${RESOLV_BAK}"
+    fi
+    rm -f "${RESOLV}"
+    cp -L /etc/resolv.conf "${RESOLV}" 2>/dev/null \
+        || printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "${RESOLV}"
 
     # Watchdog script/unit copied into the chroot BEFORE it runs (their target
     # dirs already exist in the base image). chrony.conf is written AFTER apt
@@ -197,9 +264,47 @@ else
 
     chroot "${MNT}" /bin/bash -eu <<EOS
 export DEBIAN_FRONTEND=noninteractive
+# Retry transient mirror/CDN resets (observed: a 'Connection reset by peer' on a
+# single .deb fetch failing the whole amd64 build while arm64 succeeded).
+echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-bladerunner-retries
 apt-get update
-apt-get install -y incus incus-ui-canonical socat jq openssh-server chrony
+# Core packages from Debian trixie main. Do NOT apt-install incus-ui-canonical:
+# it is not in main, and pulling it from Zabbly would swap Debian's incus to
+# satisfy its "Depends: incus". The UI is baked below as static files instead.
+apt-get install -y incus incus-client socat jq openssh-server chrony
 systemctl enable incus incus.socket ssh
+# Incus web UI (best-effort, matches the cloud-init path): download the Zabbly
+# .deb and extract its static files to /opt/incus/ui WITHOUT installing the
+# package, then point incusd at it via INCUS_UI. Entirely non-fatal so a missing
+# Zabbly suite never fails the image build.
+if [ ! -e /etc/apt/keyrings/zabbly.asc ]; then
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc || true
+fi
+cat >/etc/apt/sources.list.d/zabbly-incus-stable.sources <<SRC || true
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: trixie
+Components: main
+Architectures: \$(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+SRC
+apt-get update || true
+( cd /tmp && apt-get download incus-ui-canonical ) >/dev/null 2>&1 || true
+UI_DEB=\$(ls -1 /tmp/incus-ui-canonical_*.deb 2>/dev/null | head -1)
+if [ -n "\$UI_DEB" ]; then
+  dpkg-deb -x "\$UI_DEB" / || true
+  rm -f "\$UI_DEB"
+  mkdir -p /etc/systemd/system/incus.service.d
+  printf '[Service]\nEnvironment=INCUS_UI=/opt/incus/ui\n' >/etc/systemd/system/incus.service.d/10-bladerunner-ui.conf
+  echo "baked Incus web UI to /opt/incus/ui"
+else
+  echo "incus-ui-canonical unavailable; web UI not baked (non-fatal)" >&2
+fi
+# Drop the Zabbly source so the baked image never carries it (UI files are
+# already extracted; apt must never pull Zabbly's incus at runtime).
+rm -f /etc/apt/sources.list.d/zabbly-incus-stable.sources
 # chrony swap: install our suspend-tuned conf (overwriting the package default),
 # enable chrony, then mask timesyncd ONLY if chrony is active (half-removal
 # guard — never leave the guest with zero time sync).
@@ -214,6 +319,10 @@ systemctl enable bladerunner-vsock-ntp.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
 update-initramfs -u
+# Drop the apt cache + build-time retry config so the baked image stays pristine.
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+rm -f /etc/apt/apt.conf.d/80-bladerunner-retries
 EOS
 
     if [[ -n "${BR_AGENT_BINARY}" ]]; then
@@ -221,16 +330,38 @@ EOS
         install -m 0644 "${SCRIPT_DIR}/br-agent.service" "${MNT}/etc/systemd/system/br-agent.service"
         chroot "${MNT}" systemctl enable br-agent.service
     fi
+
+    # Restore the image's original /etc/resolv.conf (typically the
+    # systemd-resolved symlink) so the baked image resolves DNS at runtime the
+    # same way stock Debian does.
+    rm -f "${RESOLV}"
+    if [[ -e "${RESOLV_BAK}" || -L "${RESOLV_BAK}" ]]; then
+        cp -a "${RESOLV_BAK}" "${RESOLV}"
+    fi
+
+    # Zero the free space so qemu-img -c can compress it away: virt-sparsify
+    # (which would discard unused blocks) can't run here because the libguestfs
+    # appliance won't launch on the runner. Best-effort; ENOSPC just stops dd.
+    log "zero-filling free space to aid compression"
+    dd if=/dev/zero of="${MNT}/ZEROFILL" bs=1M 2>/dev/null || true
+    rm -f "${MNT}/ZEROFILL"
+    sync
+
+    # Detach the image NOW (not just on the EXIT trap) so the compress step below
+    # reads a consistent, fully-flushed qcow2 rather than one qemu-nbd still holds.
+    cleanup_nbd
 fi
 
 # ----- sparsify and compress ----------------------------------------------
 
 OUT_TMP="${WORK_DIR}/out.qcow2"
-if command -v virt-sparsify >/dev/null 2>&1; then
+if [[ ${USE_GUESTFISH} -eq 1 ]] && command -v virt-sparsify >/dev/null 2>&1; then
     log "sparsifying with virt-sparsify"
     virt-sparsify --compress "${BASE_IMAGE}" "${OUT_TMP}"
 else
-    log "virt-sparsify not available; falling back to qemu-img convert"
+    # nbd path (or no libguestfs): the appliance is unavailable, so compress with
+    # qemu-img. Free space was zeroed above, so -c shrinks it effectively.
+    log "compressing with qemu-img convert (virt-sparsify unavailable: no libguestfs appliance)"
     qemu-img convert -O qcow2 -c "${BASE_IMAGE}" "${OUT_TMP}"
 fi
 

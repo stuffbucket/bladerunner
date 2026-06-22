@@ -57,11 +57,11 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	b.WriteString("    permissions: '0755'\n")
 	b.WriteString("    content: |\n")
 	b.WriteString(indent(bootstrapScript, 6))
-	// Drop-in grub override: ensures /dev/console routes to hvc0 (the VZ-captured
-	// serial device) on every subsequent boot. cloud-init applies write_files
-	// before bootcmd/runcmd, so the file is in place when update-grub runs below.
-	// This file APPENDS to GRUB_CMDLINE_LINUX rather than replacing it, so any
-	// existing distro defaults are preserved.
+	// Drop-in grub override: routes the kernel's own console to hvc0 (the
+	// VZ-captured serial device) on every subsequent natural boot. cloud-init
+	// applies write_files before bootcmd/runcmd, so the file is in place when
+	// update-grub runs below. This file APPENDS to GRUB_CMDLINE_LINUX rather than
+	// replacing it, so any existing distro defaults are preserved.
 	b.WriteString("  - path: /etc/default/grub.d/99_bladerunner.cfg\n")
 	b.WriteString("    permissions: '0644'\n")
 	b.WriteString("    content: |\n")
@@ -69,16 +69,13 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	b.WriteString("bootcmd:\n")
 	b.WriteString("  # Regenerate grub config so the 99_bladerunner.cfg drop-in (written by\n")
 	b.WriteString("  # write_files above, which cloud-init applies before bootcmd) lands in\n")
-	b.WriteString("  # /boot/grub/grub.cfg. Then, on first boot only, reboot immediately so\n")
-	b.WriteString("  # runcmd (the bootstrap script) executes with console=hvc0 active and\n")
-	b.WriteString("  # its STAGE breadcrumbs reach the host-captured console.log.\n")
+	b.WriteString("  # /boot/grub/grub.cfg, routing the KERNEL's console to hvc0 from the next\n")
+	b.WriteString("  # natural boot onward. We deliberately do NOT force a first-boot reboot:\n")
+	b.WriteString("  # the bootstrap's br_stage breadcrumbs write straight to /dev/hvc0, which\n")
+	b.WriteString("  # is present in late userspace regardless of the kernel console= cmdline,\n")
+	b.WriteString("  # so first-boot progress is already visible. The old bootcmd reboot never\n")
+	b.WriteString("  # fired reliably and doubled cold-boot time (#57).\n")
 	b.WriteString("  - [sh, -c, 'update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true']\n")
-	b.WriteString("  - |\n")
-	b.WriteString("    mkdir -p /var/lib/bladerunner\n")
-	b.WriteString("    if [ ! -f /var/lib/bladerunner/.boot1-rebooted ]; then\n")
-	b.WriteString("      touch /var/lib/bladerunner/.boot1-rebooted\n")
-	b.WriteString("      systemctl reboot || reboot || shutdown -r now\n")
-	b.WriteString("    fi\n")
 	b.WriteString("growpart:\n")
 	b.WriteString("  mode: auto\n")
 	b.WriteString("  devices: [/]\n")
@@ -155,11 +152,16 @@ export DEBIAN_FRONTEND=noninteractive
 
 mkdir -p /var/lib/bladerunner
 
-# Emit a host-visible breadcrumb to /dev/console (captured into the host-side
-# console.log) so first-boot progress is visible even when SSH/Incus aren't up
-# yet. Best-effort: console may not exist on some virt setups. (#52)
+# Emit a host-visible breadcrumb to the VZ-captured virtio console so first-boot
+# progress is visible even before SSH/Incus are up (#52, #57). Write straight to
+# /dev/hvc0 -- the virtio-console device VZ streams into the host-side
+# console.log -- because it is present in late userspace regardless of the
+# kernel console= cmdline. /dev/console only routes here once the
+# 99_bladerunner.cfg grub drop-in takes effect (the next natural boot), so it is
+# only a fallback. Best-effort: a missing device must never abort the bootstrap.
 br_stage() {
-  echo "bladerunner-bootstrap: stage=$1 t=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" >/dev/console 2>/dev/null || true
+  msg="bladerunner-bootstrap: stage=$1 t=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)"
+  echo "$msg" >/dev/hvc0 2>/dev/null || echo "$msg" >/dev/console 2>/dev/null || true
 }
 br_stage start
 
