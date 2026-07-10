@@ -47,7 +47,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ssh not found: %w", err)
 	}
 
-	sshExecArgs := []string{"ssh", "-t", "-F", configPath, "bladerunner"}
+	sshExecArgs := []string{"ssh", "-t", "-F", configPath, sshHostAlias}
 	if len(shellArgs) > 0 {
 		sshExecArgs = append(sshExecArgs, shellArgs...)
 	}

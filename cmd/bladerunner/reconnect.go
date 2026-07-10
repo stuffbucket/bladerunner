@@ -11,6 +11,10 @@ import (
 
 const guestExecTimeout = 20 * time.Second
 
+// sudoCmd is the privilege-escalation command used to run guest/host commands
+// that require root.
+const sudoCmd = "sudo"
+
 var reconnectCmd = &cobra.Command{
 	Use:   "reconnect",
 	Short: "Re-sync the guest after a host sleep (clock + Incus/OIDC forwarders), without restarting",
@@ -42,8 +46,8 @@ func runReconnect(_ *cobra.Command, _ []string) error {
 	// it) or systemd-networkd (avoid disrupting containers).
 	epoch := time.Now().Unix()
 	steps := [][]string{
-		{"sudo", "-n", "date", "-s", fmt.Sprintf("@%d", epoch)},
-		{"sudo", "-n", "systemctl", "restart", "chrony", "bladerunner-vsock-ntp", "bladerunner-vsock-incus", "bladerunner-vsock-oidc"},
+		{sudoCmd, "-n", "date", "-s", fmt.Sprintf("@%d", epoch)},
+		{sudoCmd, "-n", "systemctl", "restart", "chrony", "bladerunner-vsock-ntp", "bladerunner-vsock-incus", "bladerunner-vsock-oidc"},
 	}
 
 	for _, step := range steps {
@@ -72,7 +76,7 @@ func guestExec(configPath string, args ...string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), guestExecTimeout)
 	defer cancel()
-	full := append([]string{"-F", configPath, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "bladerunner"}, args...)
+	full := append([]string{"-F", configPath, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", sshHostAlias}, args...)
 	out, err := exec.CommandContext(ctx, sshPath, full...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("guest %v: %w: %s", args, err, out)

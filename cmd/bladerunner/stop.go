@@ -94,7 +94,7 @@ func runStop(_ *cobra.Command, _ []string) error {
 	}
 	if waitForSocketGone(socketPath, graceful) {
 		if jsonOutput {
-			return emitJSON(stopResult{Status: "stopped"})
+			return emitJSON(stopResult{Status: control.StatusStopped})
 		}
 		fmt.Println("VM stopped")
 		return nil

@@ -190,7 +190,7 @@ func TestStatus_Summary(t *testing.T) {
 	}{
 		{"panic", Status{KernelPanic: true}, "kernel panic detected"},
 		{"emergency", Status{EmergencyMode: true}, "systemd emergency mode"},
-		{"cloud-init fail", Status{CloudInitFailed: true}, "cloud-init failed"},
+		{"cloud-init fail", Status{CloudInitFailed: true}, summaryCloudInitFailed},
 		{"not booted", Status{}, "kernel not booted"},
 		{"no systemd", Status{KernelBooted: true}, "waiting for systemd"},
 		{"complete", Status{KernelBooted: true, SystemdReached: true, CloudInitDone: true, SSHReady: true, IncusReady: true}, "boot complete"},

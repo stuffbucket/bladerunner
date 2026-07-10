@@ -21,10 +21,19 @@ type Theme struct {
 	CmdBg   string // command background
 }
 
+// Theme name identifiers, used as the Name field, switch keys, and in the
+// available-theme list.
+const (
+	themeNameDefault = "default"
+	themeNameDracula = "dracula"
+	themeNameNord    = "nord"
+	themeNameGruvbox = "gruvbox"
+)
+
 // Predefined themes
 var (
 	ThemeDefault = Theme{
-		Name:    "default",
+		Name:    themeNameDefault,
 		Primary: "39",  // light blue
 		Success: "42",  // green
 		Warning: "214", // orange
@@ -36,7 +45,7 @@ var (
 	}
 
 	ThemeDracula = Theme{
-		Name:    "dracula",
+		Name:    themeNameDracula,
 		Primary: "141", // purple
 		Success: "84",  // green
 		Warning: "228", // yellow
@@ -48,7 +57,7 @@ var (
 	}
 
 	ThemeNord = Theme{
-		Name:    "nord",
+		Name:    themeNameNord,
 		Primary: "109", // nord9 - blue
 		Success: "150", // nord14 - green
 		Warning: "221", // nord13 - yellow
@@ -60,7 +69,7 @@ var (
 	}
 
 	ThemeGruvbox = Theme{
-		Name:    "gruvbox",
+		Name:    themeNameGruvbox,
 		Primary: "109", // aqua
 		Success: "142", // green
 		Warning: "214", // orange
@@ -132,11 +141,11 @@ func GetTheme() Theme {
 // ThemeByName returns a theme by name, or default if not found.
 func ThemeByName(name string) Theme {
 	switch name {
-	case "dracula":
+	case themeNameDracula:
 		return ThemeDracula
-	case "nord":
+	case themeNameNord:
 		return ThemeNord
-	case "gruvbox":
+	case themeNameGruvbox:
 		return ThemeGruvbox
 	default:
 		return ThemeDefault
@@ -145,7 +154,7 @@ func ThemeByName(name string) Theme {
 
 // ListThemes returns all available theme names.
 func ListThemes() []string {
-	return []string{"default", "dracula", "nord", "gruvbox"}
+	return []string{themeNameDefault, themeNameDracula, themeNameNord, themeNameGruvbox}
 }
 
 // IsTTY returns true if stdout is a terminal.
