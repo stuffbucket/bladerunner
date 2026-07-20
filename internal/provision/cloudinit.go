@@ -285,70 +285,13 @@ if [ -d /etc/ssh/sshd_config.d ]; then
 fi
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
-# --- vsock bridge units: create + enable BEFORE incus provisioning, so a
+# --- vsock relay units: create + enable BEFORE incus provisioning, so a
 #     failure installing/configuring incus (or any later command) can never
-#     strand host<->guest SSH. ConditionPathExists guards mean a unit simply
-#     waits, rather than errors, if socat / its TCP target is not up yet.
-cat >/etc/systemd/system/bladerunner-vsock-ssh.service <<'UNIT'
-[Unit]
-Description=Bladerunner vsock SSH forward
-After=network.target ssh.service sshd.service
-Wants=ssh.service sshd.service
-ConditionPathExists=/usr/bin/socat
-ConditionPathExists=/dev/vsock
-
-[Service]
-Type=simple
-ExecStartPre=/bin/sh -c 'until ss -tln | grep -q ":22 "; do sleep 0.5; done'
-ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:22
-Restart=always
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-cat >/etc/systemd/system/bladerunner-vsock-incus.service <<'UNIT'
-[Unit]
-Description=Bladerunner vsock Incus API forward
-After=network.target incus.service incus.socket
-Wants=incus.socket
-ConditionPathExists=/usr/bin/socat
-ConditionPathExists=/dev/vsock
-
-[Service]
-Type=simple
-ExecStartPre=/bin/sh -c 'until ss -tln | grep -q ":8443 "; do sleep 0.5; done'
-ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:8443
-Restart=always
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-cat >/etc/systemd/system/bladerunner-vsock-oidc.service <<'UNIT'
-[Unit]
-Description=Bladerunner vsock OIDC forward (guest TCP -> host vsock)
-After=network.target
-ConditionPathExists=/usr/bin/socat
-ConditionPathExists=/dev/vsock
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:%d,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d
-Restart=always
-RestartSec=1
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now bladerunner-vsock-ssh.service || true
-systemctl enable --now bladerunner-vsock-incus.service || true
-systemctl enable --now bladerunner-vsock-oidc.service || true
-%s%s
+#     strand host<->guest SSH. ConditionPathExists guards mean an instance
+#     simply waits, rather than errors, if socat / its TCP target is not up yet.
+#     All four channels (ssh/incus/oidc/ntp) run as instances of ONE template
+#     unit; per-channel socat args live in /etc/bladerunner/relays/<name>.env.
+%s
 br_stage vsock-services-up
 
 # --- Best-effort incus provisioning. Everything below is non-fatal: if it
@@ -422,9 +365,9 @@ else
   echo "bladerunner: incus-ui-canonical download failed; web UI not installed (non-fatal)" >&2
 fi
 
-# incus should be listening now; nudge the API bridge so it picks up :8443
+# incus should be listening now; nudge the API relay so it picks up :8443
 # without waiting for its restart timer.
-systemctl restart bladerunner-vsock-incus.service || true
+systemctl restart bladerunner-vsock-relay@incus.service || true
 
 # Wait a moment for services to start
 sleep 2
@@ -433,26 +376,71 @@ date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 br_stage bootstrap-done
 `,
 		// Break-glass SSH block (SSH_USER, SSH_PUBKEY), placed first because it
-		// appears early in the bootstrap, before the vsock units.
+		// appears early in the bootstrap, before the vsock relays.
 		cfg.SSHUser, cfg.SSHPublicKey,
-		cfg.VsockSSHPort, cfg.VsockAPIPort,
-		// The guest OIDC TCP listener binds LocalOIDCPort (the issuer's port) so the
-		// issuer URL resolves the same inside the guest as on the host; it then
-		// connects over vsock to the host provider on VsockOIDCPort. (TCP-LISTEN
-		// port = LocalOIDCPort, VSOCK-CONNECT port = VsockOIDCPort.)
-		cfg.LocalOIDCPort, cfg.VsockOIDCPort,
-		// chrony swap + guest-local wake-heal watchdog. Emitted before the share
-		// fragment and before incus, so the time stack + backstop are in place
-		// regardless of any later incus failure. Self-contained (its own Sprintf
-		// for the port env file), so the positional arg list here is unchanged
-		// apart from this single %s.
-		renderTimeHeal(cfg),
-		// VirtioFS share automount + ACPI poweroff pin, emitted only when a share
-		// is enabled (empty otherwise, so plain start/boot is byte-identical).
-		renderShareSetup(cfg),
+		// All guest-side vsock relays (ssh/incus/oidc/ntp as ONE template unit) +
+		// the chrony/watchdog time stack + the optional VirtioFS share, rendered
+		// as one fragment. Ordered relays -> time-heal -> share, all before incus,
+		// so the control path + time stack + backstop are in place regardless of
+		// any later incus failure. Each sub-fragment is self-contained (its own
+		// heredocs / port substitution), so the positional arg list here carries a
+		// single %s for the whole block.
+		renderVsockRelays(cfg)+renderTimeHeal(cfg)+renderShareSetup(cfg),
 		cfg.SSHUser,
 		cfg.OIDCIssuerURL, cfg.OIDCClientID, cfg.OIDCAudience,
 	)
+}
+
+// renderVsockRelays returns the guest-side bootstrap fragment that installs the
+// single templated vsock relay unit and one instance per channel
+// (ssh/incus/oidc/ntp). It replaces the four near-identical inline heredoc units
+// with: one template file, four tiny per-channel arg files under
+// /etc/bladerunner/relays/, and one `systemctl enable --now` covering all
+// instances. Every channel keeps the exact socat address pair (and ssh/incus
+// their backend spin-wait) of the standalone unit it supersedes — see
+// relayChannels — so socat is exec'd with byte-identical argv and ports.
+//
+// A pre-baked guest image (scripts/build-guest-image.sh) still ships the legacy
+// standalone bladerunner-vsock-{ssh,incus,oidc,ntp} units enabled. To avoid a
+// second listener double-binding a channel's port (e.g. two UDP-123 NTP
+// listeners), this fragment stops+disables+masks those legacy names before
+// enabling the template instances, so the template is the sole owner at runtime.
+func renderVsockRelays(cfg *config.Config) string {
+	var b strings.Builder
+
+	// The single template unit. Instances read their socat args from the
+	// per-channel env files written below.
+	b.WriteString("mkdir -p /etc/bladerunner/relays\n")
+	b.WriteString("cat >/etc/systemd/system/bladerunner-vsock-relay@.service <<'UNIT'\n")
+	b.WriteString(relayTemplateUnit)
+	b.WriteString("UNIT\n")
+
+	// Per-channel arg files: RELAY_ARGS (socat address pair, byte-identical to the
+	// old unit) + optional RELAY_WAIT (backend port to spin-wait for).
+	for _, ch := range relayChannels(cfg) {
+		fmt.Fprintf(&b, "cat >/etc/bladerunner/relays/%s.env <<'RELAYENV'\n", ch.name)
+		b.WriteString(relayEnvFile(ch))
+		b.WriteString("RELAYENV\n")
+	}
+
+	// Supersede the legacy standalone units a pre-baked image ships enabled, so a
+	// template instance is the sole owner of each channel's port. Stop first (drop
+	// any running listener), then disable+mask so they never re-activate.
+	b.WriteString("for legacy in ssh incus oidc ntp; do\n")
+	b.WriteString("  systemctl stop \"bladerunner-vsock-$legacy.service\" 2>/dev/null || true\n")
+	b.WriteString("  systemctl disable \"bladerunner-vsock-$legacy.service\" 2>/dev/null || true\n")
+	b.WriteString("  systemctl mask \"bladerunner-vsock-$legacy.service\" 2>/dev/null || true\n")
+	b.WriteString("done\n")
+
+	// Enable + start all four instances in one shot.
+	b.WriteString("systemctl daemon-reload\n")
+	b.WriteString("systemctl enable --now")
+	for _, ch := range relayChannels(cfg) {
+		fmt.Fprintf(&b, " bladerunner-vsock-relay@%s.service", ch.name)
+	}
+	b.WriteString(" || true\n")
+
+	return b.String()
 }
 
 // renderTimeHeal returns the guest-side bootstrap fragment that (1) swaps
@@ -471,22 +459,13 @@ br_stage bootstrap-done
 func renderTimeHeal(cfg *config.Config) string {
 	var b strings.Builder
 
-	// vsock NTP bridge: guest localhost UDP 123 -> vsock -> host SNTP responder.
-	// UDP4-RECVFROM,fork = one vsock stream per datagram (48 in / 48 out). The
-	// guest chrony "server 127.0.0.1" line in chronyConf targets this bridge. The
-	// bridge is emitted BEFORE the chrony.conf write so the transport exists the
-	// moment chrony enables.
-	//
-	// SINGLE SOURCE: the unit body is go:embed'd from the checked-in
-	// internal/provision/scripts/bladerunner-vsock-ntp.service (see embed.go),
-	// which the image-build path arms --copy-in. vsockNTPUnit re-templates the
-	// baked default port (18557 = config.DefaultVsockNTPPort) to cfg.VsockNTPPort.
-	b.WriteString("\n# --- vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder ---\n")
-	b.WriteString("cat >/etc/systemd/system/bladerunner-vsock-ntp.service <<'UNIT'\n")
-	b.WriteString(vsockNTPUnit(cfg.VsockNTPPort))
-	b.WriteString("UNIT\n")
-	b.WriteString("systemctl daemon-reload\n")
-	b.WriteString("systemctl enable --now bladerunner-vsock-ntp.service || true\n")
+	// The vsock NTP bridge is now one instance of the shared relay template unit
+	// (bladerunner-vsock-relay@ntp), emitted + enabled by renderVsockRelays, which
+	// runs BEFORE this fragment. So the UDP-123 -> vsock transport the guest chrony
+	// "server 127.0.0.1" line targets already exists the moment chrony enables
+	// below. (renderVsockRelays also stops+masks any legacy standalone
+	// bladerunner-vsock-ntp unit left on an already-published baked image, so
+	// there is no double-bind during the transition to a rebuilt image.)
 
 	// chrony.conf (no fmt verbs; safe verbatim). Replace systemd-timesyncd.
 	b.WriteString("\n# --- chrony: replace systemd-timesyncd. Tuned to step the clock immediately\n")

@@ -1,0 +1,23 @@
+[Unit]
+Description=Bladerunner vsock relay (%i)
+After=network.target
+ConditionPathExists=/usr/bin/socat
+ConditionPathExists=/dev/vsock
+
+[Service]
+Type=simple
+# Per-channel args come from /etc/bladerunner/relays/%i.env:
+#   RELAY_ARGS  = the exact socat address pair for this channel (word-split by
+#                 systemd's $VAR expansion into socat's argv, so socat is exec'd
+#                 with the same arguments as the old per-channel units).
+#   RELAY_WAIT  = optional TCP port to spin-wait for before ExecStart (the ssh
+#                 and incus backends); empty/unset for channels with no local
+#                 backend (oidc/ntp dial out over vsock).
+EnvironmentFile=/etc/bladerunner/relays/%i.env
+ExecStartPre=/bin/sh -c '[ -z "${RELAY_WAIT}" ] || until ss -tln | grep -q ":${RELAY_WAIT} "; do sleep 0.5; done'
+ExecStart=/usr/bin/socat $RELAY_ARGS
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

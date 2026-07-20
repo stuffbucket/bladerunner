@@ -1,7 +1,7 @@
 // Package timesource serves the host clock to the guest as a stratum-1 SNTP
 // source over vsock. It is the host end of the pseudo-NTP path:
 //
-//	guest chrony (UDP 123) -> bladerunner-vsock-ntp.service (socat UDP->vsock)
+//	guest chrony (UDP 123) -> bladerunner-vsock-relay@ntp (socat UDP->vsock)
 //	-> host vsock reverse forwarder -> this Responder (127.0.0.1:LocalNTPPort)
 //
 // The guest coheres to the HOST clock (not UTC) and works fully OFFLINE: vsock
