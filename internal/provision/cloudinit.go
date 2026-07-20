@@ -455,183 +455,6 @@ br_stage bootstrap-done
 	)
 }
 
-// watchdogScript is the guest-local wake-heal watchdog body, kept BYTE-FOR-BYTE
-// in sync with scripts/bladerunner-watchdog.sh (the single source of truth the
-// image-build paths --copy-in). It is a backtick raw string so no fmt verbs are
-// interpreted: every $ and % is literal. Do NOT introduce fmt.Sprintf verbs
-// here — the port values are threaded via the /etc/default env file written by
-// renderTimeHeal, NOT via substitution into this script.
-const watchdogScript = `#!/usr/bin/env bash
-# bladerunner-watchdog.sh — guest-LOCAL wake-heal backstop.
-#
-# SINGLE SOURCE OF TRUTH: this file is checked in and --copy-in'd by the image
-# build (scripts/build-guest-image.sh). The cloud-init path embeds a byte-for-
-# byte copy of this body in internal/provision/cloudinit.go; keep them in sync.
-#
-# WHY THIS EXISTS: when the Mac sleeps, VZ pauses the guest vCPUs with no clean
-# ACPI suspend and no paravirt "you were stopped" signal. On wake the guest has
-# NO event telling it that it was suspended. A watchdog CANNOT detect "just woke"
-# by comparing its own monotonic vs wall clock — both freeze and resume together
-# (arch_sys_counter drives both; no kvm-clock, no /dev/ptp). So the only
-# guest-local skew detector is an EXTERNAL reference: chrony's NTP offset.
-#
-# CONFIRMED: stale vsock connectivity (no SSH banner) is the more certain
-# symptom. PLAUSIBLE-but-UNCONFIRMED: post-sleep clock skew breaking OIDC JWTs
-# (the wedged VM was restarted before its clock could be measured). This loop
-# LOGS both signals EVERY cycle so the NEXT wedge is DIAGNOSED, not guessed.
-#
-# Heal is conservative: never blanket-restart systemd-networkd (it would disrupt
-# running Incus container bridges); only bounce the stateless socat relays, and
-# only bounce vsock-ssh under a tight gate (sshd up locally but the relay dead).
-set -uo pipefail
-[ -r /etc/default/bladerunner-watchdog ] && . /etc/default/bladerunner-watchdog
-VSOCK_OIDC_LOCAL_PORT="${VSOCK_OIDC_LOCAL_PORT:-15556}"  # the guest TCP listener
-TAG=bladerunner-watchdog
-
-log() { logger -t "$TAG" -- "$*"; }
-
-listening() { ss -tln | grep -q ":$1 "; }
-unit_active() { systemctl is-active --quiet "$1"; }
-unit_restarts() { systemctl show -p NRestarts --value "$1" 2>/dev/null; }
-
-while :; do
-  # --- OBSERVE: clock (chrony) -------------------------------------------
-  # System time offset + Leap status are the external skew reference.
-  tracking="$(chronyc tracking 2>/dev/null)"
-  sys_offset="$(printf '%s\n' "$tracking" | awk -F': ' '/System time/ {print $2}')"
-  leap="$(printf '%s\n' "$tracking" | awk -F': ' '/Leap status/ {print $2}')"
-  refid="$(printf '%s\n' "$tracking" | awk -F': ' '/Reference ID/ {print $2}')"
-  # --- OBSERVE: per-forwarder local health -------------------------------
-  ssh_listen=$(listening 22 && echo up || echo down)
-  api_listen=$(listening 8443 && echo up || echo down)
-  oidc_listen=$(listening "$VSOCK_OIDC_LOCAL_PORT" && echo up || echo down)
-  for u in bladerunner-vsock-ssh bladerunner-vsock-incus bladerunner-vsock-oidc bladerunner-vsock-ntp; do
-    st=$(unit_active "$u.service" && echo active || echo inactive)
-    log "fwd $u=$st nrestarts=$(unit_restarts "$u.service")"
-  done
-  log "clock sys_offset=${sys_offset:-NA} leap=${leap:-NA} refid=${refid:-NA}"
-  log "listen ssh22=$ssh_listen api8443=$api_listen oidc${VSOCK_OIDC_LOCAL_PORT}=$oidc_listen"
-
-  # --- HEAL: clock. Don't wait for chrony's autonomous poll (up to maxpoll
-  #     ~64s away) to notice a post-sleep offset: actively force a fresh host
-  #     measurement NOW (burst). chrony.conf's 'makestep 1.0 -1' then steps the
-  #     clock on that measurement for any offset >1s (and slews smaller ones),
-  #     so re-sync is bounded by THIS loop's period, not loop + a chrony poll.
-  #     A step never disturbs CLOCK_MONOTONIC, so timers/containers are fine.
-  #     The explicit makestep is a backstop for when chrony has already parked
-  #     the source as unreachable (its persistent makestep won't re-fire then).
-  chronyc burst 4/4 >/dev/null 2>&1 || true
-  if [ "$leap" = "Not synchronised" ]; then
-    log "heal: chronyc makestep (leap=Not synchronised)"
-    chronyc makestep >/dev/null 2>&1 || true
-  fi
-
-  # --- HEAL: stateless socat relays (incus, then oidc). Restarting these
-  #     only drops in-flight proxied connections; container/network state is
-  #     owned by incusd + systemd-networkd, never by the relay. Bounce only
-  #     when the relay is dead/inactive (its backend being down is the
-  #     target's problem, not the relay's — do NOT bounce then).
-  if [ "$api_listen" = up ] && ! unit_active bladerunner-vsock-incus.service; then
-    log "heal: restart bladerunner-vsock-incus (backend :8443 up, relay inactive)"
-    systemctl restart bladerunner-vsock-incus.service || true
-  fi
-  if ! unit_active bladerunner-vsock-oidc.service; then
-    log "heal: restart bladerunner-vsock-oidc (relay inactive)"
-    systemctl restart bladerunner-vsock-oidc.service || true
-  fi
-  if ! unit_active bladerunner-vsock-ntp.service; then
-    log "heal: restart bladerunner-vsock-ntp (relay inactive)"
-    systemctl restart bladerunner-vsock-ntp.service || true
-  fi
-
-  # --- HEAL: vsock-ssh LAST and tightly gated. Only when local sshd IS
-  #     listening (:22 up, so the in-guest target is healthy) but the relay
-  #     is dead. This avoids racing an operator's live 'br shell' and
-  #     avoids spinning the unit's unbounded ExecStartPre when sshd is down.
-  #     The watchdog runs locally, so bouncing the bridge never cuts its own
-  #     execution path. (Restart=always already auto-heals a crashed socat,
-  #     so this fires only for the rare wedged-but-not-crashed case.)
-  if [ "$ssh_listen" = up ] && ! unit_active bladerunner-vsock-ssh.service; then
-    log "heal: restart bladerunner-vsock-ssh (sshd :22 up, relay inactive)"
-    systemctl restart bladerunner-vsock-ssh.service || true
-  fi
-
-  # NEVER blanket-restart systemd-networkd: it would tear down Incus container
-  # bridges. (A genuine total-network-down recovery is intentionally out of
-  # scope until the journal data above proves it is needed.)
-  #
-  # OIDC probe honesty: ":$VSOCK_OIDC_LOCAL_PORT listening" proves only that the
-  # guest-side socat TCP listener is up; it CANNOT confirm the host vsock peer
-  # answers (the host is unreachable-by-design from a guest-local probe). The log
-  # therefore distinguishes "relay dead" from "relay up, host unknown" — it does
-  # NOT infer the host is fine.
-
-  sleep 60
-done
-`
-
-// watchdogUnit is the systemd unit for the watchdog, kept in sync with
-// scripts/bladerunner-watchdog.service. Raw string: no fmt verbs.
-const watchdogUnit = `[Unit]
-Description=Bladerunner guest-local wake-heal watchdog
-After=network.target chrony.service
-Wants=chrony.service
-
-[Service]
-Type=simple
-ExecStart=/usr/local/sbin/bladerunner-watchdog.sh
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-`
-
-// chronyConf is the suspend-tuned chrony.conf written to /etc/chrony/chrony.conf
-// in the cloud-init path, kept in sync with scripts/chrony.conf. Raw string with
-// no fmt verbs (it contains no % so it is safe verbatim). makestep 1.0 -1 steps
-// the clock for ANY offset >1s an UNLIMITED number of times — the guest-local
-// recovery for a host suspend (no paravirt "you were stopped" signal exists).
-const chronyConf = `# Host pseudo-NTP source over vsock (guest UDP 123 -> bladerunner-vsock-ntp.service
-# -> vsock -> host SNTP responder serving the HOST clock as stratum-1). The guest
-# coheres to the HOST clock (not UTC) and works fully OFFLINE: vsock needs no IP
-# network, no gateway, no host internet. The public pool is intentionally DROPPED
-# — it requires internet (fails in airplane mode) and syncs to UTC, not the host.
-# Poll lives on this line: maxpoll 6 (~64s) is tighter than the old global 8
-# (~256s) so a post-sleep offset is noticed sooner. iburst makes the FIRST sync
-# after resume happen within seconds.
-server 127.0.0.1 iburst prefer minpoll 4 maxpoll 6
-# makestep 1.0 -1 = step the clock for ANY offset > 1s, an UNLIMITED number of
-# times (the "-1" count). This is the guest-LOCAL recovery for a host suspend:
-# the guest gets no paravirt "you were stopped" signal, so chrony stepping on
-# its first post-resume measurement is the only automatic local fix. The common
-# default "makestep 1.0 3" only steps the first 3 updates and would SLEW a
-# post-sleep jump over many minutes, during which OIDC JWT iat/exp/nbf stay
-# broken. CONFIRMED: a large post-sleep offset needs an immediate step.
-# UNCONFIRMED: the exact magnitude (needs a real Mac-sleep measurement).
-makestep 1.0 -1
-# Keep the RTC disciplined from system time so a future cold boot starts close.
-rtcsync
-driftfile /var/lib/chrony/chrony.drift
-logdir /var/log/chrony
-`
-
-// vsockNTPUnit renders the bladerunner-vsock-ntp.service unit body. It is the
-// single source for that unit: the cloud-init path heredocs the return value,
-// and the image-build path --copy-ins the checked-in
-// scripts/bladerunner-vsock-ntp.service. The two must stay byte-identical; the
-// only difference is the templated port, whose default (config.DefaultVsockNTPPort)
-// is the literal baked into that file. TestProvisioningAssetsMatchCheckedInFiles
-// enforces the byte-identity against the checked-in copy.
-func vsockNTPUnit(port uint32) string {
-	return fmt.Sprintf("[Unit]\nDescription=Bladerunner vsock NTP forward (guest UDP 123 -> host vsock)\n"+
-		"After=network.target\nConditionPathExists=/usr/bin/socat\nConditionPathExists=/dev/vsock\n\n"+
-		"[Service]\nType=simple\n"+
-		"ExecStart=/usr/bin/socat UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d\n"+
-		"Restart=always\nRestartSec=1\n\n"+
-		"[Install]\nWantedBy=multi-user.target\n", port)
-}
-
 // renderTimeHeal returns the guest-side bootstrap fragment that (1) swaps
 // systemd-timesyncd for chrony tuned to step the clock immediately after a host
 // suspend, and (2) installs the guest-local wake-heal watchdog (script + unit).
@@ -639,11 +462,12 @@ func vsockNTPUnit(port uint32) string {
 // timesyncd is only disabled+masked AFTER chrony is verified active, so a
 // transient chrony install failure never strands the guest with zero time sync.
 //
-// The watchdog script body + unit are byte-for-byte copies of the checked-in
-// scripts/bladerunner-watchdog.{sh,service}; the image-build paths --copy-in
-// those same files. The only templated values are the port(s), threaded via the
+// The watchdog script body + unit are the checked-in
+// internal/provision/scripts/bladerunner-watchdog.{sh,service}, go:embed'd here
+// (see embed.go) and --copy-in'd unchanged by the image build — one source,
+// no drift. The only templated values are the port(s), threaded via the
 // /etc/default/bladerunner-watchdog env file (so the script body needs no
-// substitution and stays identical to the checked-in copy).
+// substitution and is emitted verbatim).
 func renderTimeHeal(cfg *config.Config) string {
 	var b strings.Builder
 
@@ -653,12 +477,10 @@ func renderTimeHeal(cfg *config.Config) string {
 	// bridge is emitted BEFORE the chrony.conf write so the transport exists the
 	// moment chrony enables.
 	//
-	// DUAL-SOURCE DISCIPLINE: the unit body lives in vsockNTPUnit (the single
-	// source), which must stay BYTE-IDENTICAL to the checked-in
-	// scripts/bladerunner-vsock-ntp.service (which the image-build arms --copy-in)
-	// except for the templated port, whose default IS the 18557 hardcoded in that
-	// file. TestProvisioningAssetsMatchCheckedInFiles guards the byte-identity —
-	// same discipline as chronyConf above.
+	// SINGLE SOURCE: the unit body is go:embed'd from the checked-in
+	// internal/provision/scripts/bladerunner-vsock-ntp.service (see embed.go),
+	// which the image-build path arms --copy-in. vsockNTPUnit re-templates the
+	// baked default port (18557 = config.DefaultVsockNTPPort) to cfg.VsockNTPPort.
 	b.WriteString("\n# --- vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder ---\n")
 	b.WriteString("cat >/etc/systemd/system/bladerunner-vsock-ntp.service <<'UNIT'\n")
 	b.WriteString(vsockNTPUnit(cfg.VsockNTPPort))

@@ -18,7 +18,8 @@ recovery layer for exactly the case the host-side reconnect path cannot reach
 ## What it does
 
 - **chrony replaces `systemd-timesyncd`** in every provisioning path
-  (`/etc/chrony/chrony.conf`, canonical copy `scripts/chrony.conf`). Tuned with
+  (`/etc/chrony/chrony.conf`, canonical copy
+  `internal/provision/scripts/chrony.conf`). Tuned with
   `makestep 1.0 -1` so chrony steps the clock for *any* offset >1s an *unlimited*
   number of times — on its first post-resume NTP measurement. timesyncd is
   disabled+masked **only after chrony is verified active** (a transient chrony
@@ -26,7 +27,7 @@ recovery layer for exactly the case the host-side reconnect path cannot reach
 - **The NTP source is the *host clock*, served over vsock** (not the public
   Debian pool). chrony now points at `server 127.0.0.1 iburst prefer minpoll 4
   maxpoll 6`, which a guest-local socat bridge
-  (`scripts/bladerunner-vsock-ntp.service`:
+  (`internal/provision/scripts/bladerunner-vsock-ntp.service`:
   `UDP4-RECVFROM:123,fork` ↔ `VSOCK-CONNECT:2:<VsockNTPPort>`) relays over vsock
   to a host pseudo-NTP (SNTP) responder (`internal/timesource`,
   `cmd/bladerunner/start.go`). The responder stamps each 48-byte reply from the
@@ -39,7 +40,7 @@ recovery layer for exactly the case the host-side reconnect path cannot reach
   sooner. The host responder is started **before** the VM (the vsock reverse
   forwarder has no dial retry), and the watchdog observes + bounces the
   `bladerunner-vsock-ntp` relay alongside the other socat relays.
-- **A guest-local watchdog** (`scripts/bladerunner-watchdog.{sh,service}`) is a
+- **A guest-local watchdog** (`internal/provision/scripts/bladerunner-watchdog.{sh,service}`) is a
   `Type=simple` systemd service running an in-process loop. Every 60s it **logs**
   the chrony clock offset, the RTC-vs-realtime delta, and per-forwarder health to
   the journal — *even when healthy* — and heals conservatively:
@@ -57,23 +58,25 @@ no backstop:
 
 | Path | Where | chrony + watchdog source |
 | --- | --- | --- |
-| cloud-init bootstrap | `internal/provision/cloudinit.go` (`renderTimeHeal`) | embeds a byte-for-byte copy of the watchdog logic + the `scripts/*` content |
-| image build, virt-customize | `scripts/build-guest-image.sh` | `--copy-in scripts/chrony.conf` + `scripts/bladerunner-watchdog.{sh,service}` + `scripts/bladerunner-vsock-ntp.service` |
-| image build, nbd/chroot | `scripts/build-guest-image.sh` | `install` the same `scripts/*` files (incl. `bladerunner-vsock-ntp.service`) |
+| cloud-init bootstrap | `internal/provision/cloudinit.go` (`renderTimeHeal`) | `go:embed`s the `internal/provision/scripts/*` files (see `embed.go`) and emits them verbatim |
+| image build, virt-customize | `scripts/build-guest-image.sh` | `--copy-in internal/provision/scripts/chrony.conf` + `bladerunner-watchdog.{sh,service}` + `bladerunner-vsock-ntp.service` |
+| image build, nbd/chroot | `scripts/build-guest-image.sh` | `install` the same `internal/provision/scripts/*` files (incl. `bladerunner-vsock-ntp.service`) |
 | br-agent minimal cloud-init | `internal/provision/cloudinit.go` (`buildMinimalCloudInit`) | **provisions nothing** — relies on the pre-baked image carrying chrony + watchdog |
 
-**Single source of truth:** `scripts/chrony.conf`,
-`scripts/bladerunner-watchdog.{sh,service}`, and
-`scripts/bladerunner-vsock-ntp.service` are canonical. The cloud-init Go path
-embeds a byte-for-byte copy of the executable logic (port values are threaded via
-a templated `/etc/default/bladerunner-watchdog` env file, not by string
-substitution into the script body; the NTP bridge's `VsockNTPPort` is the one
-templated `%d` and its default *is* the `18557` baked into the checked-in unit
-file). If you change one, change all of them. A drift-guard test asserts the
-`chronyConf` const equals `scripts/chrony.conf` byte-for-byte.
+**Single source of truth:** `internal/provision/scripts/chrony.conf`,
+`internal/provision/scripts/bladerunner-watchdog.{sh,service}`, and
+`internal/provision/scripts/bladerunner-vsock-ntp.service` are the ONE canonical
+copy. The cloud-init Go path `go:embed`s them (see `internal/provision/embed.go`)
+and the image build `--copy-in`s the same files, so there is no second copy to
+keep in sync. Port values are threaded via a templated
+`/etc/default/bladerunner-watchdog` env file, not by string substitution into the
+script body; the NTP bridge's `VsockNTPPort` is the one templated value, and its
+default *is* the `18557` baked into the checked-in unit file (`vsockNTPUnit`
+re-templates that literal at render time).
 
-CI asserts the cloud-init path only (`internal/provision/cloudinit_test.go`); the
-two image-build arms have **no automated guard** — they must be checked by review.
+CI exercises the cloud-init path (`internal/provision/cloudinit_test.go`); the
+two image-build arms `--copy-in`/`install` the identical embedded files, so they
+cannot drift from the cloud-init emission.
 
 ## Confirmed vs. hypothesis (read before "fixing" this)
 
@@ -100,8 +103,8 @@ honestly:
 - **CONFIRMED (unit-tested):** the SNTP reply byte layout (mode=4, stratum=1, VN
   echoed, client-transmit echoed into origin, host-now timestamps); cloud-init
   emits the `bladerunner-vsock-ntp.service` unit + the host-pointed
-  `server 127.0.0.1` chrony line + the public pool dropped; `chronyConf` const ==
-  `scripts/chrony.conf`.
+  `server 127.0.0.1` chrony line + the public pool dropped, all `go:embed`'d from
+  `internal/provision/scripts/`.
 - **HYPOTHESIS (cannot be unit-tested here):** (1) socat
   `UDP4-RECVFROM:123,fork` ↔ `VSOCK-CONNECT` single request/response NTP
   semantics end-to-end on this stack (the documented "ntpd-like" use case, but

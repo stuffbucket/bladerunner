@@ -1,7 +1,6 @@
 package provision
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -348,20 +347,6 @@ func TestBuildCloudInit_NTPBridgeEmitted(t *testing.T) {
 	}
 }
 
-// TestChronyConfMatchesCheckedInFile is a drift guard: the chronyConf const (the
-// cloud-init path) and scripts/chrony.conf (the baked-image path) are synced by
-// hand. They must stay byte-identical or the two provisioning paths diverge.
-func TestChronyConfMatchesCheckedInFile(t *testing.T) {
-	t.Parallel()
-	b, err := os.ReadFile("../../scripts/chrony.conf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != chronyConf {
-		t.Errorf("chronyConf const drifted from scripts/chrony.conf")
-	}
-}
-
 // TestBuildCloudInit_TimesyncdMaskedAfterChronyActive verifies systemd-timesyncd
 // is masked, AND that the mask is gated behind an `is-active chrony` check that
 // precedes it — the half-removal guard that prevents a failed chrony install
@@ -447,33 +432,25 @@ func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
 	}
 }
 
-// TestProvisioningAssetsMatchCheckedInFiles guards against drift between the
-// cloud-init path (which embeds these as Go consts) and the image-build path
-// (which --copy-ins the checked-in scripts/ files). The two MUST stay
-// byte-identical or a cloud-init guest and an image-built guest would run
-// different time-heal logic. If this fails, update both copies together.
-func TestProvisioningAssetsMatchCheckedInFiles(t *testing.T) {
+// TestVsockNTPUnitRendersDefaultPortVerbatim verifies the go:embed'd
+// bladerunner-vsock-ntp.service template renders byte-for-byte unchanged at the
+// default port (the port baked into the checked-in file), and swaps only the
+// VSOCK-CONNECT literal at a non-default port. This is the single-source render
+// wrapper's contract: the image-build --copy-in of the same file and the
+// cloud-init emission agree at the default port.
+func TestVsockNTPUnitRendersDefaultPortVerbatim(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		path string
-		got  string
-	}{
-		{"chrony.conf", "../../scripts/chrony.conf", chronyConf},
-		{"bladerunner-watchdog.sh", "../../scripts/bladerunner-watchdog.sh", watchdogScript},
-		{"bladerunner-watchdog.service", "../../scripts/bladerunner-watchdog.service", watchdogUnit},
-		// vsock-ntp.service is emitted inline (not a plain const) with the port
-		// templated; render it at the default port, which is the literal baked into
-		// the checked-in file. See vsockNTPUnit's DUAL-SOURCE DISCIPLINE note.
-		{"bladerunner-vsock-ntp.service", "../../scripts/bladerunner-vsock-ntp.service", vsockNTPUnit(config.DefaultVsockNTPPort)},
+
+	if got := vsockNTPUnit(config.DefaultVsockNTPPort); got != vsockNTPUnitTemplate {
+		t.Errorf("vsockNTPUnit(default) must equal the embedded template verbatim\n--- got ---\n%s\n--- want ---\n%s", got, vsockNTPUnitTemplate)
 	}
-	for _, c := range cases {
-		want, err := os.ReadFile(c.path)
-		if err != nil {
-			t.Fatalf("read %s: %v", c.path, err)
-		}
-		if string(want) != c.got {
-			t.Errorf("%s drifted from %s — the cloud-init const and the image-build file must be byte-identical (update both)", c.name, c.path)
-		}
+
+	const otherPort = 29999
+	got := vsockNTPUnit(otherPort)
+	if !strings.Contains(got, "VSOCK-CONNECT:2:29999") {
+		t.Errorf("vsockNTPUnit(%d) did not template the port\n---\n%s\n---", otherPort, got)
+	}
+	if strings.Contains(got, "VSOCK-CONNECT:2:18557") {
+		t.Errorf("vsockNTPUnit(%d) left the default port in place\n---\n%s\n---", otherPort, got)
 	}
 }
