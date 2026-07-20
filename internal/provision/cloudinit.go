@@ -432,19 +432,6 @@ systemctl restart bladerunner-vsock-incus.service || true
 # Wait a moment for services to start
 sleep 2
 
-# Log vsock service status for debugging
-echo "=== vsock diagnostics ===" | tee /var/lib/bladerunner/vsock-diag.txt
-echo "--- /dev/vsock ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
-ls -la /dev/vsock 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || echo "not found"
-echo "--- lsmod | grep vsock ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
-lsmod | grep vsock 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || echo "no modules loaded"
-echo "--- bladerunner-vsock-ssh status ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
-systemctl status bladerunner-vsock-ssh.service --no-pager 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || true
-echo "--- bladerunner-vsock-incus status ---" | tee -a /var/lib/bladerunner/vsock-diag.txt
-systemctl status bladerunner-vsock-incus.service --no-pager 2>&1 | tee -a /var/lib/bladerunner/vsock-diag.txt || true
-
-ip -4 -br addr show scope global > /var/lib/bladerunner/ipv4.txt || true
-incus info > /var/lib/bladerunner/incus-info.txt || true
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 br_stage bootstrap-done
 `,
@@ -489,8 +476,7 @@ const watchdogScript = `#!/usr/bin/env bash
 # NO event telling it that it was suspended. A watchdog CANNOT detect "just woke"
 # by comparing its own monotonic vs wall clock — both freeze and resume together
 # (arch_sys_counter drives both; no kvm-clock, no /dev/ptp). So the only
-# guest-local skew detector is an EXTERNAL reference: chrony's NTP offset (and
-# the RTC, IF it tracks real time — UNKNOWN on VZ, so we only LOG it).
+# guest-local skew detector is an EXTERNAL reference: chrony's NTP offset.
 #
 # CONFIRMED: stale vsock connectivity (no SSH banner) is the more certain
 # symptom. PLAUSIBLE-but-UNCONFIRMED: post-sleep clock skew breaking OIDC JWTs
@@ -518,13 +504,6 @@ while :; do
   sys_offset="$(printf '%s\n' "$tracking" | awk -F': ' '/System time/ {print $2}')"
   leap="$(printf '%s\n' "$tracking" | awk -F': ' '/Leap status/ {print $2}')"
   refid="$(printf '%s\n' "$tracking" | awk -F': ' '/Reference ID/ {print $2}')"
-  # --- OBSERVE: RTC-vs-realtime delta (the empirical test of the UNKNOWN:
-  #     does the VZ RTC advance during host sleep? If yes, a future wedge
-  #     will show a big spike here. We only LOG it; we do NOT heal from it
-  #     until a real sleep confirms the RTC tracks real time.) ------------
-  rtc_epoch="$(cat /sys/class/rtc/rtc0/since_epoch 2>/dev/null || echo NA)"
-  now_epoch="$(date +%s)"
-  if [ "$rtc_epoch" != NA ]; then rtc_delta=$((rtc_epoch - now_epoch)); else rtc_delta=NA; fi
   # --- OBSERVE: per-forwarder local health -------------------------------
   ssh_listen=$(listening 22 && echo up || echo down)
   api_listen=$(listening 8443 && echo up || echo down)
@@ -533,7 +512,7 @@ while :; do
     st=$(unit_active "$u.service" && echo active || echo inactive)
     log "fwd $u=$st nrestarts=$(unit_restarts "$u.service")"
   done
-  log "clock sys_offset=${sys_offset:-NA} leap=${leap:-NA} refid=${refid:-NA} rtc_delta=${rtc_delta}s"
+  log "clock sys_offset=${sys_offset:-NA} leap=${leap:-NA} refid=${refid:-NA}"
   log "listen ssh22=$ssh_listen api8443=$api_listen oidc${VSOCK_OIDC_LOCAL_PORT}=$oidc_listen"
 
   # --- HEAL: clock. Don't wait for chrony's autonomous poll (up to maxpoll
