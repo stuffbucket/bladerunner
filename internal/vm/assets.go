@@ -148,6 +148,17 @@ func EnsureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	return ensureBaseImage(ctx, cfg)
 }
 
+// RequireQemuImg verifies that the qemu-img binary is available on PATH,
+// returning an install-hint error if it is not. It is the single preflight
+// check for the qemu-img dependency shared across asset conversion/resize and
+// the `br disk build` command.
+func RequireQemuImg() error {
+	if _, err := exec.LookPath("qemu-img"); err != nil {
+		return fmt.Errorf("qemu-img not found in PATH (install with: brew install qemu): %w", err)
+	}
+	return nil
+}
+
 // MaterializeRawDisk copies a resolved RAW base image to dst and resizes it to
 // diskSizeGiB via qemu-img (which correctly rewrites the GPT backup header).
 // Used by `br disk pack` to write the cartridge's root.img. srcRaw must
@@ -174,8 +185,8 @@ func MaterializeRawDisk(srcRaw, dst string, diskSizeGiB int) error {
 		return fmt.Errorf("close root.img: %w", err)
 	}
 
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		return fmt.Errorf("qemu-img not found in PATH (install with: brew install qemu): %w", err)
+	if err := RequireQemuImg(); err != nil {
+		return err
 	}
 	targetSize := fmt.Sprintf("%dG", diskSizeGiB)
 	cmd := exec.Command("qemu-img", "resize", "-f", "raw", dst, targetSize)
@@ -327,8 +338,8 @@ func convertQcow2ToRaw(qcow2Path string) error {
 	start := time.Now()
 
 	// Check if qemu-img is available
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		return fmt.Errorf("qemu-img not found in PATH (install with: brew install qemu): %w", err)
+	if err := RequireQemuImg(); err != nil {
+		return err
 	}
 
 	rawPath := qcow2Path + ".raw"

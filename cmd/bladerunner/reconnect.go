@@ -70,14 +70,14 @@ func runReconnect(_ *cobra.Command, _ []string) error {
 // guestExec runs a single non-interactive command in the guest over the vsock
 // SSH path, failing fast if the guest is unreachable.
 func guestExec(configPath string, args ...string) error {
-	sshPath, err := exec.LookPath("ssh")
+	sshPath, argv, err := sshArgv(configPath, []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}, args...)
 	if err != nil {
-		return fmt.Errorf("ssh not found: %w", err)
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), guestExecTimeout)
 	defer cancel()
-	full := append([]string{"-F", configPath, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", sshHostAlias}, args...)
-	out, err := exec.CommandContext(ctx, sshPath, full...).CombinedOutput()
+	// Drop argv[0] ("ssh"); CommandContext prepends the resolved path itself.
+	out, err := exec.CommandContext(ctx, sshPath, argv[1:]...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("guest %v: %w: %s", args, err, out)
 	}

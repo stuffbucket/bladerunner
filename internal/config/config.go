@@ -314,7 +314,7 @@ func Default(baseDir string) (*Config, error) {
 		OIDCClientID:        DefaultOIDCClientID,
 		OIDCAudience:        DefaultOIDCAudience,
 		OIDCStateDir:        filepath.Join(baseDir, "oidc"),
-		IdentityDir:         defaultIdentityDir(),
+		IdentityDir:         DefaultIdentityDir(),
 		NetworkMode:         NetworkModeShared,
 		BridgeInterface:     DefaultBridgeInterface,
 		GUI:                 false, // off by default; opt in via Settings.ShowConsole or --gui
@@ -463,10 +463,11 @@ func ImageCachePath(sha256hex string) string {
 	return filepath.Join(ImageCacheDir(), sha256hex+".raw")
 }
 
-// defaultIdentityDir returns the XDG-compliant directory of registered identity .pub files.
-// This mirrors internal/oidc.DefaultIdentityDir but is duplicated here to avoid an import
-// cycle (config is imported by oidc).
-func defaultIdentityDir() string {
+// DefaultIdentityDir returns the XDG-compliant directory of registered identity
+// .pub files. This is the single source of truth for the identity directory
+// layout; internal/oidc wraps it (config is imported by oidc, so the helper
+// lives here to avoid an import cycle).
+func DefaultIdentityDir() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, appName, "identities")
 	}

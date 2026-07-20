@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -40,14 +38,9 @@ func runShell(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build ssh command with -t for PTY
-	sshPath, err := exec.LookPath("ssh")
+	sshPath, sshExecArgs, err := sshArgv(configPath, []string{"-t"}, shellArgs...)
 	if err != nil {
-		return fmt.Errorf("ssh not found: %w", err)
-	}
-
-	sshExecArgs := []string{"ssh", "-t", "-F", configPath, sshHostAlias}
-	if len(shellArgs) > 0 {
-		sshExecArgs = append(sshExecArgs, shellArgs...)
+		return err
 	}
 
 	return syscall.Exec(sshPath, sshExecArgs, os.Environ())

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -33,14 +31,10 @@ func runIncus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	sshPath, err := exec.LookPath("ssh")
+	sshPath, sshExecArgs, err := sshArgv(configPath, nil, append([]string{"incus"}, args...)...)
 	if err != nil {
-		return fmt.Errorf("ssh not found: %w", err)
+		return err
 	}
-
-	sshExecArgs := make([]string, 0, 5+len(args))
-	sshExecArgs = append(sshExecArgs, "ssh", "-F", configPath, sshHostAlias, "incus")
-	sshExecArgs = append(sshExecArgs, args...)
 
 	return syscall.Exec(sshPath, sshExecArgs, os.Environ())
 }
