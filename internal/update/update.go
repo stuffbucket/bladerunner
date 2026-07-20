@@ -17,16 +17,18 @@ import (
 )
 
 // productionPublicKey is the pinned Ed25519 public key (minisign/tauri format,
-// base64) used to verify update artifacts. It MUST be replaced with the real
-// key from the macos-builder TAURI_SIGNING_PUBLIC_KEY variable before shipping
-// self-update — see the PR body's "Remaining (needs user)" section. An empty
-// key makes Apply fail closed (verifyTarball rejects it), so a build that
-// forgets to wire the key cannot silently install anything.
+// base64) used to verify update artifacts. This is the PUBLIC half of the
+// macos-builder TAURI_SIGNING key (key id BF65715BAE1C1F9F); it carries no
+// secret, so embedding it as a source literal is correct and preferred over
+// ldflags for reproducibility. An empty key makes Apply fail closed
+// (verifyTarball rejects it), so a build that somehow blanks the key cannot
+// silently install anything.
 //
-// PLACEHOLDER — not a real key. Override at build time with:
+// It may still be overridden at build time (e.g. to pin a different channel)
+// with:
 //
 //	-ldflags "-X github.com/stuffbucket/bladerunner/internal/update.productionPublicKey=<base64>"
-var productionPublicKey = ""
+var productionPublicKey = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJGNjU3MTVCQUUxQzFGOUYKUldTZkh4eXVXM0ZsdjF1RkM4N1BBUHYrNFZWeWI1YTUvd05EMENiY25iVVVNcms5dE9adnBlTVgK"
 
 // downloadTimeout bounds the artifact download.
 const downloadTimeout = 5 * time.Minute
