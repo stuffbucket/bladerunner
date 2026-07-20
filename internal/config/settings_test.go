@@ -41,9 +41,6 @@ func TestDefaultSettingsMatchesConfigDefault(t *testing.T) {
 	if cfg.NetworkMode != before.NetworkMode {
 		t.Errorf("NetworkMode changed: %q -> %q", before.NetworkMode, cfg.NetworkMode)
 	}
-	if cfg.AuthMode != before.AuthMode {
-		t.Errorf("AuthMode changed: %q -> %q", before.AuthMode, cfg.AuthMode)
-	}
 	if cfg.NestedVirtDisabled != before.NestedVirtDisabled {
 		t.Errorf("NestedVirtDisabled changed: %v -> %v", before.NestedVirtDisabled, cfg.NestedVirtDisabled)
 	}
@@ -70,7 +67,6 @@ func TestSettingsValidate(t *testing.T) {
 		{"bad network mode", func(s *Settings) { s.NetworkMode = "carrier-pigeon" }, true},
 		{"bridged without iface", func(s *Settings) { s.NetworkMode = NetSettingBridged; s.BridgeInterface = "" }, true},
 		{"bridged with iface", func(s *Settings) { s.NetworkMode = NetSettingBridged; s.BridgeInterface = "en0" }, false},
-		{"bad auth mode", func(s *Settings) { s.AuthMode = "kerberos" }, true},
 		{"bad nested virt", func(s *Settings) { s.NestedVirt = "maybe" }, true},
 		{"cpus zero", func(s *Settings) { s.CPUs = 0 }, true},
 		{"memory too low", func(s *Settings) { s.MemoryGiB = 1 }, true},

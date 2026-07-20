@@ -46,25 +46,6 @@ func (p StartPolicy) Valid() bool {
 	}
 }
 
-// AuthSetting is the type-safe form of Config.AuthMode. Values match the
-// AuthModeOIDC/AuthModeCert string constants so ApplyTo is a plain cast.
-type AuthSetting string
-
-const (
-	AuthSettingOIDC AuthSetting = AuthSetting(AuthModeOIDC)
-	AuthSettingCert AuthSetting = AuthSetting(AuthModeCert)
-)
-
-// Valid reports whether a is one of the closed AuthSetting values.
-func (a AuthSetting) Valid() bool {
-	switch a {
-	case AuthSettingOIDC, AuthSettingCert:
-		return true
-	default:
-		return false
-	}
-}
-
 // NetSetting is the type-safe form of Config.NetworkMode. Values match the
 // NetworkModeShared/NetworkModeBridged string constants.
 type NetSetting string
@@ -194,9 +175,6 @@ type Settings struct {
 	NetworkMode     NetSetting `json:"networkMode"`
 	BridgeInterface string     `json:"bridgeInterface,omitempty"`
 
-	// Auth.
-	AuthMode AuthSetting `json:"authMode"`
-
 	// Base image source (closed union).
 	Image ImageSource `json:"image"`
 
@@ -224,7 +202,6 @@ func DefaultSettings() Settings {
 		DiskSizeGiB:     DefaultDiskSizeGiB,
 		NetworkMode:     NetSettingShared,
 		BridgeInterface: DefaultBridgeInterface,
-		AuthMode:        AuthSettingOIDC,
 		Image:           ImageSource{Kind: ImageDebian},
 		NestedVirt:      NestedAuto,
 		UseGuestAgent:   false,
@@ -245,9 +222,6 @@ func (s Settings) Validate() error {
 	}
 	if s.NetworkMode == NetSettingBridged && s.BridgeInterface == "" {
 		return errors.New("bridge interface must be set when network mode is bridged")
-	}
-	if !s.AuthMode.Valid() {
-		return fmt.Errorf("invalid auth mode: %q", s.AuthMode)
 	}
 	if !s.NestedVirt.Valid() {
 		return fmt.Errorf("invalid nested virt mode: %q", s.NestedVirt)
@@ -370,7 +344,6 @@ func (s Settings) ApplyTo(cfg *Config) {
 	if s.NetworkMode == NetSettingBridged {
 		cfg.BridgeInterface = s.BridgeInterface
 	}
-	cfg.AuthMode = string(s.AuthMode)
 	cfg.NestedVirtDisabled = s.NestedVirt == NestedDisabled
 	cfg.UseGuestAgent = s.UseGuestAgent
 	cfg.WaitForIncus = time.Duration(s.WaitForIncus)
