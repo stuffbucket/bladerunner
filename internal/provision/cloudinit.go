@@ -843,9 +843,14 @@ func buildMinimalCloudInit(cfg *config.Config) (string, string) {
 	// path, no host<->guest vsock bridges — and the in-guest br-agent does not
 	// create them either. Without these socat relays the host can reach neither
 	// SSH (vsock %[1]d -> :22) nor the Incus API (vsock %[2]d -> :8443), so the
-	// guest looks dead even though it booted (#45). Emit the same bridge units
-	// the full path uses (ports templated to cfg) and enable them before the
-	// agent configures incus.
+	// guest looks dead even though it booted (#45). The OIDC relay is equally
+	// required: the br-agent's config push points Incus at issuer
+	// http://127.0.0.1:LocalOIDCPort (guest loopback), which only resolves when
+	// bladerunner-vsock-oidc.service forwards that guest TCP port over vsock to
+	// the host provider (VSOCK-CONNECT:2:VsockOIDCPort); without it web-UI/API
+	// OIDC sign-in fails on the agent path even though it works on the full path
+	// (#130). Emit the same bridge units the full path uses (ports templated to
+	// cfg) and enable them before the agent configures incus.
 	b.WriteString("runcmd:\n")
 	// Explicitly create the SSH user + authorized_keys. cloud-init's users module
 	// is unreliable on this image (the agent observed "unknown user incus" and
@@ -903,8 +908,28 @@ func buildMinimalCloudInit(cfg *config.Config) (string, string) {
 	b.WriteString("    [Install]\n")
 	b.WriteString("    WantedBy=multi-user.target\n")
 	b.WriteString("    UNIT\n")
+	// OIDC relay: guest TCP LocalOIDCPort -> vsock -> host provider VsockOIDCPort.
+	// The br-agent's config push points Incus at issuer http://127.0.0.1:LocalOIDCPort
+	// (guest loopback), so this relay is what makes that loopback issuer reach the
+	// host OIDC server. Byte-for-byte the same unit the full path emits (#130).
+	b.WriteString("    cat >/etc/systemd/system/bladerunner-vsock-oidc.service <<'UNIT'\n")
+	b.WriteString("    [Unit]\n")
+	b.WriteString("    Description=Bladerunner vsock OIDC forward (guest TCP -> host vsock)\n")
+	b.WriteString("    After=network.target\n")
+	b.WriteString("    ConditionPathExists=/usr/bin/socat\n")
+	b.WriteString("    ConditionPathExists=/dev/vsock\n")
+	b.WriteString("\n")
+	b.WriteString("    [Service]\n")
+	b.WriteString("    Type=simple\n")
+	fmt.Fprintf(&b, "    ExecStart=/usr/bin/socat TCP-LISTEN:%d,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d\n", cfg.LocalOIDCPort, cfg.VsockOIDCPort)
+	b.WriteString("    Restart=always\n")
+	b.WriteString("    RestartSec=1\n")
+	b.WriteString("\n")
+	b.WriteString("    [Install]\n")
+	b.WriteString("    WantedBy=multi-user.target\n")
+	b.WriteString("    UNIT\n")
 	b.WriteString("    systemctl daemon-reload\n")
-	b.WriteString("    systemctl enable --now bladerunner-vsock-ssh.service bladerunner-vsock-incus.service\n")
+	b.WriteString("    systemctl enable --now bladerunner-vsock-ssh.service bladerunner-vsock-incus.service bladerunner-vsock-oidc.service\n")
 	b.WriteString("  - [systemctl, enable, --now, br-agent.service]\n")
 
 	metaData := fmt.Sprintf("instance-id: bladerunner-%s\nlocal-hostname: %s\n", cfg.Name, cfg.Hostname)
