@@ -75,6 +75,8 @@ Define one shell snippet: `incus admin waitready` (reuse existing loop) → if n
 
 - The publish machinery already exists (`.github/workflows/build-guest-image.yml:108-161` maintains `guest-image-latest`). **Do not flip `useHosted=true` (`internal/config/config.go:280`) yet.** Two blockers, both tracked here, neither blocking floppy code: (a) `guest-image-latest` is unpublished; (b) the artifact may carry a `-no-agent` suffix (`build-guest-image.yml:75-78,84`) that won't match the bare `bladerunner-guest-<arch>.qcow2` name `HostedGuestImageURL` (`config.go:253-262`) expects → 404. Reconcile artifact naming before flipping. Per-disk opt-in (`internal/disk/apply.go:27-31`) remains available for testing without touching the global default.
 
+  **Update (#155):** the default IS now flipped to the pre-baked image + agent handshake, held for the #154 real-hardware boot-verify. Both blockers above are now handled at runtime rather than gating the flip: a 404 (missing/renamed asset) or any download/verify failure emits a `WARN` and auto-falls-back to the pinned Debian + cloud-init path (`internal/vm/assets.go` `ensureHostedOrFallback`), and the pre-baked checksum is verified fail-closed against its `.sha256` sidecar. The forced-cloud-init escape hatch (`--cloud-init` / `BLADERUNNER_FORCE_CLOUD_INIT`) restores the old default explicitly.
+
 ### Verbs/flags
 
 None (provisioning only).

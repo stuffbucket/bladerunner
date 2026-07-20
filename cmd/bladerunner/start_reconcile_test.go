@@ -168,7 +168,11 @@ func TestApplyFlagOverridesImageURLClearsSHA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// config.Default for a supported arch carries the pinned Debian SHA-512.
+	// Force the pinned-Debian baseline (the default is now the hosted image,
+	// which carries no embedded SHA-512) so there is a SHA-512 to clear.
+	s := config.DefaultSettings()
+	s.Image = config.ImageSource{Kind: config.ImageDebian}
+	s.ApplyTo(cfg)
 	if cfg.BaseImageSHA512 == "" {
 		t.Skip("no pinned SHA on this arch; nothing to clear")
 	}
@@ -183,6 +187,48 @@ func TestApplyFlagOverridesImageURLClearsSHA(t *testing.T) {
 	}
 	if cfg.BaseImageSHA512 != "" {
 		t.Errorf("BaseImageSHA512 = %q, want cleared for a custom URL", cfg.BaseImageSHA512)
+	}
+	if cfg.HostedImageFallback {
+		t.Error("a custom --image-url must clear HostedImageFallback")
+	}
+	if cfg.UseHostedGuestImage {
+		t.Error("a custom --image-url must clear UseHostedGuestImage")
+	}
+}
+
+// The --cloud-init escape hatch forces the legacy Debian + first-boot cloud-init
+// path off the #155 hosted default: it re-resolves the pinned Debian URL/SHA and
+// disables the hosted image, the agent handshake, and the auto-fallback.
+func TestApplyFlagOverridesCloudInitEscapeHatch(t *testing.T) {
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.DefaultSettings().ApplyTo(cfg) // the hosted default baseline
+	if !cfg.UseHostedGuestImage {
+		t.Skip("forced cloud-init environment; hosted default not in effect")
+	}
+
+	withStartFlags(t, func() {
+		startFlags.cloudInit = true
+		applyFlagOverrides(cfg, changedSet("cloud-init"), false)
+	})
+
+	if cfg.UseHostedGuestImage {
+		t.Error("--cloud-init must clear UseHostedGuestImage")
+	}
+	if cfg.UseGuestAgent {
+		t.Error("--cloud-init must clear UseGuestAgent")
+	}
+	if cfg.HostedImageFallback {
+		t.Error("--cloud-init must clear HostedImageFallback")
+	}
+	wantURL, _ := config.DebianTrixieGenericCloudURL(cfg.Arch)
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want pinned Debian %q", cfg.BaseImageURL, wantURL)
+	}
+	if cfg.BaseImageSHA512 != config.DebianTrixieGenericCloudSHA512(cfg.Arch) {
+		t.Errorf("BaseImageSHA512 = %q, want pinned Debian checksum", cfg.BaseImageSHA512)
 	}
 }
 

@@ -19,13 +19,6 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
-// isGitHubReleaseURL reports whether url points at a github.com release
-// download. Used to relax sidecar-checksum strictness during the period
-// before the first guest-image release ships a .sha256 sidecar.
-func isGitHubReleaseURL(url string) bool {
-	return strings.Contains(url, "github.com/") && strings.Contains(url, "/releases/")
-}
-
 // fetchSidecarSHA256 fetches a "<url>.sha256" sidecar and returns the
 // lowercased hex digest. The sidecar may be either bare hex or the
 // `sha256sum` format ("<hex>  <filename>"); only the first whitespace-
@@ -105,13 +98,20 @@ func fileSHA512(path string) (string, error) {
 // hash and a mismatch is fatal — this makes the default image reproducible and
 // tamper-evident without a network round-trip.
 //
-// Otherwise (custom --image-url) it falls back to a sidecar checksum hosted at
-// imageURL+".sha256". A missing or unreachable sidecar is logged at WARN and
-// skipped — many upstream image hosts (Debian's cloud.debian.org, GitHub
-// Releases pre-first-publish) don't publish per-image .sha256 sidecars, and
-// blocking boot on their absence regresses the default user experience.
-// Mismatched sidecars remain fatal.
-func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512, path string) error {
+// Otherwise verification falls back to a sidecar checksum hosted at
+// imageURL+".sha256". strictSidecar selects the policy for a missing/unreachable
+// sidecar:
+//   - strictSidecar=true (the pre-baked hosted default, #155): a missing,
+//     unreachable, or empty sidecar is FATAL. The default path must fail closed
+//     so a fresh install never boots an unverified pre-baked image; the caller
+//     turns that failure into an explicit Debian+cloud-init fallback.
+//   - strictSidecar=false (a custom --image-url): a missing/unreachable sidecar
+//     is logged at WARN and skipped, since many upstream hosts (cloud.debian.org,
+//     arbitrary mirrors) don't publish per-image .sha256 sidecars and blocking
+//     boot on their absence would regress that user-supplied path.
+//
+// A mismatched sidecar is ALWAYS fatal regardless of strictness.
+func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512 string, strictSidecar bool, path string) error {
 	if expectedSHA512 != "" {
 		got, err := fileSHA512(path)
 		if err != nil {
@@ -126,11 +126,17 @@ func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512, path str
 
 	want, err := fetchSidecarSHA256(ctx, imageURL)
 	if err != nil {
+		if strictSidecar {
+			return fmt.Errorf("fetch sidecar SHA-256 (required for pre-baked image): %w", err)
+		}
 		logging.L().Warn("sidecar SHA-256 fetch failed, continuing without verification",
 			"url", imageURL+".sha256", "err", err)
 		return nil
 	}
 	if want == "" {
+		if strictSidecar {
+			return fmt.Errorf("sidecar SHA-256 not published at %s (required for pre-baked image)", imageURL+".sha256")
+		}
 		logging.L().Warn("sidecar SHA-256 not present, skipping verification",
 			"url", imageURL+".sha256")
 		return nil
@@ -224,12 +230,21 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("base image url is empty")
 	}
 
+	// The pre-baked hosted image is the default (#155). Verify it fail-closed
+	// against its published SHA-256 sidecar; on ANY download/verify failure fall
+	// back to the pinned Debian + cloud-init path so a first run is never bricked.
+	if cfg.HostedImageFallback {
+		return ensureHostedOrFallback(ctx, cfg, path)
+	}
+
 	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", path)
 	if err := downloadFile(ctx, cfg.BaseImageURL, path); err != nil {
 		return "", err
 	}
 
-	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, path); err != nil {
+	// A custom --image-url (BaseImageSHA512 == "") uses non-strict sidecar
+	// verification; the pinned Debian default uses its embedded SHA-512.
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, false, path); err != nil {
 		// Remove the corrupt download so subsequent runs don't reuse it.
 		_ = os.Remove(path)
 		return "", err
@@ -240,6 +255,74 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	}
 
 	logging.L().Info("downloaded base image", "path", path)
+	return path, nil
+}
+
+// debianFallbackURL and debianFallbackSHA512 resolve the pinned Debian
+// genericcloud fallback for a GOARCH. They are package vars (not direct calls to
+// config) solely so tests can redirect the fallback to a local httptest server
+// and exercise the hosted->Debian fallback hermetically; production wiring is the
+// real config resolvers.
+var (
+	debianFallbackURL    = config.DebianTrixieGenericCloudURL
+	debianFallbackSHA512 = config.DebianTrixieGenericCloudSHA512
+)
+
+// ensureHostedOrFallback downloads and STRICTLY verifies the pre-baked hosted
+// guest image (the #155 default), and on any failure — missing release asset for
+// the arch, download error, or a missing/mismatched sidecar — emits a clear
+// WARNING and auto-falls-back to the pinned Debian genericcloud + first-boot
+// cloud-init path. This keeps the default fail-closed on checksum (a corrupt or
+// unverifiable pre-baked image is never booted) while never bricking a first run
+// on a flaky network or an arch whose asset hasn't shipped yet. It mutates cfg so
+// the rest of start (provisioning-path selection via UseGuestAgent, status
+// reporting via UseHostedGuestImage) follows the chosen path.
+func ensureHostedOrFallback(ctx context.Context, cfg *config.Config, path string) (string, error) {
+	logging.L().Info("downloading pre-baked guest image (default)", "url", cfg.BaseImageURL, "destination", path)
+	err := downloadFile(ctx, cfg.BaseImageURL, path)
+	if err == nil {
+		// BaseImageSHA512 is empty for the hosted image; strict sidecar required.
+		err = verifyImageChecksum(ctx, cfg.BaseImageURL, "", true, path)
+	}
+	if err == nil {
+		if convErr := ensureRawDiskImage(path); convErr != nil {
+			return "", convErr
+		}
+		logging.L().Info("using pre-baked guest image (agent handshake path)", "path", path)
+		return path, nil
+	}
+
+	// Discard any partial/corrupt hosted download and fall back to Debian.
+	_ = os.Remove(path)
+
+	debURL, uerr := debianFallbackURL(cfg.Arch)
+	if uerr != nil {
+		// No Debian image for this arch either — surface the ORIGINAL hosted error.
+		return "", fmt.Errorf("pre-baked guest image unavailable and no Debian fallback for arch %q: %w", cfg.Arch, err)
+	}
+	logging.L().Warn("pre-baked guest image unavailable; falling back to Debian + cloud-init",
+		"reason", err, "hosted_url", cfg.BaseImageURL, "fallback_url", debURL)
+
+	// Re-point cfg at the Debian + cloud-init path so provisioning selection and
+	// status reporting reflect the actual boot.
+	cfg.BaseImageURL = debURL
+	cfg.BaseImageSHA512 = debianFallbackSHA512(cfg.Arch)
+	cfg.UseHostedGuestImage = false
+	cfg.UseGuestAgent = false
+	cfg.HostedImageFallback = false
+
+	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", path)
+	if err := downloadFile(ctx, cfg.BaseImageURL, path); err != nil {
+		return "", err
+	}
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, false, path); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := ensureRawDiskImage(path); err != nil {
+		return "", err
+	}
+	logging.L().Info("using Debian base image (cloud-init path, fallback)", "path", path)
 	return path, nil
 }
 

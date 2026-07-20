@@ -20,44 +20,41 @@ func pinnedURL(arch string) string {
 }
 
 func TestDefaultBaseImageURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		arch    string
-		wantURL string
-		wantErr bool
-	}{
-		{
-			name:    "arm64 returns pinned Debian 13 trixie ARM64 image",
-			arch:    "arm64",
-			wantURL: pinnedURL("arm64"),
-			wantErr: false,
-		},
-		{
-			name:    "amd64 returns pinned Debian 13 trixie AMD64 image",
-			arch:    "amd64",
-			wantURL: pinnedURL("amd64"),
-			wantErr: false,
-		},
-		{
-			name:    "unsupported architecture returns error",
-			arch:    "riscv64",
-			wantURL: "",
-			wantErr: true,
-		},
-	}
+	// As of #155 the built-in default is the pre-baked hosted guest image; the
+	// forced-cloud-init escape hatch selects the pinned Debian genericcloud.
+	t.Run("default is the pre-baked hosted image", func(t *testing.T) {
+		t.Setenv(ForceCloudInitEnvVar, "")
+		for _, arch := range []string{"arm64", "amd64"} {
+			got, err := DefaultBaseImageURL(arch)
+			if err != nil {
+				t.Fatalf("DefaultBaseImageURL(%s) error = %v", arch, err)
+			}
+			want, _ := HostedGuestImageURL(arch)
+			if got != want {
+				t.Errorf("DefaultBaseImageURL(%s) = %q, want hosted %q", arch, got, want)
+			}
+		}
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := DefaultBaseImageURL(tt.arch)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DefaultBaseImageURL() error = %v, wantErr %v", err, tt.wantErr)
-				return
+	t.Run("forced cloud-init selects pinned Debian", func(t *testing.T) {
+		t.Setenv(ForceCloudInitEnvVar, "1")
+		for _, arch := range []string{"arm64", "amd64"} {
+			got, err := DefaultBaseImageURL(arch)
+			if err != nil {
+				t.Fatalf("DefaultBaseImageURL(%s) error = %v", arch, err)
 			}
-			if got != tt.wantURL {
-				t.Errorf("DefaultBaseImageURL() = %v, want %v", got, tt.wantURL)
+			if got != pinnedURL(arch) {
+				t.Errorf("DefaultBaseImageURL(%s) = %q, want pinned Debian %q", arch, got, pinnedURL(arch))
 			}
-		})
-	}
+		}
+	})
+
+	t.Run("unsupported architecture returns error", func(t *testing.T) {
+		t.Setenv(ForceCloudInitEnvVar, "")
+		if _, err := DefaultBaseImageURL("riscv64"); err == nil {
+			t.Error("DefaultBaseImageURL(riscv64) expected error, got nil")
+		}
+	})
 }
 
 func TestDebianTrixieGenericCloudURL(t *testing.T) {
@@ -108,19 +105,58 @@ func TestDebianTrixieImageIsPinned(t *testing.T) {
 	}
 }
 
-// TestDefaultConfigCarriesPinnedChecksum verifies Default() wires the embedded
-// SHA-512 for the host arch so the download is verified.
+// TestDefaultConfigCarriesPinnedChecksum verifies the forced-cloud-init path
+// wires the embedded SHA-512 for the host arch so the Debian download is
+// verified. (The default hosted path carries no embedded SHA-512; it is verified
+// fail-closed against its sidecar in EnsureBaseImage — see the vm package tests.)
 func TestDefaultConfigCarriesPinnedChecksum(t *testing.T) {
 	want := DebianTrixieGenericCloudSHA512(runtime.GOARCH)
 	if want == "" {
 		t.Skipf("no pinned checksum for arch %s", runtime.GOARCH)
 	}
+	t.Setenv(ForceCloudInitEnvVar, "1")
 	cfg, err := Default(t.TempDir())
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
 	if cfg.BaseImageSHA512 != want {
 		t.Errorf("Default().BaseImageSHA512 = %q, want %q", cfg.BaseImageSHA512, want)
+	}
+	if cfg.UseHostedGuestImage {
+		t.Error("forced cloud-init: UseHostedGuestImage should be false")
+	}
+	if cfg.UseGuestAgent {
+		t.Error("forced cloud-init: UseGuestAgent should be false")
+	}
+	if cfg.HostedImageFallback {
+		t.Error("forced cloud-init: HostedImageFallback should be false")
+	}
+}
+
+// TestDefaultConfigDefaultsToHostedImage verifies the #155 default: a fresh
+// install uses the pre-baked hosted image + agent handshake with the automatic
+// Debian fallback armed, and carries no embedded SHA-512 (sidecar-verified).
+func TestDefaultConfigDefaultsToHostedImage(t *testing.T) {
+	t.Setenv(ForceCloudInitEnvVar, "")
+	cfg, err := Default(t.TempDir())
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	if !cfg.UseHostedGuestImage {
+		t.Error("default should use the pre-baked hosted guest image")
+	}
+	if !cfg.UseGuestAgent {
+		t.Error("default should use the guest agent handshake path")
+	}
+	if !cfg.HostedImageFallback {
+		t.Error("default should arm the hosted->Debian auto-fallback")
+	}
+	if cfg.BaseImageSHA512 != "" {
+		t.Errorf("hosted default should carry no embedded SHA-512, got %q", cfg.BaseImageSHA512)
+	}
+	wantURL, _ := HostedGuestImageURL(runtime.GOARCH)
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("default BaseImageURL = %q, want hosted %q", cfg.BaseImageURL, wantURL)
 	}
 }
 
@@ -178,12 +214,13 @@ func TestResolveBaseImageURL(t *testing.T) {
 }
 
 func TestDefaultConfigUseHostedGuestImage(t *testing.T) {
+	t.Setenv(ForceCloudInitEnvVar, "")
 	cfg, err := Default(t.TempDir())
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
-	if cfg.UseHostedGuestImage {
-		t.Error("Default config should have UseHostedGuestImage=false (opt-in)")
+	if !cfg.UseHostedGuestImage {
+		t.Error("Default config should use the pre-baked hosted guest image (#155)")
 	}
 }
 
@@ -199,6 +236,7 @@ func TestDefaultAptMirrorURI(t *testing.T) {
 }
 
 func TestDefaultConfig(t *testing.T) {
+	t.Setenv(ForceCloudInitEnvVar, "")
 	tmpDir := t.TempDir()
 
 	cfg, err := Default(tmpDir)

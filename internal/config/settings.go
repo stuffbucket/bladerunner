@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -214,8 +215,16 @@ type Settings struct {
 
 // DefaultSettings returns the user-settings document that reproduces
 // bladerunner's built-in defaults. It must stay in sync with Default so a fresh
-// settings.json is a no-op overlay.
+// settings.json is a no-op overlay. The image default follows the
+// forced-cloud-init escape hatch: the pre-baked hosted image + agent handshake
+// (#155) unless BLADERUNNER_FORCE_CLOUD_INIT selects the legacy Debian path.
 func DefaultSettings() Settings {
+	image := ImageSource{Kind: ImageHosted}
+	useAgent := true
+	if ForceCloudInit() {
+		image = ImageSource{Kind: ImageDebian}
+		useAgent = false
+	}
 	return Settings{
 		SchemaVersion:   settingsSchemaVersion,
 		StartPolicy:     StartManual,
@@ -225,9 +234,9 @@ func DefaultSettings() Settings {
 		NetworkMode:     NetSettingShared,
 		BridgeInterface: DefaultBridgeInterface,
 		AuthMode:        AuthSettingOIDC,
-		Image:           ImageSource{Kind: ImageDebian},
+		Image:           image,
 		NestedVirt:      NestedAuto,
-		UseGuestAgent:   false,
+		UseGuestAgent:   useAgent,
 		WaitForIncus:    Duration(DefaultTimeout),
 		ShowConsole:     false,
 	}
@@ -355,10 +364,14 @@ func (s Settings) Save(stateDir string) error {
 // ApplyTo overlays the user-settable Settings onto cfg, translating the
 // type-safe enums/union into the resolved string/bool fields the rest of the
 // codebase already consumes. It leaves derived paths, ports, secrets, and other
-// runtime fields untouched. Base-image RESOLUTION (URL/SHA/path population for a
-// concrete arch) is deliberately NOT done here — it stays in the existing
-// resolve step so vm/disk back-compat is preserved; ApplyTo only records the
-// chosen source. Callers that need a runnable image must still resolve it.
+// runtime fields untouched.
+//
+// Base-image RESOLUTION happens here for the two built-in kinds (hosted /
+// Debian): because Config.Default resolves BaseImageURL from the built-in
+// default (hosted as of #155), a user who overlays the OTHER built-in kind must
+// have BaseImageURL/SHA re-resolved to match, or the URL and the kind disagree.
+// Resolution uses cfg.Arch (populated by Default); an unresolvable arch leaves
+// the existing URL untouched (Validate rejects an empty URL later).
 func (s Settings) ApplyTo(cfg *Config) {
 	if cfg == nil {
 		return
@@ -376,22 +389,47 @@ func (s Settings) ApplyTo(cfg *Config) {
 	cfg.WaitForIncus = time.Duration(s.WaitForIncus)
 	cfg.GUI = s.ShowConsole
 
+	arch := cfg.Arch
+	if arch == "" {
+		arch = runtime.GOARCH
+	}
+
 	switch s.Image.Kind {
 	case ImageHosted:
+		// The pre-baked default: re-resolve the hosted URL so it matches the kind
+		// even if Default() resolved Debian (forced-cloud-init env). Verified
+		// fail-closed via sidecar, with auto-fallback to Debian, in EnsureBaseImage.
+		if url, err := HostedGuestImageURL(arch); err == nil {
+			cfg.BaseImageURL = url
+		}
 		cfg.UseHostedGuestImage = true
+		cfg.HostedImageFallback = true
+		cfg.BaseImageSHA512 = ""
+		cfg.BaseImageExpectedSHA256 = ""
 		cfg.BaseImagePath = ""
 	case ImageDebian:
+		// The forced-cloud-init default: re-resolve the pinned Debian URL + SHA-512
+		// so switching away from the hosted default is fully consistent.
+		if url, err := DebianTrixieGenericCloudURL(arch); err == nil {
+			cfg.BaseImageURL = url
+		}
 		cfg.UseHostedGuestImage = false
+		cfg.HostedImageFallback = false
+		cfg.BaseImageSHA512 = DebianTrixieGenericCloudSHA512(arch)
+		cfg.BaseImageExpectedSHA256 = ""
 		cfg.BaseImagePath = ""
 	case ImageCustomURL:
 		cfg.UseHostedGuestImage = false
+		cfg.HostedImageFallback = false
 		cfg.BaseImageURL = s.Image.URL
 		// A custom URL clears the embedded checksum; verification falls back to
 		// the sidecar, matching the existing --image-url semantics.
 		cfg.BaseImageSHA512 = ""
+		cfg.BaseImageExpectedSHA256 = ""
 		cfg.BaseImagePath = ""
 	case ImageLocalPath:
 		cfg.UseHostedGuestImage = false
+		cfg.HostedImageFallback = false
 		cfg.BaseImagePath = s.Image.Path
 	}
 }

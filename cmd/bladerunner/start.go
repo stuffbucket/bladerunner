@@ -40,6 +40,7 @@ var startFlags struct {
 	timeout     time.Duration
 	useAgent    bool
 	noAgent     bool
+	cloudInit   bool
 	noNested    bool
 	restoreFrom string
 }
@@ -64,6 +65,7 @@ func init() {
 	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
 	f.BoolVar(&startFlags.useAgent, "use-guest-agent", false, "Use the in-guest br-agent for boot config (requires pre-baked image or user-side install)")
 	f.BoolVar(&startFlags.noAgent, "no-agent", false, "Force the legacy cloud-init/HTTP-polling path even if use-guest-agent is enabled")
+	f.BoolVar(&startFlags.cloudInit, "cloud-init", false, "Escape hatch: force the legacy Debian genericcloud + first-boot cloud-init path instead of the default pre-baked guest image (also settable via BLADERUNNER_FORCE_CLOUD_INIT=1)")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
 	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
 }
@@ -172,6 +174,20 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 	if apply("use-guest-agent") || apply("no-agent") {
 		cfg.UseGuestAgent = startFlags.useAgent && !startFlags.noAgent
 	}
+	// --cloud-init is the escape hatch off the #155 default: force the legacy
+	// pinned-Debian + first-boot cloud-init path. It resolves the Debian URL/SHA
+	// and disables the hosted image + agent handshake (and its auto-fallback), so
+	// the whole boot follows the cloud-init path. A custom --image-url/--image-path
+	// below still wins (it sets an explicit source), but the agent stays off.
+	if apply("cloud-init") && startFlags.cloudInit {
+		if url, err := config.DebianTrixieGenericCloudURL(cfg.Arch); err == nil {
+			cfg.BaseImageURL = url
+			cfg.BaseImageSHA512 = config.DebianTrixieGenericCloudSHA512(cfg.Arch)
+		}
+		cfg.UseHostedGuestImage = false
+		cfg.UseGuestAgent = false
+		cfg.HostedImageFallback = false
+	}
 	if apply("no-nested-virt") {
 		cfg.NestedVirtDisabled = startFlags.noNested
 	}
@@ -180,12 +196,19 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 	// leaves them empty unless the user passed one.
 	if startFlags.imageURL != "" && apply("image-url") {
 		cfg.BaseImageURL = startFlags.imageURL
-		// A custom image isn't the pinned Debian default, so the embedded
-		// SHA-512 no longer applies; fall back to sidecar verification.
+		// A custom image isn't the pinned Debian default nor the pre-baked hosted
+		// default, so the embedded SHA-512 no longer applies (fall back to sidecar
+		// verification) and neither the hosted flag nor its auto-fallback apply.
 		cfg.BaseImageSHA512 = ""
+		cfg.UseHostedGuestImage = false
+		cfg.HostedImageFallback = false
 	}
 	if startFlags.imagePath != "" && apply("image-path") {
 		cfg.BaseImagePath = startFlags.imagePath
+		// A local image bypasses download/verify entirely; clear the hosted
+		// auto-fallback so ensureBaseImage takes the BaseImagePath branch.
+		cfg.UseHostedGuestImage = false
+		cfg.HostedImageFallback = false
 	}
 }
 
