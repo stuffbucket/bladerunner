@@ -38,13 +38,27 @@ while :; do
   sys_offset="$(printf '%s\n' "$tracking" | awk -F': ' '/System time/ {print $2}')"
   leap="$(printf '%s\n' "$tracking" | awk -F': ' '/Leap status/ {print $2}')"
   refid="$(printf '%s\n' "$tracking" | awk -F': ' '/Reference ID/ {print $2}')"
-  # --- OBSERVE: per-forwarder local health -------------------------------
+  # --- OBSERVE: per-relay local health -----------------------------------
+  # All four channels run as instances of ONE template unit
+  # (bladerunner-vsock-relay@<name>). Each entry is "<name> <gate-port>":
+  # gate-port is a local backend whose listener must be up before a heal is
+  # worthwhile (ssh :22, incus :8443); channels that dial OUT over vsock
+  # (oidc, ntp) have no local backend, so gate-port is "-" (ungated).
+  # The oidc gate-port is the guest-side TCP listener the relay itself opens,
+  # tracked only for logging, not as a heal gate. ssh is listed LAST so it heals
+  # after the others, preserving the original heal order.
+  relays="incus 8443 oidc - ntp - ssh 22"
   ssh_listen=$(listening 22 && echo up || echo down)
   api_listen=$(listening 8443 && echo up || echo down)
   oidc_listen=$(listening "$VSOCK_OIDC_LOCAL_PORT" && echo up || echo down)
-  for u in bladerunner-vsock-ssh bladerunner-vsock-incus bladerunner-vsock-oidc bladerunner-vsock-ntp; do
-    st=$(unit_active "$u.service" && echo active || echo inactive)
-    log "fwd $u=$st nrestarts=$(unit_restarts "$u.service")"
+  # shellcheck disable=SC2086 # word-splitting "$relays" into name/gate pairs is intended
+  set -- $relays
+  while [ "$#" -ge 2 ]; do
+    name=$1
+    shift 2
+    unit="bladerunner-vsock-relay@$name.service"
+    st=$(unit_active "$unit" && echo active || echo inactive)
+    log "fwd $name=$st nrestarts=$(unit_restarts "$unit")"
   done
   log "clock sys_offset=${sys_offset:-NA} leap=${leap:-NA} refid=${refid:-NA}"
   log "listen ssh22=$ssh_listen api8443=$api_listen oidc${VSOCK_OIDC_LOCAL_PORT}=$oidc_listen"
@@ -63,35 +77,38 @@ while :; do
     chronyc makestep >/dev/null 2>&1 || true
   fi
 
-  # --- HEAL: stateless socat relays (incus, then oidc). Restarting these
-  #     only drops in-flight proxied connections; container/network state is
-  #     owned by incusd + systemd-networkd, never by the relay. Bounce only
-  #     when the relay is dead/inactive (its backend being down is the
-  #     target's problem, not the relay's — do NOT bounce then).
-  if [ "$api_listen" = up ] && ! unit_active bladerunner-vsock-incus.service; then
-    log "heal: restart bladerunner-vsock-incus (backend :8443 up, relay inactive)"
-    systemctl restart bladerunner-vsock-incus.service || true
-  fi
-  if ! unit_active bladerunner-vsock-oidc.service; then
-    log "heal: restart bladerunner-vsock-oidc (relay inactive)"
-    systemctl restart bladerunner-vsock-oidc.service || true
-  fi
-  if ! unit_active bladerunner-vsock-ntp.service; then
-    log "heal: restart bladerunner-vsock-ntp (relay inactive)"
-    systemctl restart bladerunner-vsock-ntp.service || true
-  fi
-
-  # --- HEAL: vsock-ssh LAST and tightly gated. Only when local sshd IS
-  #     listening (:22 up, so the in-guest target is healthy) but the relay
-  #     is dead. This avoids racing an operator's live 'br shell' and
-  #     avoids spinning the unit's unbounded ExecStartPre when sshd is down.
-  #     The watchdog runs locally, so bouncing the bridge never cuts its own
-  #     execution path. (Restart=always already auto-heals a crashed socat,
-  #     so this fires only for the rare wedged-but-not-crashed case.)
-  if [ "$ssh_listen" = up ] && ! unit_active bladerunner-vsock-ssh.service; then
-    log "heal: restart bladerunner-vsock-ssh (sshd :22 up, relay inactive)"
-    systemctl restart bladerunner-vsock-ssh.service || true
-  fi
+  # --- HEAL: the vsock relays, in ONE loop over the same channel table.
+  #     Restarting a relay only drops in-flight proxied connections; container
+  #     and network state is owned by incusd + systemd-networkd, never by a
+  #     relay. Bounce a channel only when its instance is dead/inactive AND, for
+  #     channels with a local backend, that backend IS up — its backend being
+  #     down is the target's problem, not the relay's, so do NOT bounce then.
+  #     (Restart=always already auto-heals a crashed socat, so this fires only
+  #     for the rare wedged-but-not-crashed case.) A gate of "-" means the
+  #     channel dials out over vsock and is healed whenever its instance is
+  #     inactive. The ssh channel is gated on its local sshd :22 for the same
+  #     reason as the others, which also avoids racing an operator's live
+  #     'br shell' and spinning the instance's ExecStartPre when sshd is down.
+  #     The watchdog runs locally, so bouncing a relay never cuts its own path.
+  # shellcheck disable=SC2086 # word-splitting "$relays" into name/gate pairs is intended
+  set -- $relays
+  while [ "$#" -ge 2 ]; do
+    name=$1 gate=$2
+    shift 2
+    unit="bladerunner-vsock-relay@$name.service"
+    if unit_active "$unit"; then
+      continue
+    fi
+    if [ "$gate" != "-" ] && ! listening "$gate"; then
+      continue  # backend down: not the relay's fault, leave it be
+    fi
+    if [ "$gate" = "-" ]; then
+      log "heal: restart $unit (relay inactive)"
+    else
+      log "heal: restart $unit (backend :$gate up, relay inactive)"
+    fi
+    systemctl restart "$unit" || true
+  done
 
   # NEVER blanket-restart systemd-networkd: it would tear down Incus container
   # bridges. (A genuine total-network-down recovery is intentionally out of

@@ -91,28 +91,30 @@ func TestBuildCloudInit_NoLegacySedGrubEdit(t *testing.T) {
 }
 
 // TestBuildCloudInit_VsockSSHBridgeBeforeIncusInstall guards the recovery fix:
-// the vsock SSH bridge unit must be created and enabled BEFORE the fragile,
+// the vsock SSH relay must be created and enabled BEFORE the fragile,
 // network-heavy incus package install. Otherwise a failure installing/setting
-// up incus (or a transient apt error) aborts the bootstrap before the bridge
+// up incus (or a transient apt error) aborts the bootstrap before the relay
 // exists, permanently leaving the guest with no host<->guest SSH over vsock
 // (runcmd is once-per-instance and never retries). This is the root cause of a
-// guest that boots fine but where `br shell` resets with errno 54.
+// guest that boots fine but where `br shell` resets with errno 54. The ssh
+// channel is now an instance of the shared relay template, whose per-channel
+// arg file names the ssh backend.
 func TestBuildCloudInit_VsockSSHBridgeBeforeIncusInstall(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
 	userData, _ := BuildCloudInit(cfg, "")
 
-	bridgeIdx := strings.Index(userData, "/etc/systemd/system/bladerunner-vsock-ssh.service")
+	bridgeIdx := strings.Index(userData, "/etc/bladerunner/relays/ssh.env")
 	incusIdx := strings.Index(userData, "incus incus-client")
 	if bridgeIdx < 0 {
-		t.Fatalf("user-data does not create the vsock SSH bridge unit\n---\n%s\n---", userData)
+		t.Fatalf("user-data does not create the vsock SSH relay arg file\n---\n%s\n---", userData)
 	}
 	if incusIdx < 0 {
 		t.Fatalf("user-data does not install incus (test assumption broke)\n---\n%s\n---", userData)
 	}
 	if bridgeIdx > incusIdx {
-		t.Errorf("vsock SSH bridge (idx %d) is created AFTER incus install (idx %d); it must come first so SSH survives incus/apt failures", bridgeIdx, incusIdx)
+		t.Errorf("vsock SSH relay (idx %d) is created AFTER incus install (idx %d); it must come first so SSH survives incus/apt failures", bridgeIdx, incusIdx)
 	}
 }
 
@@ -327,8 +329,10 @@ func TestBuildCloudInit_ChronyConfEmitted(t *testing.T) {
 }
 
 // TestBuildCloudInit_NTPBridgeEmitted verifies the guest socat UDP<->vsock NTP
-// bridge unit is written and enabled, relaying guest localhost UDP 123 to the
-// host SNTP responder over vsock (CID 2, VsockNTPPort).
+// bridge is emitted as an instance of the shared relay template: its per-channel
+// arg file carries the exact UDP4-RECVFROM socat line, and the instance is
+// enabled. It relays guest localhost UDP 123 to the host SNTP responder over
+// vsock (CID 2, VsockNTPPort).
 func TestBuildCloudInit_NTPBridgeEmitted(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
@@ -336,13 +340,120 @@ func TestBuildCloudInit_NTPBridgeEmitted(t *testing.T) {
 	userData, _ := BuildCloudInit(cfg, "")
 
 	wants := []string{
-		"/etc/systemd/system/bladerunner-vsock-ntp.service",
-		"socat UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18557",
-		"systemctl enable --now bladerunner-vsock-ntp.service",
+		"/etc/bladerunner/relays/ntp.env",
+		"RELAY_ARGS=UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18557",
+		"bladerunner-vsock-relay@ntp.service",
 	}
 	for _, want := range wants {
 		if !strings.Contains(userData, want) {
 			t.Errorf("user-data missing NTP bridge snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
+// TestBuildCloudInit_AllFourRelayChannels is the regression guard for the relay
+// consolidation (#137): it asserts that the rendered cloud-init installs the
+// single relay template unit and all FOUR channels (ssh/incus/oidc/ntp) with
+// byte-identical socat invocations and ports to the standalone units they
+// replaced. A boot-critical regression (a dropped channel, a mangled socat
+// address pair, a wrong port) is caught here before the real boot-verify.
+func TestBuildCloudInit_AllFourRelayChannels(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	// One template unit, exec'ing socat with the word-split $RELAY_ARGS argv.
+	tmplWants := []string{
+		"/etc/systemd/system/bladerunner-vsock-relay@.service",
+		"EnvironmentFile=/etc/bladerunner/relays/%i.env",
+		"ExecStart=/usr/bin/socat $RELAY_ARGS",
+	}
+	for _, want := range tmplWants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("rendered cloud-init missing relay template snippet %q\n---\n%s\n---", want, userData)
+		}
+	}
+
+	// The four channels' exact socat address pairs + ports, exactly as the old
+	// per-channel units invoked socat. FORWARD channels listen on vsock and
+	// forward to a guest-local TCP backend; REVERSE channels listen locally and
+	// dial OUT to the host over vsock (CID 2).
+	channelWants := map[string]string{
+		"ssh":   "RELAY_ARGS=VSOCK-LISTEN:10022,fork,reuseaddr TCP:127.0.0.1:22",
+		"incus": "RELAY_ARGS=VSOCK-LISTEN:18443,fork,reuseaddr TCP:127.0.0.1:8443",
+		"oidc":  "RELAY_ARGS=TCP-LISTEN:15556,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18556",
+		"ntp":   "RELAY_ARGS=UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18557",
+	}
+	for name, args := range channelWants {
+		envPath := "/etc/bladerunner/relays/" + name + ".env"
+		if !strings.Contains(userData, envPath) {
+			t.Errorf("rendered cloud-init missing %s arg file %q\n---\n%s\n---", name, envPath, userData)
+		}
+		if !strings.Contains(userData, args) {
+			t.Errorf("rendered cloud-init missing %s socat args %q (byte-identical socat semantics + ports must be preserved)\n---\n%s\n---", name, args, userData)
+		}
+		instance := "bladerunner-vsock-relay@" + name + ".service"
+		if !strings.Contains(userData, instance) {
+			t.Errorf("rendered cloud-init does not enable %s instance %q\n---\n%s\n---", name, instance, userData)
+		}
+	}
+
+	// The ssh + incus FORWARD channels keep their backend spin-wait; the oidc +
+	// ntp REVERSE channels do not (they dial out and have no local backend).
+	waitWants := []string{"RELAY_WAIT=22", "RELAY_WAIT=8443"}
+	for _, want := range waitWants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("rendered cloud-init missing backend spin-wait %q\n---\n%s\n---", want, userData)
+		}
+	}
+
+	// The legacy standalone units a pre-baked image ships enabled must be
+	// superseded (masked) so a template instance is the sole owner of each port.
+	if !strings.Contains(userData, `systemctl mask "bladerunner-vsock-$legacy.service"`) {
+		t.Errorf("rendered cloud-init does not mask the legacy standalone relay units; a baked image could double-bind a channel's port\n---\n%s\n---", userData)
+	}
+
+	// The old four inline heredoc units must be gone: no standalone
+	// bladerunner-vsock-<name>.service should be WRITTEN any more (they may only
+	// appear as the masked legacy names in the supersede loop / template@ form).
+	forbidden := []string{
+		"/etc/systemd/system/bladerunner-vsock-ssh.service",
+		"/etc/systemd/system/bladerunner-vsock-incus.service",
+		"/etc/systemd/system/bladerunner-vsock-oidc.service",
+		"/etc/systemd/system/bladerunner-vsock-ntp.service",
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(userData, bad) {
+			t.Errorf("rendered cloud-init still writes the standalone unit %q; it must be consolidated into the relay template\n---\n%s\n---", bad, userData)
+		}
+	}
+}
+
+// TestBuildCloudInit_RelayPortsThreadThrough proves the four channels' socat
+// lines are rendered from cfg (not hardcoded): a non-default port config must
+// show up in the corresponding RELAY_ARGS line. This guards against a future
+// edit that accidentally freezes a port literal.
+func TestBuildCloudInit_RelayPortsThreadThrough(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.VsockSSHPort = 20022
+	cfg.VsockAPIPort = 28443
+	cfg.LocalOIDCPort = 25556
+	cfg.VsockOIDCPort = 28556
+	cfg.VsockNTPPort = 28557
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"RELAY_ARGS=VSOCK-LISTEN:20022,fork,reuseaddr TCP:127.0.0.1:22",
+		"RELAY_ARGS=VSOCK-LISTEN:28443,fork,reuseaddr TCP:127.0.0.1:8443",
+		"RELAY_ARGS=TCP-LISTEN:25556,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:28556",
+		"RELAY_ARGS=UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:28557",
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("non-default port config did not thread into the relay socat line %q\n---\n%s\n---", want, userData)
 		}
 	}
 }
@@ -372,7 +483,8 @@ func TestBuildCloudInit_TimesyncdMaskedAfterChronyActive(t *testing.T) {
 
 // TestBuildCloudInit_WatchdogEmitted verifies the guest-local wake-heal watchdog
 // script + unit are written and enabled, and that the watchdog heals the clock
-// and the two stateless socat relays.
+// and the vsock relays (now instances of the shared relay template, healed in
+// one loop over the channel table).
 func TestBuildCloudInit_WatchdogEmitted(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
@@ -386,8 +498,9 @@ func TestBuildCloudInit_WatchdogEmitted(t *testing.T) {
 		// bounded by the watchdog loop, not chrony's autonomous poll.
 		"chronyc burst 4/4",
 		"chronyc makestep",
-		"bladerunner-vsock-incus",
-		"bladerunner-vsock-oidc",
+		// the relays are healed via the template instance, in one loop
+		"bladerunner-vsock-relay@$name.service",
+		`relays="incus 8443 oidc - ntp - ssh 22"`,
 		"systemctl enable --now bladerunner-watchdog.service",
 	}
 	for _, want := range wants {
@@ -432,25 +545,8 @@ func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
 	}
 }
 
-// TestVsockNTPUnitRendersDefaultPortVerbatim verifies the go:embed'd
-// bladerunner-vsock-ntp.service template renders byte-for-byte unchanged at the
-// default port (the port baked into the checked-in file), and swaps only the
-// VSOCK-CONNECT literal at a non-default port. This is the single-source render
-// wrapper's contract: the image-build --copy-in of the same file and the
-// cloud-init emission agree at the default port.
-func TestVsockNTPUnitRendersDefaultPortVerbatim(t *testing.T) {
-	t.Parallel()
-
-	if got := vsockNTPUnit(config.DefaultVsockNTPPort); got != vsockNTPUnitTemplate {
-		t.Errorf("vsockNTPUnit(default) must equal the embedded template verbatim\n--- got ---\n%s\n--- want ---\n%s", got, vsockNTPUnitTemplate)
-	}
-
-	const otherPort = 29999
-	got := vsockNTPUnit(otherPort)
-	if !strings.Contains(got, "VSOCK-CONNECT:2:29999") {
-		t.Errorf("vsockNTPUnit(%d) did not template the port\n---\n%s\n---", otherPort, got)
-	}
-	if strings.Contains(got, "VSOCK-CONNECT:2:18557") {
-		t.Errorf("vsockNTPUnit(%d) left the default port in place\n---\n%s\n---", otherPort, got)
-	}
-}
+// TestVsockNTPUnitRendersDefaultPortVerbatim was removed with the standalone
+// bladerunner-vsock-ntp.service embed: the NTP channel is now the @ntp instance
+// of the shared relay template, so its port-threading is covered by
+// TestBuildCloudInit_RelayPortsThreadThrough (non-default VsockNTPPort) and the
+// exact-line assertion in TestBuildCloudInit_AllFourRelayChannels.
