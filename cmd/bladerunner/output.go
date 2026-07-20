@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -26,4 +27,19 @@ func emitJSON(v any) error {
 // process exits non-zero.
 func emitJSONError(err error) {
 	_ = emitJSON(map[string]string{"error": err.Error()})
+}
+
+// rejectJSONForInteractive returns a non-nil error when --json is set on an
+// interactive/streaming command (shell, exec, incus, events, logs) that cannot
+// produce a structured envelope. It routes the message through emitJSONError so
+// agents still get parseable output, then hands the error back for the RunE to
+// return (so the process exits non-zero). Returns nil when --json is unset, so
+// callers can guard with a single `if err := ...; err != nil { return err }`.
+func rejectJSONForInteractive(name string) error {
+	if !jsonOutput {
+		return nil
+	}
+	err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", name)
+	emitJSONError(err)
+	return err
 }
