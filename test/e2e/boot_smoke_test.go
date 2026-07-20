@@ -20,23 +20,22 @@ import (
 	"time"
 )
 
-// Environment knobs (all optional; the defaults give a plain cloud-init boot):
+// Environment knobs (all optional; the default gives a plain cloud-init boot):
 //
 //	BLADERUNNER_E2E=1            required — opt in to the real boot
-//	BLADERUNNER_E2E_PREBAKED=1   drive the pre-baked/agent path (--use-guest-agent)
-//	                             instead of the cloud-init default; lets #155 reuse
-//	                             this test as its boot-verify gate for either path.
 //	BLADERUNNER_E2E_BIN=/path    use an already signed `br` instead of building one
 //	BLADERUNNER_E2E_BOOT_TIMEOUT first-boot readiness budget (Go duration, default 15m)
+//
+// Provisioning is unified onto the single cloud-init path (#160). Phase 3 (#155)
+// will reintroduce hosted-image selection and its own e2e coverage.
 const (
 	envEnable      = "BLADERUNNER_E2E"
-	envPrebaked    = "BLADERUNNER_E2E_PREBAKED"
 	envBin         = "BLADERUNNER_E2E_BIN"
 	envBootTimeout = "BLADERUNNER_E2E_BOOT_TIMEOUT"
 
 	// defaultBootTimeout bounds the wait for Incus to answer from a clean state.
-	// First boot downloads the guest image and (on the cloud-init path) installs
-	// Incus, which can exceed 10m on stock M-series hardware; 15m absorbs that.
+	// First boot downloads the guest image and installs Incus via cloud-init,
+	// which can exceed 10m on stock M-series hardware; 15m absorbs that.
 	defaultBootTimeout = 15 * time.Minute
 
 	// pollInterval is how often we re-check `br status --json` for readiness.
@@ -65,12 +64,10 @@ func TestE2EBootSmoke(t *testing.T) {
 		t.Skipf("e2e boot smoke test requires macOS Virtualization.framework; GOOS=%s", runtime.GOOS)
 	}
 
-	prebaked := os.Getenv(envPrebaked) == "1"
-	provisioning := "cloud-init"
-	if prebaked {
-		provisioning = "pre-baked/agent"
-	}
-	t.Logf("e2e boot smoke: provisioning path = %s", provisioning)
+	// Provisioning is unified onto the single cloud-init path (#160); there is no
+	// merged CLI flag to force the hosted image yet. Phase 3 (#155) will
+	// reintroduce hosted-image selection along with its e2e coverage.
+	t.Logf("e2e boot smoke: provisioning path = cloud-init")
 
 	bin := signedBinary(t)
 
@@ -98,9 +95,6 @@ func TestE2EBootSmoke(t *testing.T) {
 	// blocks (serving the control socket) until stopped; readiness is observed
 	// out-of-band by polling `br status --json`, not by waiting on this process.
 	startArgs := []string{"start", "--json", "--timeout", boot.String()}
-	if prebaked {
-		startArgs = append(startArgs, "--use-guest-agent")
-	}
 	startCmd = exec.CommandContext(startCtx, bin, startArgs...)
 	startCmd.Env = env
 	var startOut startLog

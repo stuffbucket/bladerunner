@@ -17,10 +17,6 @@ name: e2e-boot
 on:
   workflow_dispatch:
     inputs:
-      prebaked:
-        description: "Drive the pre-baked/agent provisioning path (--use-guest-agent) instead of cloud-init"
-        type: boolean
-        default: false
       boot_timeout:
         description: "Readiness budget for first boot (Go duration, e.g. 15m)"
         type: string
@@ -50,7 +46,6 @@ jobs:
       - name: Run gated boot smoke test
         env:
           BLADERUNNER_E2E: "1"
-          BLADERUNNER_E2E_PREBAKED: ${{ inputs.prebaked && '1' || '0' }}
           BLADERUNNER_E2E_BOOT_TIMEOUT: ${{ inputs.boot_timeout }}
           # Reuse the just-signed binary rather than rebuilding inside the test.
           BLADERUNNER_E2E_BIN: ${{ github.workspace }}/bin/br
