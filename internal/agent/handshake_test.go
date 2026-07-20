@@ -93,6 +93,51 @@ func TestRunHandshakeFullSequence(t *testing.T) {
 	}
 }
 
+// TestRunHandshakeUserSyncNonFatal verifies that a failed user-sync (e.g. the
+// guest's incus user not existing yet) does NOT fail the whole handshake: config
+// push + ready already succeeded, and cloud-init seeds the same key anyway, so
+// the host must continue on the agent path rather than drop to slow http-wait.
+func TestRunHandshakeUserSyncNonFatal(t *testing.T) {
+	hostConn, guestConn := net.Pipe()
+	go func() {
+		defer func() { _ = guestConn.Close() }()
+		br := bufio.NewReader(guestConn)
+		for {
+			msg, err := DecodeMessage(br)
+			if err != nil {
+				return
+			}
+			switch msg.Command {
+			case CmdConfigPush:
+				_ = EncodeMessage(guestConn, &Message{Response: ResponseOK})
+			case CmdReadyWait:
+				args, _ := EncodeArgs(ReadyWaitResponse{IncusVersion: "6.0", APIAddress: "[::]:8443"})
+				_ = EncodeMessage(guestConn, &Message{Response: ResponseReady, Args: args})
+			case CmdUserSync:
+				_ = EncodeMessage(guestConn, &Message{Error: "lookup user incus: user: unknown user incus"})
+			default:
+				_ = EncodeMessage(guestConn, &Message{Error: "unknown command"})
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := RunHandshake(ctx, hostConn, HandshakeConfig{
+		ConfigPush:     ConfigPushArgs{OIDCIssuer: testIssuer},
+		AuthorizedKeys: "ssh-ed25519 AAAA test",
+	})
+	if err != nil {
+		t.Fatalf("handshake should not fail on user-sync error: %v", err)
+	}
+	if !res.ConfigOK {
+		t.Fatalf("expected ConfigOK=true")
+	}
+	if res.UserSyncOK {
+		t.Fatalf("expected UserSyncOK=false after a user-sync error")
+	}
+}
+
 func TestRunHandshakeSkipsUserSyncWhenKeysEmpty(t *testing.T) {
 	hostConn, guestConn := net.Pipe()
 	fa := &fakeAgent{conn: guestConn, t: t}

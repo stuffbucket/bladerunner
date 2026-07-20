@@ -73,7 +73,12 @@ func RunHandshake(ctx context.Context, conn net.Conn, cfg HandshakeConfig) (*Han
 	}
 	logging.L().Info("agent reported ready", "incus_version", res.Ready.IncusVersion, "api_address", res.Ready.APIAddress)
 
-	// Phase 3: user sync, optional.
+	// Phase 3: user sync, optional and NON-FATAL. The host pushes its pubkey to
+	// the guest's incus user as a convenience, but cloud-init's users module
+	// already seeds the same key, so a failure here (e.g. the incus user not yet
+	// created when the agent races ahead) must not fail the whole handshake and
+	// drop us back to the slow http-wait path. Config push + ready already
+	// succeeded above; degrade gracefully.
 	if cfg.AuthorizedKeys == "" {
 		return res, nil
 	}
@@ -82,7 +87,8 @@ func RunHandshake(ctx context.Context, conn net.Conn, cfg HandshakeConfig) (*Han
 		return nil, err
 	}
 	if _, err := exchange(ctx, conn, br, timeout, &Message{Command: CmdUserSync, Args: userArgs}); err != nil {
-		return nil, fmt.Errorf("agent: user sync: %w", err)
+		logging.L().Warn("agent user sync failed; continuing (key also seeded via cloud-init)", "error", err)
+		return res, nil
 	}
 	res.UserSyncOK = true
 	logging.L().Info("agent user sync acknowledged")
