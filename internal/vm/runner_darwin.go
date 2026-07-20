@@ -357,7 +357,7 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	log.Info("creating virtual machine instance")
 	vm, err := vz.NewVirtualMachine(vmCfg)
 	if err != nil {
-		return nil, fmt.Errorf("create vm: %w", err)
+		return nil, annotateVZStartError(fmt.Errorf("create vm: %w", err))
 	}
 	r.vm = vm
 
@@ -372,7 +372,7 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	} else {
 		log.Info("starting virtual machine")
 		if err := vm.Start(); err != nil {
-			return nil, fmt.Errorf("start vm: %w", err)
+			return nil, annotateVZStartError(fmt.Errorf("start vm: %w", err))
 		}
 	}
 
@@ -828,47 +828,8 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 		}
 	}
 
-	_ = os.WriteFile(data.Access.GoClientExamplePath, []byte(r.goClientExample()), 0o644)
+	_ = os.WriteFile(data.Access.GoClientExamplePath, []byte(goClientExample(r.cfg.ClientCertPath, r.cfg.ClientKeyPath, r.cfg.LocalAPIPort)), 0o644)
 	return data
-}
-
-func (r *Runner) goClientExample() string {
-	return fmt.Sprintf(`package main
-
-import (
-	"fmt"
-	"os"
-
-	incus "github.com/lxc/incus/v6/client"
-)
-
-func main() {
-	cert, err := os.ReadFile(%q)
-	if err != nil {
-		panic(err)
-	}
-	key, err := os.ReadFile(%q)
-	if err != nil {
-		panic(err)
-	}
-
-	client, err := incus.ConnectIncus("https://127.0.0.1:%d", &incus.ConnectionArgs{
-		TLSClientCert: string(cert),
-		TLSClientKey:  string(key),
-		InsecureSkipVerify: true,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	server, _, err := client.GetServer()
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("Connected to", server.Environment.Server)
-}
-`, r.cfg.ClientCertPath, r.cfg.ClientKeyPath, r.cfg.LocalAPIPort)
 }
 
 func bridgeField(cfg *config.Config) string {

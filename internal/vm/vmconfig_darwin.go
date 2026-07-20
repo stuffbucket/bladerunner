@@ -57,7 +57,7 @@ func (r *Runner) newVMConfiguration() (*vz.VirtualMachineConfiguration, error) {
 
 	ok, err := cfg.Validate()
 	if err != nil {
-		return nil, fmt.Errorf("validate vm configuration: %w", err)
+		return nil, annotateVZStartError(fmt.Errorf("validate vm configuration: %w", err))
 	}
 	if !ok {
 		return nil, fmt.Errorf("vm configuration is invalid")
