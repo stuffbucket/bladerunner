@@ -121,40 +121,53 @@ type Config struct {
 	// Distinct from BaseImageSHA512 (the pinned Debian default) and from the
 	// --image-url path (which clears verification). Empty => sidecar fallback.
 	BaseImageExpectedSHA256 string
-	BaseImagePath           string
-	MachineIDPath           string
-	EFIVarsPath             string
-	CloudInitISO            string
-	CloudInitDir            string
-	ConsoleLogPath          string
-	LogPath                 string
-	ReportPath              string
-	MetadataPath            string
-	SSHUser                 string
-	SSHPublicKey            string
-	SSHPrivateKeyPath       string
-	SSHConfigPath           string
-	ClientCertPath          string
-	ClientKeyPath           string
-	TrustPassword           string
-	LocalSSHPort            int
-	LocalAPIPort            int
-	LocalWebPort            int
-	LocalOIDCPort           int
-	VsockSSHPort            uint32
-	VsockAPIPort            uint32
-	VsockOIDCPort           uint32
-	LocalNTPPort            int
-	VsockNTPPort            uint32
+	// HostedImageFallback marks BaseImageURL as the pre-baked guest image chosen
+	// as the DEFAULT (not an explicit user pin). It triggers two behaviors inside
+	// EnsureBaseImage: (1) the hosted sidecar SHA-256 is verified fail-closed
+	// (a missing/unreachable/mismatched sidecar is fatal, not warn-only), and
+	// (2) on ANY hosted download/verify failure the resolver auto-falls-back to
+	// the pinned Debian genericcloud + cloud-init path (flipping UseHostedGuestImage
+	// and UseGuestAgent off) so a first run is never bricked. Only Default() and
+	// Settings.ApplyTo(ImageHosted) set this; an explicit --image-url, a disk
+	// manifest, or the forced-cloud-init escape hatch leave it false.
+	HostedImageFallback bool
+	BaseImagePath       string
+	MachineIDPath       string
+	EFIVarsPath         string
+	CloudInitISO        string
+	CloudInitDir        string
+	ConsoleLogPath      string
+	LogPath             string
+	ReportPath          string
+	MetadataPath        string
+	SSHUser             string
+	SSHPublicKey        string
+	SSHPrivateKeyPath   string
+	SSHConfigPath       string
+	ClientCertPath      string
+	ClientKeyPath       string
+	TrustPassword       string
+	LocalSSHPort        int
+	LocalAPIPort        int
+	LocalWebPort        int
+	LocalOIDCPort       int
+	VsockSSHPort        uint32
+	VsockAPIPort        uint32
+	VsockOIDCPort       uint32
+	LocalNTPPort        int
+	VsockNTPPort        uint32
 	// AgentVsockPort is the host vsock port that br-agent (inside the guest)
 	// dials to participate in the configuration handshake. Default 19001.
 	AgentVsockPort uint32
 	// UseGuestAgent enables the vsock-native guest agent handshake path.
 	// When true, BuildCloudInit emits a minimal user-data form (SSH key +
 	// systemctl enable br-agent) and the host runs the agent listener.
-	// Default false for backwards compatibility with the legacy
-	// cloud-init bootstrap script. Requires br-agent to be present in the
-	// guest image (see #45) or installed via cloud-init user override.
+	// Defaults to true alongside UseHostedGuestImage: the pre-baked image
+	// ships br-agent, so a fresh install boots via the agent handshake instead
+	// of the first-boot apt bootstrap (#155). Forced off by the cloud-init
+	// escape hatch (--cloud-init / BLADERUNNER_FORCE_CLOUD_INIT) and by the
+	// automatic Debian fallback in EnsureBaseImage. Requires br-agent to be
+	// present in the guest image (see #45) or installed via cloud-init override.
 	UseGuestAgent bool
 	// OIDCIssuerURL is the issuer URL advertised in discovery and tokens. It uses
 	// the host provider's loopback port (LocalOIDCPort) so it resolves identically
@@ -175,9 +188,12 @@ type Config struct {
 	NetworkMode     string
 	BridgeInterface string
 	GUI             bool
-	// UseHostedGuestImage opts in to the pre-baked bladerunner guest image
-	// hosted on GitHub Releases. Defaults to false until a guest-image-latest
-	// release exists. When false, BaseImageURL points at the Debian Trixie
+	// UseHostedGuestImage selects the pre-baked bladerunner guest image hosted on
+	// GitHub Releases (Debian Trixie + Incus + br-agent). It is the DEFAULT as of
+	// #155: a fresh install pulls guest-image-latest and provisions via the agent
+	// handshake, dropping the flaky first-boot apt install. When false (the
+	// forced-cloud-init escape hatch, a custom --image-url, or the automatic
+	// Debian fallback), BaseImageURL points at the pinned Debian Trixie
 	// genericcloud image and cloud-init bootstraps Incus on first boot.
 	UseHostedGuestImage bool
 	CPUs                uint
@@ -209,10 +225,60 @@ type Config struct {
 }
 
 // DefaultBaseImageURL returns the default base image URL for the given GOARCH.
-// It defers to DebianTrixieGenericCloudURL — the pre-baked hosted image is
-// opt-in via Config.UseHostedGuestImage and resolved through HostedGuestImageURL.
+// As of #155 the default is the pre-baked hosted guest image (HostedGuestImageURL);
+// the forced-cloud-init escape hatch and a custom --image-url resolve the pinned
+// Debian genericcloud instead via DebianTrixieGenericCloudURL.
 func DefaultBaseImageURL(goarch string) (string, error) {
-	return DebianTrixieGenericCloudURL(goarch)
+	return ResolveBaseImageURL(goarch, DefaultUseHostedGuestImage())
+}
+
+// ForceCloudInitEnvVar, when set to a truthy value ("1", "true", "yes", "on"),
+// forces the legacy Debian Trixie genericcloud + first-boot cloud-init path even
+// though the pre-baked hosted image is the default (#155). It mirrors the
+// --cloud-init CLI flag as a scriptable/non-interactive escape hatch.
+const ForceCloudInitEnvVar = "BLADERUNNER_FORCE_CLOUD_INIT"
+
+// ForceHostedImageEnvVar, when set to a truthy value ("1", "true", "yes", "on"),
+// forces the pre-baked hosted guest image + agent path. It mirrors the
+// --hosted-image CLI flag and completes the override surface symmetric to
+// ForceCloudInitEnvVar: it lets a caller (e.g. the e2e boot-verify) deterministic-
+// ally select the pre-baked image on ANY branch regardless of the built-in
+// default. If both force envs are truthy, hosted wins here (the CLI rejects the
+// combination up front; this only guards against a lower-level double-set).
+const ForceHostedImageEnvVar = "BLADERUNNER_FORCE_HOSTED_IMAGE"
+
+// envTruthy reports whether the named env var is set to a truthy token.
+func envTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// ForceCloudInit reports whether the forced-cloud-init escape hatch is set via
+// the ForceCloudInitEnvVar environment variable.
+func ForceCloudInit() bool {
+	return envTruthy(ForceCloudInitEnvVar)
+}
+
+// ForceHostedImage reports whether the force-hosted-image override is set via the
+// ForceHostedImageEnvVar environment variable.
+func ForceHostedImage() bool {
+	return envTruthy(ForceHostedImageEnvVar)
+}
+
+// DefaultUseHostedGuestImage reports whether a fresh install should use the
+// pre-baked hosted guest image. It is true (#155) unless the forced-cloud-init
+// escape hatch is engaged (and force-hosted is not also set, which wins). This is
+// the single source of truth for the built-in default that both Default() and
+// DefaultSettings() consult.
+func DefaultUseHostedGuestImage() bool {
+	if ForceHostedImage() {
+		return true
+	}
+	return !ForceCloudInit()
 }
 
 // DebianTrixieBuild pins the Debian Trixie genericcloud snapshot bladerunner
@@ -288,14 +354,17 @@ func Default(baseDir string) (*Config, error) {
 		baseDir = DefaultStateDir()
 	}
 
-	// Hosted (pre-baked) image is opt-in until guest-image-latest exists.
-	useHosted := false
+	// The pre-baked hosted image + agent handshake is the default (#155); the
+	// forced-cloud-init escape hatch (BLADERUNNER_FORCE_CLOUD_INIT / --cloud-init)
+	// selects the legacy pinned-Debian + first-boot cloud-init path instead.
+	useHosted := DefaultUseHostedGuestImage()
 	imageURL, err := ResolveBaseImageURL(runtime.GOARCH, useHosted)
 	if err != nil {
 		return nil, err
 	}
-	// Only the pinned Debian default carries an embedded checksum; the hosted
-	// image is verified via its own sidecar elsewhere.
+	// Only the pinned Debian default carries an embedded SHA-512; the hosted
+	// image is verified fail-closed against its published .sha256 sidecar in
+	// EnsureBaseImage, which also auto-falls-back to Debian on any failure.
 	baseImageSHA512 := ""
 	if !useHosted {
 		baseImageSHA512 = DebianTrixieGenericCloudSHA512(runtime.GOARCH)
@@ -316,6 +385,7 @@ func Default(baseDir string) (*Config, error) {
 		DiskSizeGiB:         DefaultDiskSizeGiB,
 		BaseImageURL:        imageURL,
 		BaseImageSHA512:     baseImageSHA512,
+		HostedImageFallback: useHosted,
 		BaseImagePath:       "",
 		MachineIDPath:       filepath.Join(baseDir, machineIDFileName),
 		EFIVarsPath:         filepath.Join(baseDir, efiVarsFileName),
@@ -342,7 +412,7 @@ func Default(baseDir string) (*Config, error) {
 		LocalNTPPort:        DefaultLocalNTPPort,
 		VsockNTPPort:        DefaultVsockNTPPort,
 		AgentVsockPort:      DefaultAgentVsockPort,
-		UseGuestAgent:       false,
+		UseGuestAgent:       useHosted,
 		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultLocalOIDCPort),
 		OIDCClientID:        DefaultOIDCClientID,
 		OIDCAudience:        DefaultOIDCAudience,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +143,8 @@ func TestApplyFlagOverridesGuestAgent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(config.ForceCloudInitEnvVar, "")
+			t.Setenv(config.ForceHostedImageEnvVar, "")
 			cfg, err := config.Default(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
@@ -164,11 +167,17 @@ func TestApplyFlagOverridesGuestAgent(t *testing.T) {
 }
 
 func TestApplyFlagOverridesImageURLClearsSHA(t *testing.T) {
+	t.Setenv(config.ForceCloudInitEnvVar, "")
+	t.Setenv(config.ForceHostedImageEnvVar, "")
 	cfg, err := config.Default(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// config.Default for a supported arch carries the pinned Debian SHA-512.
+	// Force the pinned-Debian baseline (the default is now the hosted image,
+	// which carries no embedded SHA-512) so there is a SHA-512 to clear.
+	s := config.DefaultSettings()
+	s.Image = config.ImageSource{Kind: config.ImageDebian}
+	s.ApplyTo(cfg)
 	if cfg.BaseImageSHA512 == "" {
 		t.Skip("no pinned SHA on this arch; nothing to clear")
 	}
@@ -183,6 +192,130 @@ func TestApplyFlagOverridesImageURLClearsSHA(t *testing.T) {
 	}
 	if cfg.BaseImageSHA512 != "" {
 		t.Errorf("BaseImageSHA512 = %q, want cleared for a custom URL", cfg.BaseImageSHA512)
+	}
+	if cfg.HostedImageFallback {
+		t.Error("a custom --image-url must clear HostedImageFallback")
+	}
+	if cfg.UseHostedGuestImage {
+		t.Error("a custom --image-url must clear UseHostedGuestImage")
+	}
+}
+
+// The --cloud-init escape hatch forces the legacy Debian + first-boot cloud-init
+// path off the #155 hosted default: it re-resolves the pinned Debian URL/SHA and
+// disables the hosted image, the agent handshake, and the auto-fallback.
+func TestApplyFlagOverridesCloudInitEscapeHatch(t *testing.T) {
+	t.Setenv(config.ForceCloudInitEnvVar, "")
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.DefaultSettings().ApplyTo(cfg) // the hosted default baseline
+	if !cfg.UseHostedGuestImage {
+		t.Skip("forced cloud-init environment; hosted default not in effect")
+	}
+
+	withStartFlags(t, func() {
+		startFlags.cloudInit = true
+		applyFlagOverrides(cfg, changedSet("cloud-init"), false)
+	})
+
+	if cfg.UseHostedGuestImage {
+		t.Error("--cloud-init must clear UseHostedGuestImage")
+	}
+	if cfg.UseGuestAgent {
+		t.Error("--cloud-init must clear UseGuestAgent")
+	}
+	if cfg.HostedImageFallback {
+		t.Error("--cloud-init must clear HostedImageFallback")
+	}
+	wantURL, _ := config.DebianTrixieGenericCloudURL(cfg.Arch)
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want pinned Debian %q", cfg.BaseImageURL, wantURL)
+	}
+	if cfg.BaseImageSHA512 != config.DebianTrixieGenericCloudSHA512(cfg.Arch) {
+		t.Errorf("BaseImageSHA512 = %q, want pinned Debian checksum", cfg.BaseImageSHA512)
+	}
+}
+
+// --hosted-image forces the pre-baked hosted image + agent path even when the
+// persisted Settings selected the Debian (cloud-init) image, re-resolving the
+// hosted URL and arming the auto-fallback.
+func TestApplyFlagOverridesHostedImageForce(t *testing.T) {
+	t.Setenv(config.ForceCloudInitEnvVar, "")
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Start from the Debian/cloud-init baseline so we prove --hosted-image flips it.
+	s := config.DefaultSettings()
+	s.Image = config.ImageSource{Kind: config.ImageDebian}
+	s.UseGuestAgent = false
+	s.ApplyTo(cfg)
+	if cfg.UseHostedGuestImage {
+		t.Fatal("precondition: expected the Debian baseline before --hosted-image")
+	}
+
+	withStartFlags(t, func() {
+		startFlags.hostedImage = true
+		applyFlagOverrides(cfg, changedSet("hosted-image"), false)
+	})
+
+	if !cfg.UseHostedGuestImage {
+		t.Error("--hosted-image must set UseHostedGuestImage")
+	}
+	if !cfg.UseGuestAgent {
+		t.Error("--hosted-image must set UseGuestAgent (agent path)")
+	}
+	if !cfg.HostedImageFallback {
+		t.Error("--hosted-image must arm the hosted->Debian auto-fallback")
+	}
+	if cfg.BaseImageSHA512 != "" {
+		t.Errorf("--hosted-image must clear the pinned SHA-512, got %q", cfg.BaseImageSHA512)
+	}
+	wantURL, _ := config.HostedGuestImageURL(cfg.Arch)
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want hosted %q", cfg.BaseImageURL, wantURL)
+	}
+}
+
+// --cloud-init and --hosted-image are mutually exclusive, whether requested via
+// the flags or their force env vars.
+func TestValidateImageOverrideFlagsMutualExclusion(t *testing.T) {
+	tests := []struct {
+		name      string
+		cloudFlag bool
+		hostFlag  bool
+		cloudEnv  string
+		hostEnv   string
+		wantErr   bool
+	}{
+		{"neither", false, false, "", "", false},
+		{"only cloud flag", true, false, "", "", false},
+		{"only hosted flag", false, true, "", "", false},
+		{"both flags", true, true, "", "", true},
+		{"cloud flag + hosted env", true, false, "", "1", true},
+		{"hosted flag + cloud env", false, true, "1", "", true},
+		{"both envs", false, false, "1", "1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(config.ForceCloudInitEnvVar, tt.cloudEnv)
+			t.Setenv(config.ForceHostedImageEnvVar, tt.hostEnv)
+			withStartFlags(t, func() {
+				startFlags.cloudInit = tt.cloudFlag
+				startFlags.hostedImage = tt.hostFlag
+				err := validateImageOverrideFlags()
+				if (err != nil) != tt.wantErr {
+					t.Errorf("validateImageOverrideFlags() err = %v, wantErr %v", err, tt.wantErr)
+				}
+				if err != nil && !strings.Contains(err.Error(), "mutually exclusive") {
+					t.Errorf("expected 'mutually exclusive' error, got %v", err)
+				}
+			})
+		})
 	}
 }
 

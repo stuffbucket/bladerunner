@@ -434,6 +434,7 @@ func applyBootCartridge(cfg *config.Config) {
 	cfg.BaseImageURL = ""
 	cfg.BaseImageSHA512 = ""
 	cfg.BaseImageExpectedSHA256 = ""
+	cfg.HostedImageFallback = false
 	// The materialized root.img is already the resized disk; DiskPath IS root.img
 	// so the VM boots the cartridge's disk in place (no copy/resize on boot).
 	cfg.DiskPath = filepath.Join(mp, cartridgeRootImg)

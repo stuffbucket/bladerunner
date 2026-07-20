@@ -33,9 +33,14 @@ func (m *Manifest) ApplyTo(cfg *config.Config) error {
 		cfg.BaseImagePath = ""
 		cfg.BaseImageSHA512 = ""         // hosted verified via sidecar
 		cfg.BaseImageExpectedSHA256 = "" // sidecar fallback
+		// A disk is an explicit pin, not the #155 auto-fallback default: honor the
+		// disk's hosted choice verbatim (no silent Debian fallback, no strict-
+		// sidecar override inherited from config.Default).
+		cfg.HostedImageFallback = false
 
 	case m.Image.Path != "":
 		cfg.BaseImagePath = m.Image.Path
+		cfg.HostedImageFallback = false
 
 	case len(m.Image.Arches) > 0:
 		arch, ok := m.Image.Arches[goarch]
@@ -47,6 +52,7 @@ func (m *Manifest) ApplyTo(cfg *config.Config) error {
 		cfg.BaseImagePath = ""
 		cfg.BaseImageSHA512 = ""                  // not the pinned Debian default
 		cfg.BaseImageExpectedSHA256 = arch.SHA256 // explicit expected digest
+		cfg.HostedImageFallback = false
 
 	default:
 		return fmt.Errorf("disk %q has no resolvable image source", m.Name)

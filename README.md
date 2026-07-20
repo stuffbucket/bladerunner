@@ -4,8 +4,8 @@
 
 It is designed to provide the core behavior of a `colima --runtime incus` setup without Lima/Colima orchestration overhead:
 
-- Architecture-aware defaults (`arm64` and `amd64`) using Debian 13 (trixie) genericcloud images. Ubuntu and other cloud images remain reachable via `--image-url` or `BLADERUNNER_BASE_IMAGE_URL`.
-- Incus daemon bootstrapped inside the guest via cloud-init.
+- Architecture-aware defaults (`arm64` and `amd64`). A fresh install boots the **pre-baked bladerunner guest image** (Debian Trixie + Incus + `br-agent`); force the legacy Debian genericcloud + cloud-init path with `--cloud-init` (or `BLADERUNNER_FORCE_CLOUD_INIT=1`), and reach Ubuntu or other cloud images via `--image-url`.
+- Incus ships pre-installed in the default image and is configured over the vsock `br-agent` handshake; the legacy path bootstraps Incus inside the guest via cloud-init.
 - Localhost-accessible SSH and Incus HTTPS endpoints via virtio-vsock port forwarding.
 - Incus web dashboard availability through the forwarded API endpoint.
 - Optional bridged networking (for transparent L2 presence) when signed with `com.apple.vm.networking`.
@@ -115,6 +115,14 @@ Custom image path (raw disk image):
 
 ```bash
 runner start --image-path /path/to/base.raw
+```
+
+Force the legacy Debian + cloud-init path (escape hatch off the pre-baked default):
+
+```bash
+runner start --cloud-init
+# or, for non-interactive/scripted use:
+BLADERUNNER_FORCE_CLOUD_INIT=1 runner start
 ```
 
 Custom log file path:
@@ -259,11 +267,13 @@ packing also needs `qemu-img`.
 
 ## Notes
 
-- The default base image is the Debian 13 (trixie) genericcloud qcow2 (`incus` and `incus-client` ship in trixie main, so no third-party apt repos are needed). Override with `--image-url` or `BLADERUNNER_BASE_IMAGE_URL` to use Ubuntu 24.04 or another distribution.
+- The default base image is the **pre-baked bladerunner guest image** (Debian Trixie + Incus + `br-agent`, built by `scripts/build-guest-image.sh` and published as `guest-image-latest`). A fresh `br start` pulls it and provisions via the vsock `br-agent` handshake, so it no longer installs Incus over the network at first boot. See the checksum and fallback behavior below.
+- **Escape hatch — force the legacy Debian + cloud-init path:** pass `--cloud-init` to `br start`, or set `BLADERUNNER_FORCE_CLOUD_INIT=1`, or choose the "Debian" image in Settings. That path downloads the pinned Debian 13 (trixie) genericcloud qcow2 (`incus`/`incus-client` ship in trixie main) and bootstraps Incus on first boot via cloud-init. Use it if the pre-baked image is unsuitable or you need the stock distro.
+- Use a different distribution entirely with `--image-url` (e.g. Ubuntu 24.04) or a local image with `--image-path`; both bypass the pre-baked default.
 - The base image can be raw or qcow2 format. qcow2 images are automatically converted to raw via `qemu-img`.
-- First boot can take several minutes while cloud-init installs and configures Incus.
-- A pre-baked bladerunner guest image (Debian Trixie + Incus + `br-agent`, built by `scripts/build-guest-image.sh` and published via the `build-guest-image` workflow) is the future default. While that release pipeline is bootstrapping it is opt-in: set `UseHostedGuestImage` (or pass `--image-url` with the GitHub Release URL) to use it. Once `guest-image-latest` is published the default will flip.
-- Downloaded base images are SHA-256 verified against a sidecar `.sha256` file. The check is strict for upstream Debian URLs and tolerant of a missing sidecar for GitHub Release URLs during the bootstrap window.
+- **Checksum verification (fail-closed default):** the pre-baked image is verified against its published `.sha256` sidecar and **the default path fails closed on a missing, unreachable, or mismatched checksum** — an unverified pre-baked image is never booted. The pinned Debian path is likewise fatal on a SHA-512 mismatch. A custom `--image-url` uses sidecar verification that is fatal on mismatch but tolerant of a missing sidecar (many upstream hosts publish `SHA256SUMS` instead of per-image sidecars).
+- **Cold-start fallback (explicit, not silent):** if the pre-baked asset is missing for your architecture or the download/verification fails, `br start` logs a clear `WARN` and automatically falls back to the pinned Debian + cloud-init path, so a first run is never bricked. The chosen path is logged.
+- First boot on the pre-baked image is fast (Incus is already installed); the Debian fallback path can take several minutes while cloud-init installs and configures Incus.
 - `br status` surfaces the pre-baked image build date from `/etc/bladerunner-image-version` when present.
 - GUI output is handled by VZ graphics window; serial console is logged at `console.log`.
 - Extended operations (download, VM readiness, Incus readiness) show live progress indicators in terminal.

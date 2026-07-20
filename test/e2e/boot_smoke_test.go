@@ -23,9 +23,10 @@ import (
 // Environment knobs (all optional; the defaults give a plain cloud-init boot):
 //
 //	BLADERUNNER_E2E=1            required — opt in to the real boot
-//	BLADERUNNER_E2E_PREBAKED=1   drive the pre-baked/agent path (--use-guest-agent)
-//	                             instead of the cloud-init default; lets #155 reuse
-//	                             this test as its boot-verify gate for either path.
+//	BLADERUNNER_E2E_PREBAKED=1   drive the pre-baked/agent path (--hosted-image
+//	                             --use-guest-agent) instead of the cloud-init
+//	                             default; lets #155 reuse this test as its
+//	                             boot-verify gate for either path.
 //	BLADERUNNER_E2E_BIN=/path    use an already signed `br` instead of building one
 //	BLADERUNNER_E2E_BOOT_TIMEOUT first-boot readiness budget (Go duration, default 15m)
 const (
@@ -96,10 +97,13 @@ func TestE2EBootSmoke(t *testing.T) {
 
 	// Launch `br start --json` as a long-lived foreground server subprocess. It
 	// blocks (serving the control socket) until stopped; readiness is observed
-	// out-of-band by polling `br status --json`, not by waiting on this process.
+	// out-of-band by polling `br ls --json`, not by waiting on this process.
 	startArgs := []string{"start", "--json", "--timeout", boot.String()}
 	if prebaked {
-		startArgs = append(startArgs, "--use-guest-agent")
+		// --use-guest-agent alone does NOT select the pre-baked image; --hosted-image
+		// forces the pre-baked guest image (which ships br-agent) regardless of the
+		// branch's built-in default, so this mode actually exercises the agent path.
+		startArgs = append(startArgs, "--hosted-image", "--use-guest-agent")
 	}
 	startCmd = exec.CommandContext(startCtx, bin, startArgs...)
 	startCmd.Env = env
@@ -111,27 +115,16 @@ func TestE2EBootSmoke(t *testing.T) {
 	}
 	t.Logf("launched `br %s` (pid %d)", strings.Join(startArgs, " "), startCmd.Process.Pid)
 
-	// Wait for Incus to answer, bounded by the boot budget. This reuses the real
-	// readiness mechanism: `br status --json` reports "running" only once the
-	// guest is up and the control server's guest-liveness probe passes.
-	if err := waitForRunning(t, bin, env, boot, startCmd, &startOut); err != nil {
-		t.Fatalf("VM did not become ready within %s: %v\n--- br start output ---\n%s",
+	// Wait for Incus to actually answer inside the guest, bounded by the boot
+	// budget. The SUCCESS SIGNAL is `br ls --json` succeeding — not `br status`
+	// reporting "running", which is guest-liveness and can be optimistic during
+	// provisioning. This makes the gate robust for BOTH the pre-baked/agent and
+	// cloud-init paths (each reaches a working Incus at a different point).
+	if err := waitForIncusReady(t, bin, env, boot, startCmd, &startOut); err != nil {
+		t.Fatalf("Incus did not become reachable within %s: %v\n--- br start output ---\n%s",
 			boot, err, startOut.String())
 	}
-	t.Logf("VM reported running; Incus should be reachable")
-
-	// One trivial guest op proves Incus actually answers inside the guest: list
-	// instances over the local Incus API (mTLS to the guest, tunneled on vsock).
-	// An empty list is success — we only assert the API responded without error.
-	out, err := runCmd(t, bin, env, cmdTimeout, "ls", "--json")
-	if err != nil {
-		t.Fatalf("`br ls --json` failed after VM reported ready: %v\noutput:\n%s\n--- br start output ---\n%s",
-			err, out, startOut.String())
-	}
-	if !json.Valid(bytes.TrimSpace([]byte(out))) {
-		t.Fatalf("`br ls --json` did not return valid JSON:\n%s", out)
-	}
-	t.Logf("guest op OK: `br ls --json` returned valid JSON:\n%s", strings.TrimSpace(out))
+	t.Logf("Incus is reachable inside the guest (`br ls --json` succeeded)")
 }
 
 // signedBinary returns a path to a `br` binary codesigned with the
@@ -256,34 +249,47 @@ func bootTimeout(t *testing.T) time.Duration {
 	return defaultBootTimeout
 }
 
-// waitForRunning polls `br status --json` until it reports status "running"
-// (guest up + Incus reachable), the deadline passes, or the `br start` process
-// dies early. Returns nil once running.
-func waitForRunning(t *testing.T, bin string, env []string, within time.Duration, startCmd *exec.Cmd, startOut *startLog) error {
+// waitForIncusReady polls `br ls --json` until it SUCCEEDS with valid JSON
+// (Incus is up and answering inside the guest), the deadline passes, or the `br
+// start` process dies early. A failing `br ls` — connection refused, Incus not
+// up yet, non-JSON — is treated as "keep waiting", because that is exactly the
+// state during first-boot provisioning on both the agent and cloud-init paths.
+// `br status` is still polled each tick and logged purely for diagnosis (its
+// "running" is guest-liveness, not Incus-readiness, so it is not the gate).
+func waitForIncusReady(t *testing.T, bin string, env []string, within time.Duration, startCmd *exec.Cmd, startOut *startLog) error {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	// Watch for the start process exiting early (a signing/config error would
-	// make it exit before ever reaching "running") so we fail fast instead of
-	// polling for the full timeout.
+	// make it exit before Incus ever comes up) so we fail fast instead of polling
+	// for the full timeout.
 	exited := make(chan error, 1)
 	go func() { exited <- startCmd.Wait() }()
 
+	var lastStatus string
 	for {
-		status, err := queryStatus(t, bin, env)
-		if err == nil {
-			switch status {
-			case "running":
-				return nil
-			case "unreachable":
-				t.Logf("status: unreachable (host up, guest not answering yet)")
-			default:
+		// Log status transitions for diagnosis (not the success gate).
+		if status, serr := queryStatus(t, bin, env); serr == nil {
+			if status != lastStatus {
 				t.Logf("status: %s", status)
+				lastStatus = status
 			}
 		} else {
-			t.Logf("status poll error (will retry): %v", err)
+			t.Logf("status poll error (will retry): %v", serr)
+		}
+
+		// The real gate: does the Incus API answer with valid JSON?
+		out, lerr := runCmd(t, bin, env, cmdTimeout, "ls", "--json")
+		switch {
+		case lerr == nil && json.Valid(bytes.TrimSpace([]byte(out))):
+			t.Logf("`br ls --json` succeeded:\n%s", strings.TrimSpace(out))
+			return nil
+		case lerr != nil:
+			t.Logf("`br ls --json` not ready yet (will retry): %v", lerr)
+		default:
+			t.Logf("`br ls --json` returned non-JSON (will retry):\n%s", strings.TrimSpace(out))
 		}
 
 		select {
