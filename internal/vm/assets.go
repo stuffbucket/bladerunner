@@ -19,13 +19,6 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
-// isGitHubReleaseURL reports whether url points at a github.com release
-// download. Used to relax sidecar-checksum strictness during the period
-// before the first guest-image release ships a .sha256 sidecar.
-func isGitHubReleaseURL(url string) bool {
-	return strings.Contains(url, "github.com/") && strings.Contains(url, "/releases/")
-}
-
 // fetchSidecarSHA256 fetches a "<url>.sha256" sidecar and returns the
 // lowercased hex digest. The sidecar may be either bare hex or the
 // `sha256sum` format ("<hex>  <filename>"); only the first whitespace-
