@@ -456,11 +456,19 @@ func (r *Runner) WaitForIncus(ctx context.Context) (*report.StartupReport, error
 	})
 	if err != nil {
 		r.progress.Fail(StageIncusWait, err)
-		log.Warn("incus api was not ready before timeout; continuing with partial report", "endpoint", endpoint, "err", err)
-		serverInfo = nil
-	} else {
-		r.progress.Done(StageIncusWait)
+		// The readiness probe now gates on the Incus API reporting our client as
+		// authorized (Auth=="trusted"), not merely "GetServer responded". If we
+		// never reach that state the VM is half-started (or its trust store never
+		// took our cert), so fail loudly instead of writing a partial report that
+		// reads as success. Persist the partial report for diagnostics first.
+		log.Error("incus api never became authorized before timeout", "endpoint", endpoint, "err", err)
+		reportData := r.makeReport(r.baseImagePath, endpoint, nil)
+		if saveErr := report.SaveJSON(r.cfg.ReportPath, reportData); saveErr != nil {
+			log.Warn("failed to save partial startup report", "path", r.cfg.ReportPath, "err", saveErr)
+		}
+		return nil, fmt.Errorf("wait for incus authorization: %w", err)
 	}
+	r.progress.Done(StageIncusWait)
 
 	log.Info("assembling startup report")
 	reportData := r.makeReport(r.baseImagePath, endpoint, serverInfo)

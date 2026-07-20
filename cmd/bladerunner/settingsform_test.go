@@ -21,7 +21,6 @@ func TestSettingsFormRoundTrip(t *testing.T) {
 	want.DiskSizeGiB = 80
 	want.NetworkMode = config.NetSettingBridged
 	want.BridgeInterface = "en3"
-	want.AuthMode = config.AuthSettingCert
 	want.NestedVirt = config.NestedDisabled
 	want.UseGuestAgent = true
 	want.WaitForIncus = config.Duration(7 * time.Minute)
@@ -122,7 +121,6 @@ func TestSettingsRequiresRestart(t *testing.T) {
 		func(s *config.Settings) { s.MemoryGiB = 99 },
 		func(s *config.Settings) { s.DiskSizeGiB = 99 },
 		func(s *config.Settings) { s.NetworkMode = config.NetSettingBridged; s.BridgeInterface = "en9" },
-		func(s *config.Settings) { s.AuthMode = config.AuthSettingCert },
 		func(s *config.Settings) { s.NestedVirt = config.NestedDisabled },
 		func(s *config.Settings) { s.UseGuestAgent = true },
 		func(s *config.Settings) { s.Image = config.ImageSource{Kind: config.ImageHosted} },
@@ -142,7 +140,7 @@ func TestApplySettingsForm(t *testing.T) {
 	postValid := map[string]string{
 		fStartPolicy: string(config.StartOnLaunch),
 		fCPUs:        "4", fMemoryGiB: "8", fDiskSizeGiB: "64",
-		fNetworkMode: "shared", fAuthMode: "oidc", fNestedVirt: "auto",
+		fNetworkMode: "shared", fNestedVirt: "auto",
 		fImageKind: "debian", fWaitForIncus: "10m",
 	}
 	raw := mustJSON(t, postValid)

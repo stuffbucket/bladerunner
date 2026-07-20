@@ -58,7 +58,6 @@ const (
 	fDiskSizeGiB   = "diskSizeGiB"
 	fNetworkMode   = "networkMode"
 	fBridgeIface   = "bridgeInterface"
-	fAuthMode      = "authMode"
 	fImageKind     = "imageKind"
 	fImageURL      = "imageURL"
 	fImagePath     = "imagePath"
@@ -85,7 +84,6 @@ func valuesFromSettings(s config.Settings) map[string]string {
 		fDiskSizeGiB:   strconv.Itoa(s.DiskSizeGiB),
 		fNetworkMode:   string(s.NetworkMode),
 		fBridgeIface:   s.BridgeInterface,
-		fAuthMode:      string(s.AuthMode),
 		fImageKind:     string(s.Image.Kind),
 		fImageURL:      s.Image.URL,
 		fImagePath:     s.Image.Path,
@@ -116,9 +114,6 @@ func parseSettingsForm(posted map[string]string, base config.Settings) (config.S
 	}
 	if v, ok := get(fBridgeIface); ok {
 		s.BridgeInterface = v
-	}
-	if v, ok := get(fAuthMode); ok {
-		s.AuthMode = config.AuthSetting(v)
 	}
 	if v, ok := get(fNestedVirt); ok {
 		s.NestedVirt = config.NestedVirtSetting(v)
@@ -220,7 +215,7 @@ func applySettingsForm(rawJSON, stateDir string, vmRunning bool) settingsSaveOut
 
 // settingsRequiresRestart reports whether the change from old to new touches a
 // field that only takes effect on the next VM start (CPUs/memory/disk/network/
-// auth/image/nested-virt/guest-agent). StartPolicy and a bare bridge-iface tweak
+// image/nested-virt/guest-agent). StartPolicy and a bare bridge-iface tweak
 // while shared are menubar-only and don't need a restart.
 func settingsRequiresRestart(old, neu config.Settings) bool {
 	return old.CPUs != neu.CPUs ||
@@ -228,7 +223,6 @@ func settingsRequiresRestart(old, neu config.Settings) bool {
 		old.DiskSizeGiB != neu.DiskSizeGiB ||
 		old.NetworkMode != neu.NetworkMode ||
 		old.BridgeInterface != neu.BridgeInterface ||
-		old.AuthMode != neu.AuthMode ||
 		old.NestedVirt != neu.NestedVirt ||
 		old.UseGuestAgent != neu.UseGuestAgent ||
 		old.ShowConsole != neu.ShowConsole ||
@@ -320,14 +314,6 @@ func settingsFormHTML(s config.Settings) string {
 		{string(config.NetSettingBridged), "Bridged"},
 	})))
 	b.WriteString(srow("bridgeRow", "Bridge interface", textCtl(fBridgeIface, fBridgeIface)))
-	b.WriteString(`</div></div>`)
-
-	// Authentication.
-	b.WriteString(`<div class="group"><div class="group-title">Authentication</div><div class="card">`)
-	b.WriteString(srow("", "Mode", selectCtl(fAuthMode, "", "", v[fAuthMode], [][2]string{
-		{string(config.AuthSettingOIDC), "OIDC (single sign-on)"},
-		{string(config.AuthSettingCert), "Client certificate (mTLS)"},
-	})))
 	b.WriteString(`</div></div>`)
 
 	// Advanced.

@@ -1,8 +1,6 @@
 package config
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -72,13 +70,8 @@ const (
 	archARM64 = "arm64"
 	archAMD64 = "amd64"
 
-	// AuthMode values
-	AuthModeOIDC = "oidc"
-	AuthModeCert = "cert"
-
 	// Validation constraints
 	MinDiskSizeGiB     = 16
-	TrustPasswordLen   = 16
 	DefaultStopTimeout = 30 // seconds
 
 	// XDG directory structure
@@ -136,7 +129,6 @@ type Config struct {
 	SSHConfigPath           string
 	ClientCertPath          string
 	ClientKeyPath           string
-	TrustPassword           string
 	LocalSSHPort            int
 	LocalAPIPort            int
 	LocalWebPort            int
@@ -169,9 +161,7 @@ type Config struct {
 	// OIDCStateDir is where the signing key and runtime state live.
 	OIDCStateDir string
 	// IdentityDir is the directory of registered SSH-pubkey identity files.
-	IdentityDir string
-	// AuthMode selects how `runner` talks to Incus: "oidc" (default) or "cert" (legacy mTLS).
-	AuthMode        string
+	IdentityDir     string
 	NetworkMode     string
 	BridgeInterface string
 	GUI             bool
@@ -301,11 +291,6 @@ func Default(baseDir string) (*Config, error) {
 		baseImageSHA512 = DebianTrixieGenericCloudSHA512(runtime.GOARCH)
 	}
 
-	trustPassword, err := randomHex(TrustPasswordLen)
-	if err != nil {
-		return nil, fmt.Errorf("generate trust password: %w", err)
-	}
-
 	cfg := &Config{
 		Name:                appName,
 		Hostname:            appName,
@@ -331,7 +316,6 @@ func Default(baseDir string) (*Config, error) {
 		SSHConfigPath:       "", // Set after VM starts
 		ClientCertPath:      filepath.Join(baseDir, clientCertFileName),
 		ClientKeyPath:       filepath.Join(baseDir, clientKeyFileName),
-		TrustPassword:       trustPassword,
 		LocalSSHPort:        DefaultLocalSSHPort,
 		LocalAPIPort:        DefaultLocalAPIPort,
 		LocalWebPort:        DefaultLocalWebPort,
@@ -348,7 +332,6 @@ func Default(baseDir string) (*Config, error) {
 		OIDCAudience:        DefaultOIDCAudience,
 		OIDCStateDir:        filepath.Join(baseDir, "oidc"),
 		IdentityDir:         defaultIdentityDir(),
-		AuthMode:            AuthModeOIDC,
 		NetworkMode:         NetworkModeShared,
 		BridgeInterface:     DefaultBridgeInterface,
 		GUI:                 false, // off by default; opt in via Settings.ShowConsole or --gui
@@ -423,9 +406,6 @@ func (c *Config) validateModes() error {
 	if c.NetworkMode != NetworkModeShared && c.NetworkMode != NetworkModeBridged {
 		return fmt.Errorf("invalid network mode: %s", c.NetworkMode)
 	}
-	if c.AuthMode != "" && c.AuthMode != AuthModeOIDC && c.AuthMode != AuthModeCert {
-		return fmt.Errorf("invalid auth mode: %s", c.AuthMode)
-	}
 	return nil
 }
 
@@ -475,14 +455,6 @@ func (c *Config) SetSSHKeys(publicKey, privateKeyPath string) {
 	if c.SSHPrivateKeyPath == "" {
 		c.SSHPrivateKeyPath = privateKeyPath
 	}
-}
-
-func randomHex(bytesLen int) (string, error) {
-	b := make([]byte, bytesLen)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 // DefaultStateDir returns the XDG-compliant state directory for bladerunner.

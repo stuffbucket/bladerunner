@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,9 +22,6 @@ const (
 	pathJWKS      = "/jwks"
 	pathToken     = "/token"
 	pathAuthorize = "/authorize"
-
-	// Default grant type for the local CLI flow.
-	grantTypeSSHKey = "urn:bladerunner:params:oauth:grant-type:ssh-key"
 
 	// oidcClientID is the default OIDC client_id / audience for bladerunner-issued
 	// tokens. Used both as the default Config.Audience and in tests.
@@ -47,12 +43,12 @@ const (
 )
 
 // Provider is a minimal OIDC server. It exposes discovery, JWKS, and a token
-// endpoint that mints JWTs for registered SSH-key identities.
+// endpoint backing the browser-based single sign-on flow for the Incus web UI.
 //
-// Scope for this PR: discovery, JWKS, and a token endpoint that accepts a
-// fingerprint and returns a signed JWT if the fingerprint is registered.
-// The browser-based authorization code + PKCE flow is intentionally a stub
-// that returns 501; it will be implemented in a follow-up.
+// The token endpoint implements the standard authorization_code grant: the
+// browser is redirected through handleAuthorize (which mints a code once the
+// caller has proven possession of a registered SSH key, see sso.go) and then
+// redeems that code here for a signed JWT.
 type Provider struct {
 	issuer   *Issuer
 	store    *Store
@@ -225,7 +221,7 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 		ResponseTypesSupported:           []string{"code", "token"},
 		SubjectTypesSupported:            []string{"public"},
 		IDTokenSigningAlgValuesSupported: []string{string(signingAlgorithm)},
-		GrantTypesSupported:              []string{grantTypeSSHKey, grantTypeAuthCode},
+		GrantTypesSupported:              []string{grantTypeAuthCode},
 		TokenEndpointAuthMethodsSupp:     []string{"none", "client_secret_post"},
 		CodeChallengeMethodsSupported:    []string{"S256", "plain"},
 	}
@@ -251,12 +247,9 @@ type tokenResponse struct {
 	Subject     string `json:"sub,omitempty"`
 }
 
-// handleToken implements the OAuth2 token endpoint. It dispatches on grant_type:
-//
-//   - urn:bladerunner:params:oauth:grant-type:ssh-key — the custom CLI grant that
-//     exchanges a registered SSH-key fingerprint directly for a JWT.
-//   - authorization_code — the standard browser grant used by the Incus web UI,
-//     redeeming a code minted by handleAuthorize (see sso.go).
+// handleToken implements the OAuth2 token endpoint. The only supported grant is
+// authorization_code — the standard browser grant used by the Incus web UI,
+// redeeming a code minted by handleAuthorize (see sso.go).
 func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
@@ -269,45 +262,11 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.PostForm.Get(formFieldGrantType) {
-	case grantTypeSSHKey:
-		p.handleSSHKeyGrant(w, r)
 	case grantTypeAuthCode:
 		p.handleAuthCodeGrant(w, r)
 	default:
-		writeError(w, http.StatusBadRequest, "unsupported_grant_type", "supported grants: "+grantTypeSSHKey+", "+grantTypeAuthCode)
+		writeError(w, http.StatusBadRequest, "unsupported_grant_type", "supported grants: "+grantTypeAuthCode)
 	}
-}
-
-// handleSSHKeyGrant exchanges a registered fingerprint for a JWT. r.PostForm is
-// already parsed by handleToken.
-func (p *Provider) handleSSHKeyGrant(w http.ResponseWriter, r *http.Request) {
-	fingerprint := strings.TrimSpace(r.PostForm.Get("fingerprint"))
-	if fingerprint == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "fingerprint is required")
-		return
-	}
-
-	ident, ok := p.store.Lookup(fingerprint)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "invalid_grant", "fingerprint not registered")
-		return
-	}
-
-	clientID := r.PostForm.Get("client_id")
-	tok, claims, err := p.issuer.Issue(ident, clientID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
-		return
-	}
-
-	resp := tokenResponse{
-		AccessToken: tok,
-		IDToken:     tok,
-		TokenType:   "Bearer",
-		ExpiresIn:   int(claims.Expiry - claims.IssuedAt),
-		Subject:     claims.Subject,
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
