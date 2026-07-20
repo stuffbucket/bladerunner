@@ -406,8 +406,6 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	startFlags.timeout = bootFlags.timeout
 	startFlags.imageURL = ""
 	startFlags.imagePath = ""
-	startFlags.useAgent = false
-	startFlags.noAgent = false
 	startFlags.noNested = false
 	startFlags.restoreFrom = ""
 

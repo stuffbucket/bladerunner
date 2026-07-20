@@ -248,8 +248,6 @@ func runBoot(cmd *cobra.Command, args []string) error {
 	startFlags.timeout = bootFlags.timeout
 	startFlags.imageURL = ""
 	startFlags.imagePath = ""
-	startFlags.useAgent = false
-	startFlags.noAgent = false
 	startFlags.noNested = false
 
 	// Restore-with-memory: if the slot holds saved RAM and the user didn't ask

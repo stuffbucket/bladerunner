@@ -22,7 +22,6 @@ func TestSettingsFormRoundTrip(t *testing.T) {
 	want.NetworkMode = config.NetSettingBridged
 	want.BridgeInterface = "en3"
 	want.NestedVirt = config.NestedDisabled
-	want.UseGuestAgent = true
 	want.WaitForIncus = config.Duration(7 * time.Minute)
 	want.Image = config.ImageSource{Kind: config.ImageCustomURL, URL: "https://x/y.qcow2"}
 
@@ -122,7 +121,6 @@ func TestSettingsRequiresRestart(t *testing.T) {
 		func(s *config.Settings) { s.DiskSizeGiB = 99 },
 		func(s *config.Settings) { s.NetworkMode = config.NetSettingBridged; s.BridgeInterface = "en9" },
 		func(s *config.Settings) { s.NestedVirt = config.NestedDisabled },
-		func(s *config.Settings) { s.UseGuestAgent = true },
 		func(s *config.Settings) { s.Image = config.ImageSource{Kind: config.ImageHosted} },
 	} {
 		n := base

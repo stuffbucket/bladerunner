@@ -16,9 +16,6 @@ import (
 )
 
 func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
-	if cfg.UseGuestAgent {
-		return buildMinimalCloudInit(cfg)
-	}
 	bootstrapScript := renderBootstrapScript(cfg)
 
 	var b strings.Builder
@@ -638,7 +635,7 @@ func vsockNTPUnit(port uint32) string {
 // renderTimeHeal returns the guest-side bootstrap fragment that (1) swaps
 // systemd-timesyncd for chrony tuned to step the clock immediately after a host
 // suspend, and (2) installs the guest-local wake-heal watchdog (script + unit).
-// It is always emitted (no host/agent dependency). The chrony swap is guarded:
+// It is always emitted. The chrony swap is guarded:
 // timesyncd is only disabled+masked AFTER chrony is verified active, so a
 // transient chrony install failure never strands the guest with zero time sync.
 //
@@ -791,128 +788,6 @@ systemctl restart systemd-logind 2>/dev/null || true
 		unitName,
 		cfg.SSHUser, cfg.SSHUser, guestPath,
 	)
-}
-
-// buildMinimalCloudInit produces the five-line user-data used when the
-// in-guest br-agent will take over configuration once the VM is up. The
-// agent must already be present in the guest image (#45) or installed by
-// the user via image bake; cloud-init merely seeds the SSH key and starts
-// the agent.
-//
-// This path provisions NOTHING time-related (no chrony, no watchdog): it relies
-// entirely on the pre-baked image (scripts/build-guest-image.sh, paths B/C) to
-// carry chrony + the guest-local wake-heal watchdog. If you change the chrony /
-// watchdog provisioning, the baked image MUST be rebuilt or this agent path
-// regresses to systemd-timesyncd with no wake-heal backstop.
-func buildMinimalCloudInit(cfg *config.Config) (string, string) {
-	var b strings.Builder
-	b.WriteString("#cloud-config\n")
-	fmt.Fprintf(&b, "hostname: %s\n", cfg.Hostname)
-	b.WriteString("manage_etc_hosts: true\n")
-	b.WriteString("users:\n")
-	b.WriteString("  - default\n")
-	fmt.Fprintf(&b, "  - name: %s\n", cfg.SSHUser)
-	b.WriteString("    shell: /bin/bash\n")
-	b.WriteString("    sudo: ALL=(ALL) NOPASSWD:ALL\n")
-	b.WriteString("    groups: [sudo]\n")
-	b.WriteString("    lock_passwd: true\n")
-	b.WriteString("    ssh_authorized_keys:\n")
-	fmt.Fprintf(&b, "      - %s\n", cfg.SSHPublicKey)
-	// The pre-baked image ships incus + br-agent but, unlike the full cloud-init
-	// path, no host<->guest vsock bridges — and the in-guest br-agent does not
-	// create them either. Without these socat relays the host can reach neither
-	// SSH (vsock %[1]d -> :22) nor the Incus API (vsock %[2]d -> :8443), so the
-	// guest looks dead even though it booted (#45). The OIDC relay is equally
-	// required: the br-agent's config push points Incus at issuer
-	// http://127.0.0.1:LocalOIDCPort (guest loopback), which only resolves when
-	// bladerunner-vsock-oidc.service forwards that guest TCP port over vsock to
-	// the host provider (VSOCK-CONNECT:2:VsockOIDCPort); without it web-UI/API
-	// OIDC sign-in fails on the agent path even though it works on the full path
-	// (#130). Emit the same bridge units the full path uses (ports templated to
-	// cfg) and enable them before the agent configures incus.
-	b.WriteString("runcmd:\n")
-	// Explicitly create the SSH user + authorized_keys. cloud-init's users module
-	// is unreliable on this image (the agent observed "unknown user incus" and
-	// key-based SSH was rejected), so mirror the full path's runcmd break-glass to
-	// guarantee a key-based way in independent of the users module and the agent.
-	b.WriteString("  - |\n")
-	fmt.Fprintf(&b, "    SSH_USER='%s'\n", cfg.SSHUser)
-	fmt.Fprintf(&b, "    SSH_PUBKEY='%s'\n", cfg.SSHPublicKey)
-	b.WriteString("    if ! id -u \"$SSH_USER\" >/dev/null 2>&1; then useradd -m -s /bin/bash \"$SSH_USER\" || true; fi\n")
-	b.WriteString("    usermod -s /bin/bash \"$SSH_USER\" 2>/dev/null || true\n")
-	b.WriteString("    [ -d \"/home/$SSH_USER\" ] || mkdir -p \"/home/$SSH_USER\"\n")
-	b.WriteString("    mkdir -p \"/home/$SSH_USER/.ssh\"\n")
-	b.WriteString("    printf '%s\\n' \"$SSH_PUBKEY\" > \"/home/$SSH_USER/.ssh/authorized_keys\"\n")
-	b.WriteString("    chmod 700 \"/home/$SSH_USER/.ssh\"\n")
-	b.WriteString("    chmod 600 \"/home/$SSH_USER/.ssh/authorized_keys\"\n")
-	b.WriteString("    chown -R \"$SSH_USER:$SSH_USER\" \"/home/$SSH_USER\" 2>/dev/null || true\n")
-	b.WriteString("    usermod -aG sudo \"$SSH_USER\" 2>/dev/null || true\n")
-	b.WriteString("    echo \"$SSH_USER ALL=(ALL) NOPASSWD:ALL\" > /etc/sudoers.d/90-bladerunner\n")
-	b.WriteString("    chmod 440 /etc/sudoers.d/90-bladerunner\n")
-	b.WriteString("    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true\n")
-	b.WriteString("  - |\n")
-	b.WriteString("    cat >/etc/systemd/system/bladerunner-vsock-ssh.service <<'UNIT'\n")
-	b.WriteString("    [Unit]\n")
-	b.WriteString("    Description=Bladerunner vsock SSH forward\n")
-	b.WriteString("    After=network.target ssh.service sshd.service\n")
-	b.WriteString("    Wants=ssh.service sshd.service\n")
-	b.WriteString("    ConditionPathExists=/usr/bin/socat\n")
-	b.WriteString("    ConditionPathExists=/dev/vsock\n")
-	b.WriteString("\n")
-	b.WriteString("    [Service]\n")
-	b.WriteString("    Type=simple\n")
-	b.WriteString("    ExecStartPre=/bin/sh -c 'until ss -tln | grep -q \":22 \"; do sleep 0.5; done'\n")
-	fmt.Fprintf(&b, "    ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:22\n", cfg.VsockSSHPort)
-	b.WriteString("    Restart=always\n")
-	b.WriteString("    RestartSec=1\n")
-	b.WriteString("\n")
-	b.WriteString("    [Install]\n")
-	b.WriteString("    WantedBy=multi-user.target\n")
-	b.WriteString("    UNIT\n")
-	b.WriteString("    cat >/etc/systemd/system/bladerunner-vsock-incus.service <<'UNIT'\n")
-	b.WriteString("    [Unit]\n")
-	b.WriteString("    Description=Bladerunner vsock Incus API forward\n")
-	b.WriteString("    After=network.target incus.service incus.socket\n")
-	b.WriteString("    Wants=incus.socket\n")
-	b.WriteString("    ConditionPathExists=/usr/bin/socat\n")
-	b.WriteString("    ConditionPathExists=/dev/vsock\n")
-	b.WriteString("\n")
-	b.WriteString("    [Service]\n")
-	b.WriteString("    Type=simple\n")
-	b.WriteString("    ExecStartPre=/bin/sh -c 'until ss -tln | grep -q \":8443 \"; do sleep 0.5; done'\n")
-	fmt.Fprintf(&b, "    ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:8443\n", cfg.VsockAPIPort)
-	b.WriteString("    Restart=always\n")
-	b.WriteString("    RestartSec=1\n")
-	b.WriteString("\n")
-	b.WriteString("    [Install]\n")
-	b.WriteString("    WantedBy=multi-user.target\n")
-	b.WriteString("    UNIT\n")
-	// OIDC relay: guest TCP LocalOIDCPort -> vsock -> host provider VsockOIDCPort.
-	// The br-agent's config push points Incus at issuer http://127.0.0.1:LocalOIDCPort
-	// (guest loopback), so this relay is what makes that loopback issuer reach the
-	// host OIDC server. Byte-for-byte the same unit the full path emits (#130).
-	b.WriteString("    cat >/etc/systemd/system/bladerunner-vsock-oidc.service <<'UNIT'\n")
-	b.WriteString("    [Unit]\n")
-	b.WriteString("    Description=Bladerunner vsock OIDC forward (guest TCP -> host vsock)\n")
-	b.WriteString("    After=network.target\n")
-	b.WriteString("    ConditionPathExists=/usr/bin/socat\n")
-	b.WriteString("    ConditionPathExists=/dev/vsock\n")
-	b.WriteString("\n")
-	b.WriteString("    [Service]\n")
-	b.WriteString("    Type=simple\n")
-	fmt.Fprintf(&b, "    ExecStart=/usr/bin/socat TCP-LISTEN:%d,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d\n", cfg.LocalOIDCPort, cfg.VsockOIDCPort)
-	b.WriteString("    Restart=always\n")
-	b.WriteString("    RestartSec=1\n")
-	b.WriteString("\n")
-	b.WriteString("    [Install]\n")
-	b.WriteString("    WantedBy=multi-user.target\n")
-	b.WriteString("    UNIT\n")
-	b.WriteString("    systemctl daemon-reload\n")
-	b.WriteString("    systemctl enable --now bladerunner-vsock-ssh.service bladerunner-vsock-incus.service bladerunner-vsock-oidc.service\n")
-	b.WriteString("  - [systemctl, enable, --now, br-agent.service]\n")
-
-	metaData := fmt.Sprintf("instance-id: bladerunner-%s\nlocal-hostname: %s\n", cfg.Name, cfg.Hostname)
-	return b.String(), metaData
 }
 
 func indent(s string, spaces int) string {

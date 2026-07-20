@@ -3,14 +3,13 @@
 #
 # Build a pre-baked bladerunner guest image starting from the Debian Trixie
 # genericcloud qcow2. The output image has incus + incus-ui-canonical, socat,
-# jq pre-installed, vsock kernel modules baked into the initramfs, and (when
-# --br-agent-binary is supplied) the br-agent systemd unit ready to run on
-# first boot.
+# jq pre-installed, and vsock kernel modules baked into the initramfs. It boots
+# under the same cloud-init bladerunner emits, which no-ops the apt installs
+# when the packages are already present.
 #
 # Usage:
 #   scripts/build-guest-image.sh --arch arm64 --output bladerunner-guest-arm64.qcow2
-#   scripts/build-guest-image.sh --arch amd64 --output bladerunner-guest-amd64.qcow2 \
-#       --br-agent-binary ./bin/br-agent-amd64
+#   scripts/build-guest-image.sh --arch amd64 --output bladerunner-guest-amd64.qcow2
 #
 # Required host tools (Debian/Ubuntu packages):
 #   qemu-utils         (qemu-img)
@@ -28,7 +27,6 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 ARCH=""
 OUTPUT=""
-BR_AGENT_BINARY=""
 DEBIAN_RELEASE="${DEBIAN_RELEASE:-trixie}"
 TARGET_SIZE_GIB="${TARGET_SIZE_GIB:-8}"
 # Customize method: auto (prefer libguestfs), guestfish (force libguestfs), or
@@ -43,13 +41,10 @@ fatal() { log "ERROR: $*"; exit 1; }
 
 usage() {
     cat >&2 <<USAGE
-usage: $0 --arch arm64|amd64 --output PATH [--br-agent-binary PATH]
+usage: $0 --arch arm64|amd64 --output PATH
 
   --arch ARCH              Target architecture (arm64 or amd64).
   --output PATH            Output qcow2 path.
-  --br-agent-binary PATH   Optional br-agent binary; if absent the image is
-                           built without the agent (suffix the artifact name
-                           with -no-agent at the caller).
   --debian-release NAME    Override Debian release (default: trixie).
   --size GIB               Resize working image to this GiB (default: 8).
   --method METHOD          Customize method: auto|guestfish|nbd (default: auto).
@@ -64,7 +59,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --arch)              ARCH="${2:?--arch needs a value}"; shift 2;;
         --output)            OUTPUT="${2:?--output needs a value}"; shift 2;;
-        --br-agent-binary)   BR_AGENT_BINARY="${2:?--br-agent-binary needs a value}"; shift 2;;
         --debian-release)    DEBIAN_RELEASE="${2:?}"; shift 2;;
         --size)              TARGET_SIZE_GIB="${2:?}"; shift 2;;
         --method)            METHOD="${2:?--method needs a value}"; shift 2;;
@@ -147,12 +141,6 @@ vhost_vsock'
 
 BUILD_DATE="$(date -u +%Y.%m.%d)"
 
-# Install br-agent + systemd unit (no-op when binary is missing).
-if [[ -n "${BR_AGENT_BINARY}" ]]; then
-    [[ -f "${BR_AGENT_BINARY}" ]] || fatal "br-agent binary not found: ${BR_AGENT_BINARY}"
-    log "br-agent binary: ${BR_AGENT_BINARY}"
-fi
-
 if [[ ${USE_GUESTFISH} -eq 1 ]]; then
     # virt-customize wraps guestfish for declarative image edits. It is
     # idempotent across reruns and handles the initrd regeneration.
@@ -176,8 +164,8 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.service:/etc/systemd/system"
         --run-command "systemctl enable bladerunner-watchdog.service"
         # vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder. Baked
-        # into the image so the agent/guest-agent path (which emits no time-stack
-        # cloud-init) still has the bridge. Single source: scripts/bladerunner-vsock-ntp.service.
+        # into the image so it is present regardless of cloud-init timing.
+        # Single source: scripts/bladerunner-vsock-ntp.service.
         --copy-in     "${SCRIPT_DIR}/bladerunner-vsock-ntp.service:/etc/systemd/system"
         --run-command "systemctl enable bladerunner-vsock-ntp.service"
         --append-line "/etc/initramfs-tools/modules:vmw_vsock_virtio_transport"
@@ -185,15 +173,6 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         --write       "/etc/bladerunner-image-version:${BUILD_DATE}"
         --run-command "update-initramfs -u"
     )
-
-    if [[ -n "${BR_AGENT_BINARY}" ]]; then
-        CUSTOMIZE_ARGS+=(
-            --copy-in   "${BR_AGENT_BINARY}:/usr/local/bin"
-            --run-command "mv /usr/local/bin/$(basename "${BR_AGENT_BINARY}") /usr/local/bin/br-agent && chmod +x /usr/local/bin/br-agent"
-            --copy-in   "${SCRIPT_DIR}/br-agent.service:/etc/systemd/system"
-            --run-command "systemctl enable br-agent.service"
-        )
-    fi
 
     log "running virt-customize"
     virt-customize -a "${BASE_IMAGE}" "${CUSTOMIZE_ARGS[@]}"
@@ -324,12 +303,6 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 rm -f /etc/apt/apt.conf.d/80-bladerunner-retries
 EOS
-
-    if [[ -n "${BR_AGENT_BINARY}" ]]; then
-        install -m 0755 "${BR_AGENT_BINARY}" "${MNT}/usr/local/bin/br-agent"
-        install -m 0644 "${SCRIPT_DIR}/br-agent.service" "${MNT}/etc/systemd/system/br-agent.service"
-        chroot "${MNT}" systemctl enable br-agent.service
-    fi
 
     # Restore the image's original /etc/resolv.conf (typically the
     # systemd-resolved symlink) so the baked image resolves DNS at runtime the

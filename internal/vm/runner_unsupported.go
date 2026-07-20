@@ -7,7 +7,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/stuffbucket/bladerunner/internal/agent"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/report"
 )
@@ -51,7 +50,3 @@ func (r *Runner) Eject(context.Context, time.Duration, bool) error {
 
 // NestedVirtualizationSupported is always false off darwin.
 func NestedVirtualizationSupported() bool { return false }
-
-func (r *Runner) RunAgentHandshake(context.Context) (*agent.HandshakeResult, error) {
-	return nil, errors.New("unsupported platform")
-}

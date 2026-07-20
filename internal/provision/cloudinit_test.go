@@ -8,65 +8,6 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
-// TestBuildCloudInit_AgentPathEmitsVsockBridges guards #45 + #130: the minimal
-// (UseGuestAgent) cloud-init must emit the vsock SSH + Incus + OIDC bridge units,
-// since the pre-baked image doesn't bake them and the in-guest br-agent doesn't
-// create them. Without the SSH/Incus bridges the host can reach neither SSH nor
-// the Incus API and the guest looks dead even though it booted. Without the OIDC
-// bridge the br-agent's config push points Incus at a guest-loopback issuer that
-// never reaches the host provider, so web-UI/API OIDC sign-in fails (#130).
-func TestBuildCloudInit_AgentPathEmitsVsockBridges(t *testing.T) {
-	t.Parallel()
-	cfg := testConfig()
-	cfg.UseGuestAgent = true
-
-	userData, _ := BuildCloudInit(cfg, "")
-
-	wants := []string{
-		"bladerunner-vsock-ssh.service",
-		"bladerunner-vsock-incus.service",
-		"bladerunner-vsock-oidc.service",
-		"VSOCK-LISTEN:10022,fork,reuseaddr TCP:127.0.0.1:22",
-		"VSOCK-LISTEN:18443,fork,reuseaddr TCP:127.0.0.1:8443",
-		// OIDC relay: guest TCP LocalOIDCPort -> vsock -> host VsockOIDCPort.
-		"TCP-LISTEN:15556,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18556",
-		"systemctl enable --now bladerunner-vsock-ssh.service bladerunner-vsock-incus.service bladerunner-vsock-oidc.service",
-		"br-agent.service",
-		// Explicit SSH user + key break-glass (users module is unreliable here).
-		`SSH_USER='tester'`,
-		`authorized_keys`,
-		`useradd -m -s /bin/bash`,
-	}
-	for _, want := range wants {
-		if !strings.Contains(userData, want) {
-			t.Errorf("agent-path user-data missing %q\n---\n%s\n---", want, userData)
-		}
-	}
-}
-
-// TestBuildCloudInit_AgentPathOIDCRelayMatchesFullPath guards #130 parity: the
-// OIDC relay socat line emitted on the agent/minimal path must be byte-identical
-// to the one the full cloud-init path emits (same ports, same VSOCK-CONNECT
-// target). If they drift, OIDC works on one provisioning path but not the other.
-func TestBuildCloudInit_AgentPathOIDCRelayMatchesFullPath(t *testing.T) {
-	t.Parallel()
-
-	const oidcRelayLine = "socat TCP-LISTEN:15556,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:18556"
-
-	full := testConfig()
-	fullData, _ := BuildCloudInit(full, "")
-	if !strings.Contains(fullData, oidcRelayLine) {
-		t.Fatalf("full-path user-data missing OIDC relay line %q (test assumption broke)\n---\n%s\n---", oidcRelayLine, fullData)
-	}
-
-	agent := testConfig()
-	agent.UseGuestAgent = true
-	agentData, _ := BuildCloudInit(agent, "")
-	if !strings.Contains(agentData, oidcRelayLine) {
-		t.Errorf("agent-path user-data missing OIDC relay line %q; it must match the full path\n---\n%s\n---", oidcRelayLine, agentData)
-	}
-}
-
 // testConfig returns a minimal but valid *config.Config sufficient to drive
 // BuildCloudInit. Only the fields the cloud-init renderer dereferences are
 // populated; arch defaults to arm64 to match the primary Apple-silicon target.

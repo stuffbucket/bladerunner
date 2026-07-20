@@ -38,8 +38,6 @@ var startFlags struct {
 	imageURL    string
 	imagePath   string
 	timeout     time.Duration
-	useAgent    bool
-	noAgent     bool
 	noNested    bool
 	restoreFrom string
 }
@@ -62,8 +60,6 @@ func init() {
 	f.StringVar(&startFlags.imageURL, "image-url", "", "Base image URL")
 	f.StringVar(&startFlags.imagePath, "image-path", "", "Local base image path")
 	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
-	f.BoolVar(&startFlags.useAgent, "use-guest-agent", false, "Use the in-guest br-agent for boot config (requires pre-baked image or user-side install)")
-	f.BoolVar(&startFlags.noAgent, "no-agent", false, "Force the legacy cloud-init/HTTP-polling path even if use-guest-agent is enabled")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
 	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
 }
@@ -167,10 +163,6 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 	}
 	if apply("timeout") {
 		cfg.WaitForIncus = startFlags.timeout
-	}
-	// UseGuestAgent is derived from two flags; recompute if either was set.
-	if apply("use-guest-agent") || apply("no-agent") {
-		cfg.UseGuestAgent = startFlags.useAgent && !startFlags.noAgent
 	}
 	if apply("no-nested-virt") {
 		cfg.NestedVirtDisabled = startFlags.noNested
@@ -489,17 +481,11 @@ func startReportJSON(cfg *config.Config, endpoint string, bootErr error) error {
 	return emitJSON(r)
 }
 
-// waitForGuestReady runs the agent handshake (when enabled) and the Incus
-// readiness wait. Returns nil if the guest reached the Incus-ready state,
-// or an error describing why it didn't. Errors are non-fatal at the call
-// site (partial reports are still useful) but the caller should warn the
-// user rather than pretend everything is fine.
-func waitForGuestReady(ctx context.Context, cfg *config.Config, runner *vm.Runner) error {
-	if cfg.UseGuestAgent {
-		if _, err := runner.RunAgentHandshake(ctx); err != nil {
-			logging.L().Warn("agent handshake failed, falling back to http wait", "error", err)
-		}
-	}
+// waitForGuestReady runs the Incus readiness wait. Returns nil if the guest
+// reached the Incus-ready state, or an error describing why it didn't. Errors
+// are non-fatal at the call site (partial reports are still useful) but the
+// caller should warn the user rather than pretend everything is fine.
+func waitForGuestReady(ctx context.Context, _ *config.Config, runner *vm.Runner) error {
 	if _, err := runner.WaitForIncus(ctx); err != nil {
 		logging.L().Error("wait for incus", "error", err)
 		return err

@@ -183,7 +183,6 @@ var diskNewFlags struct {
 var diskBakeFlags struct {
 	output     string
 	arch       string
-	agentBin   string
 	size       int
 	release    string
 	timeoutMin int
@@ -198,7 +197,6 @@ func init() {
 
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.output, "output", "", "Output qcow2 path (default: <disks-dir>/<name>-<arch>.qcow2)")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.arch, "arch", runtime.GOARCH, "Target architecture to build")
-	diskBakeCmd.Flags().StringVar(&diskBakeFlags.agentBin, "br-agent-binary", "", "Optional br-agent binary to bake into the image")
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.size, "size", defaultBakeSizeGiB, "Working image size in GiB passed to the build script")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.release, "debian-release", "trixie", "Debian release to build from")
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.timeoutMin, "timeout", defaultBakeTimeoutMin, "Build timeout in minutes")
@@ -356,9 +354,6 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		"--output", absOut,
 		"--size", strconv.Itoa(diskBakeFlags.size),
 		"--debian-release", diskBakeFlags.release)
-	if diskBakeFlags.agentBin != "" {
-		build.Args = append(build.Args, "--br-agent-binary", diskBakeFlags.agentBin)
-	}
 	build.Stderr = os.Stderr // script logs go to stderr; stdout is the bare digest
 	out, err := build.Output()
 	if err != nil {
