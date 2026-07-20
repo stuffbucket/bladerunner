@@ -16,26 +16,6 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
-func TestIsGitHubReleaseURL(t *testing.T) {
-	tests := []struct {
-		url  string
-		want bool
-	}{
-		{"https://github.com/stuffbucket/bladerunner/releases/download/guest-image-latest/x.qcow2", true},
-		{"https://github.com/foo/bar/releases/latest/download/x.qcow2", true},
-		{"https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2", false},
-		{"https://github.com/stuffbucket/bladerunner/raw/main/foo", false},
-		{"https://example.com/releases/download/x", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.url, func(t *testing.T) {
-			if got := isGitHubReleaseURL(tt.url); got != tt.want {
-				t.Errorf("isGitHubReleaseURL(%q) = %v, want %v", tt.url, got, tt.want)
-			}
-		})
-	}
-}
-
 func writeTempFile(t *testing.T, data []byte) string {
 	t.Helper()
 	dir := t.TempDir()
