@@ -43,10 +43,10 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 	if !client.IsRunning() {
 		if jsonOutput {
-			return emitJSON(statusReport{Running: false, Status: "stopped", Build: currentBuildInfo()})
+			return emitJSON(statusReport{Running: false, Status: control.StatusStopped, Build: currentBuildInfo()})
 		}
 		left := newPanel("VM")
-		left.row("Status", errorf("stopped"))
+		left.row("Status", errorf(control.StatusStopped))
 
 		fmt.Println(title("Bladerunner Status"))
 		fmt.Println(renderPanels(left, right))

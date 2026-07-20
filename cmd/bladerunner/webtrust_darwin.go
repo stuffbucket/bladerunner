@@ -29,7 +29,7 @@ func installTrustedCert(pemPath string, system bool) error {
 	name := securityCmd
 	args := []string{"add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", loginKeychain(), pemPath}
 	if system {
-		name = "sudo"
+		name = sudoCmd
 		args = []string{securityCmd, "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "ssl", "-k", "/Library/Keychains/System.keychain", pemPath}
 	}
 	fmt.Println(subtle("macOS will prompt you to authorize the keychain change."))
@@ -45,7 +45,7 @@ func removeTrustedCert(system bool) error {
 	name := securityCmd
 	args := []string{"delete-certificate", "-c", incusCertCommonName, loginKeychain()}
 	if system {
-		name = "sudo"
+		name = sudoCmd
 		args = []string{securityCmd, "delete-certificate", "-c", incusCertCommonName, "/Library/Keychains/System.keychain"}
 	}
 	c := exec.CommandContext(context.Background(), name, args...)

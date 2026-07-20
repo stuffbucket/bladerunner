@@ -1,3 +1,8 @@
+//go:build darwin
+
+// runtimeMetadata is loaded and persisted only by the darwin VM runner
+// (runner_darwin.go); on other platforms the VM runner is an unsupported stub,
+// so this file is darwin-tagged to keep it out of those builds.
 package vm
 
 import (

@@ -41,7 +41,7 @@ func runIncus(cmd *cobra.Command, args []string) error {
 	}
 
 	sshExecArgs := make([]string, 0, 5+len(args))
-	sshExecArgs = append(sshExecArgs, "ssh", "-F", configPath, "bladerunner", "incus")
+	sshExecArgs = append(sshExecArgs, "ssh", "-F", configPath, sshHostAlias, "incus")
 	sshExecArgs = append(sshExecArgs, args...)
 
 	return syscall.Exec(sshPath, sshExecArgs, os.Environ())

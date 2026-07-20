@@ -6,6 +6,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// sshHostAlias is the SSH host alias written into the generated ssh config
+// (see internal/ssh/config.go "Host bladerunner"); the CLI connects via it.
+const sshHostAlias = "bladerunner"
+
 var sshCmd = &cobra.Command{
 	Use:   "ssh",
 	Short: "Show SSH connection details",
@@ -25,11 +29,11 @@ func runSSH(_ *cobra.Command, _ []string) error {
 	if jsonOutput {
 		return emitJSON(map[string]string{
 			"ssh_config_path": configPath,
-			"host":            "bladerunner",
-			"command":         fmt.Sprintf("ssh -F %s bladerunner", configPath),
+			"host":            sshHostAlias,
+			"command":         fmt.Sprintf("ssh -F %s %s", configPath, sshHostAlias),
 		})
 	}
 
-	fmt.Printf("ssh -F %s bladerunner\n", configPath)
+	fmt.Printf("ssh -F %s %s\n", configPath, sshHostAlias)
 	return nil
 }

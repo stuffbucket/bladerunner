@@ -21,6 +21,10 @@ type Event struct {
 
 const maxErrorLength = 200
 
+// summaryCloudInitFailed is the boot-status summary reported when cloud-init
+// ran but exited with a failure.
+const summaryCloudInitFailed = "cloud-init failed"
+
 // Status represents the detected boot state from console output.
 type Status struct {
 	KernelBooted    bool
@@ -54,7 +58,7 @@ func (s *Status) Summary() string {
 		return "systemd emergency mode"
 	}
 	if s.CloudInitFailed {
-		return "cloud-init failed"
+		return summaryCloudInitFailed
 	}
 	if !s.KernelBooted {
 		return "kernel not booted"
