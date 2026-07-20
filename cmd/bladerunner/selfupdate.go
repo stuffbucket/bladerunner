@@ -38,7 +38,7 @@ func init() {
 	selfUpdateCmd.Flags().BoolVar(&selfUpdateFlags.check, "check", false, "Only check for an update; do not download or install")
 	selfUpdateCmd.Flags().StringVar(&selfUpdateFlags.manifestURL, "manifest", "", "Override the update manifest URL")
 	selfUpdateCmd.Flags().BoolVar(&selfUpdateFlags.noRelaunch, "no-relaunch", false, "Do not relaunch the app after a successful update")
-	rootCmd.AddCommand(selfUpdateCmd)
+	// Registration + group assignment happen centrally in root.go (addToGroup).
 }
 
 func runSelfUpdate(cmd *cobra.Command, _ []string) error {
