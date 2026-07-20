@@ -8,6 +8,37 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
+// TestBuildCloudInit_AgentPathEmitsVsockBridges guards #45: the minimal
+// (UseGuestAgent) cloud-init must emit the vsock SSH + Incus bridge units, since
+// the pre-baked image doesn't bake them and the in-guest br-agent doesn't create
+// them. Without these the host can reach neither SSH nor the Incus API and the
+// guest looks dead even though it booted.
+func TestBuildCloudInit_AgentPathEmitsVsockBridges(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.UseGuestAgent = true
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"bladerunner-vsock-ssh.service",
+		"bladerunner-vsock-incus.service",
+		"VSOCK-LISTEN:10022,fork,reuseaddr TCP:127.0.0.1:22",
+		"VSOCK-LISTEN:18443,fork,reuseaddr TCP:127.0.0.1:8443",
+		"systemctl enable --now bladerunner-vsock-ssh.service bladerunner-vsock-incus.service",
+		"br-agent.service",
+		// Explicit SSH user + key break-glass (users module is unreliable here).
+		`SSH_USER='tester'`,
+		`authorized_keys`,
+		`useradd -m -s /bin/bash`,
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("agent-path user-data missing %q\n---\n%s\n---", want, userData)
+		}
+	}
+}
+
 // testConfig returns a minimal but valid *config.Config sufficient to drive
 // BuildCloudInit. Only the fields the cloud-init renderer dereferences are
 // populated; arch defaults to arm64 to match the primary Apple-silicon target.
@@ -463,6 +494,10 @@ func TestProvisioningAssetsMatchCheckedInFiles(t *testing.T) {
 		{"chrony.conf", "../../scripts/chrony.conf", chronyConf},
 		{"bladerunner-watchdog.sh", "../../scripts/bladerunner-watchdog.sh", watchdogScript},
 		{"bladerunner-watchdog.service", "../../scripts/bladerunner-watchdog.service", watchdogUnit},
+		// vsock-ntp.service is emitted inline (not a plain const) with the port
+		// templated; render it at the default port, which is the literal baked into
+		// the checked-in file. See vsockNTPUnit's DUAL-SOURCE DISCIPLINE note.
+		{"bladerunner-vsock-ntp.service", "../../scripts/bladerunner-vsock-ntp.service", vsockNTPUnit(config.DefaultVsockNTPPort)},
 	}
 	for _, c := range cases {
 		want, err := os.ReadFile(c.path)

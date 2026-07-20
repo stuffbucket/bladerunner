@@ -640,6 +640,22 @@ driftfile /var/lib/chrony/chrony.drift
 logdir /var/log/chrony
 `
 
+// vsockNTPUnit renders the bladerunner-vsock-ntp.service unit body. It is the
+// single source for that unit: the cloud-init path heredocs the return value,
+// and the image-build path --copy-ins the checked-in
+// scripts/bladerunner-vsock-ntp.service. The two must stay byte-identical; the
+// only difference is the templated port, whose default (config.DefaultVsockNTPPort)
+// is the literal baked into that file. TestProvisioningAssetsMatchCheckedInFiles
+// enforces the byte-identity against the checked-in copy.
+func vsockNTPUnit(port uint32) string {
+	return fmt.Sprintf("[Unit]\nDescription=Bladerunner vsock NTP forward (guest UDP 123 -> host vsock)\n"+
+		"After=network.target\nConditionPathExists=/usr/bin/socat\nConditionPathExists=/dev/vsock\n\n"+
+		"[Service]\nType=simple\n"+
+		"ExecStart=/usr/bin/socat UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d\n"+
+		"Restart=always\nRestartSec=1\n\n"+
+		"[Install]\nWantedBy=multi-user.target\n", port)
+}
+
 // renderTimeHeal returns the guest-side bootstrap fragment that (1) swaps
 // systemd-timesyncd for chrony tuned to step the clock immediately after a host
 // suspend, and (2) installs the guest-local wake-heal watchdog (script + unit).
@@ -661,19 +677,16 @@ func renderTimeHeal(cfg *config.Config) string {
 	// bridge is emitted BEFORE the chrony.conf write so the transport exists the
 	// moment chrony enables.
 	//
-	// DUAL-SOURCE DISCIPLINE: this unit body must stay BYTE-IDENTICAL to the
-	// checked-in scripts/bladerunner-vsock-ntp.service (which the image-build
-	// arms --copy-in) except for the templated %d, whose default IS the 18557
-	// hardcoded in that file. Editing one without the other silently desyncs the
-	// cloud-init path from the baked image — same discipline as chronyConf above.
+	// DUAL-SOURCE DISCIPLINE: the unit body lives in vsockNTPUnit (the single
+	// source), which must stay BYTE-IDENTICAL to the checked-in
+	// scripts/bladerunner-vsock-ntp.service (which the image-build arms --copy-in)
+	// except for the templated port, whose default IS the 18557 hardcoded in that
+	// file. TestProvisioningAssetsMatchCheckedInFiles guards the byte-identity —
+	// same discipline as chronyConf above.
 	b.WriteString("\n# --- vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder ---\n")
-	fmt.Fprintf(&b, "cat >/etc/systemd/system/bladerunner-vsock-ntp.service <<'UNIT'\n"+
-		"[Unit]\nDescription=Bladerunner vsock NTP forward (guest UDP 123 -> host vsock)\n"+
-		"After=network.target\nConditionPathExists=/usr/bin/socat\nConditionPathExists=/dev/vsock\n\n"+
-		"[Service]\nType=simple\n"+
-		"ExecStart=/usr/bin/socat UDP4-RECVFROM:123,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:%d\n"+
-		"Restart=always\nRestartSec=1\n\n"+
-		"[Install]\nWantedBy=multi-user.target\nUNIT\n", cfg.VsockNTPPort)
+	b.WriteString("cat >/etc/systemd/system/bladerunner-vsock-ntp.service <<'UNIT'\n")
+	b.WriteString(vsockNTPUnit(cfg.VsockNTPPort))
+	b.WriteString("UNIT\n")
 	b.WriteString("systemctl daemon-reload\n")
 	b.WriteString("systemctl enable --now bladerunner-vsock-ntp.service || true\n")
 
@@ -826,7 +839,72 @@ func buildMinimalCloudInit(cfg *config.Config) (string, string) {
 	b.WriteString("    lock_passwd: true\n")
 	b.WriteString("    ssh_authorized_keys:\n")
 	fmt.Fprintf(&b, "      - %s\n", cfg.SSHPublicKey)
+	// The pre-baked image ships incus + br-agent but, unlike the full cloud-init
+	// path, no host<->guest vsock bridges — and the in-guest br-agent does not
+	// create them either. Without these socat relays the host can reach neither
+	// SSH (vsock %[1]d -> :22) nor the Incus API (vsock %[2]d -> :8443), so the
+	// guest looks dead even though it booted (#45). Emit the same bridge units
+	// the full path uses (ports templated to cfg) and enable them before the
+	// agent configures incus.
 	b.WriteString("runcmd:\n")
+	// Explicitly create the SSH user + authorized_keys. cloud-init's users module
+	// is unreliable on this image (the agent observed "unknown user incus" and
+	// key-based SSH was rejected), so mirror the full path's runcmd break-glass to
+	// guarantee a key-based way in independent of the users module and the agent.
+	b.WriteString("  - |\n")
+	fmt.Fprintf(&b, "    SSH_USER='%s'\n", cfg.SSHUser)
+	fmt.Fprintf(&b, "    SSH_PUBKEY='%s'\n", cfg.SSHPublicKey)
+	b.WriteString("    if ! id -u \"$SSH_USER\" >/dev/null 2>&1; then useradd -m -s /bin/bash \"$SSH_USER\" || true; fi\n")
+	b.WriteString("    usermod -s /bin/bash \"$SSH_USER\" 2>/dev/null || true\n")
+	b.WriteString("    [ -d \"/home/$SSH_USER\" ] || mkdir -p \"/home/$SSH_USER\"\n")
+	b.WriteString("    mkdir -p \"/home/$SSH_USER/.ssh\"\n")
+	b.WriteString("    printf '%s\\n' \"$SSH_PUBKEY\" > \"/home/$SSH_USER/.ssh/authorized_keys\"\n")
+	b.WriteString("    chmod 700 \"/home/$SSH_USER/.ssh\"\n")
+	b.WriteString("    chmod 600 \"/home/$SSH_USER/.ssh/authorized_keys\"\n")
+	b.WriteString("    chown -R \"$SSH_USER:$SSH_USER\" \"/home/$SSH_USER\" 2>/dev/null || true\n")
+	b.WriteString("    usermod -aG sudo \"$SSH_USER\" 2>/dev/null || true\n")
+	b.WriteString("    echo \"$SSH_USER ALL=(ALL) NOPASSWD:ALL\" > /etc/sudoers.d/90-bladerunner\n")
+	b.WriteString("    chmod 440 /etc/sudoers.d/90-bladerunner\n")
+	b.WriteString("    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true\n")
+	b.WriteString("  - |\n")
+	b.WriteString("    cat >/etc/systemd/system/bladerunner-vsock-ssh.service <<'UNIT'\n")
+	b.WriteString("    [Unit]\n")
+	b.WriteString("    Description=Bladerunner vsock SSH forward\n")
+	b.WriteString("    After=network.target ssh.service sshd.service\n")
+	b.WriteString("    Wants=ssh.service sshd.service\n")
+	b.WriteString("    ConditionPathExists=/usr/bin/socat\n")
+	b.WriteString("    ConditionPathExists=/dev/vsock\n")
+	b.WriteString("\n")
+	b.WriteString("    [Service]\n")
+	b.WriteString("    Type=simple\n")
+	b.WriteString("    ExecStartPre=/bin/sh -c 'until ss -tln | grep -q \":22 \"; do sleep 0.5; done'\n")
+	fmt.Fprintf(&b, "    ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:22\n", cfg.VsockSSHPort)
+	b.WriteString("    Restart=always\n")
+	b.WriteString("    RestartSec=1\n")
+	b.WriteString("\n")
+	b.WriteString("    [Install]\n")
+	b.WriteString("    WantedBy=multi-user.target\n")
+	b.WriteString("    UNIT\n")
+	b.WriteString("    cat >/etc/systemd/system/bladerunner-vsock-incus.service <<'UNIT'\n")
+	b.WriteString("    [Unit]\n")
+	b.WriteString("    Description=Bladerunner vsock Incus API forward\n")
+	b.WriteString("    After=network.target incus.service incus.socket\n")
+	b.WriteString("    Wants=incus.socket\n")
+	b.WriteString("    ConditionPathExists=/usr/bin/socat\n")
+	b.WriteString("    ConditionPathExists=/dev/vsock\n")
+	b.WriteString("\n")
+	b.WriteString("    [Service]\n")
+	b.WriteString("    Type=simple\n")
+	b.WriteString("    ExecStartPre=/bin/sh -c 'until ss -tln | grep -q \":8443 \"; do sleep 0.5; done'\n")
+	fmt.Fprintf(&b, "    ExecStart=/usr/bin/socat VSOCK-LISTEN:%d,fork,reuseaddr TCP:127.0.0.1:8443\n", cfg.VsockAPIPort)
+	b.WriteString("    Restart=always\n")
+	b.WriteString("    RestartSec=1\n")
+	b.WriteString("\n")
+	b.WriteString("    [Install]\n")
+	b.WriteString("    WantedBy=multi-user.target\n")
+	b.WriteString("    UNIT\n")
+	b.WriteString("    systemctl daemon-reload\n")
+	b.WriteString("    systemctl enable --now bladerunner-vsock-ssh.service bladerunner-vsock-incus.service\n")
 	b.WriteString("  - [systemctl, enable, --now, br-agent.service]\n")
 
 	metaData := fmt.Sprintf("instance-id: bladerunner-%s\nlocal-hostname: %s\n", cfg.Name, cfg.Hostname)
