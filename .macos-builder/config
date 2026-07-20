@@ -2,7 +2,15 @@ app_path = dist-dmg/Bladerunner.app
 volname = Bladerunner
 bundle_id = co.stuffbucket.bladerunner
 entitlements = virtualization
-artifact = dmg
+# Emit both the drag-install DMG and the self-update `updater` artifact
+# (a stapled Bladerunner.app.tar.gz + Ed25519 .sig + .sha256). The updater
+# feeds `br self-update` (see internal/update). Emitting `updater` requires the
+# builder's TAURI_SIGNING_* secrets + a widened client policy — see the PR body.
+artifact = dmg,updater
 # Match the CLI tarball naming (bladerunner_<version>_darwin_aarch64.tar.gz) so
 # the DMG is self-describing: {version} is the release tag without leading 'v'.
 dmg_name = bladerunner_{version}_darwin_aarch64.dmg
+# Name of the self-update tarball the updater artifact produces. `br self-update`
+# resolves the actual URL from the published manifest, so this only sets the
+# artifact's filename.
+updater_name = Bladerunner.app.tar.gz
