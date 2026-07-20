@@ -26,9 +26,10 @@ recovery layer for exactly the case the host-side reconnect path cannot reach
   install failure must never strand the guest with zero time sync).
 - **The NTP source is the *host clock*, served over vsock** (not the public
   Debian pool). chrony now points at `server 127.0.0.1 iburst prefer minpoll 4
-  maxpoll 6`, which a guest-local socat bridge
-  (`internal/provision/scripts/bladerunner-vsock-ntp.service`:
-  `UDP4-RECVFROM:123,fork` ↔ `VSOCK-CONNECT:2:<VsockNTPPort>`) relays over vsock
+  maxpoll 6`, which a guest-local socat bridge — the `ntp` channel of the shared
+  relay template (`bladerunner-vsock-relay@ntp`, args
+  `UDP4-RECVFROM:123,fork` ↔ `VSOCK-CONNECT:2:<VsockNTPPort>` from
+  `/etc/bladerunner/relays/ntp.env`) — relays over vsock
   to a host pseudo-NTP (SNTP) responder (`internal/timesource`,
   `cmd/bladerunner/start.go`). The responder stamps each 48-byte reply from the
   **host** wall clock as a stratum-1 source. Consequences: (1) the guest coheres
@@ -39,14 +40,15 @@ recovery layer for exactly the case the host-side reconnect path cannot reach
   tighter than the old global `8` (~256s) so a post-sleep offset is noticed
   sooner. The host responder is started **before** the VM (the vsock reverse
   forwarder has no dial retry), and the watchdog observes + bounces the
-  `bladerunner-vsock-ntp` relay alongside the other socat relays.
+  `bladerunner-vsock-relay@ntp` instance alongside the other relays.
 - **A guest-local watchdog** (`internal/provision/scripts/bladerunner-watchdog.{sh,service}`) is a
   `Type=simple` systemd service running an in-process loop. Every 60s it **logs**
-  the chrony clock offset, the RTC-vs-realtime delta, and per-forwarder health to
+  the chrony clock offset, the RTC-vs-realtime delta, and per-relay health to
   the journal — *even when healthy* — and heals conservatively:
-  `chronyc makestep` when unsynchronised; bounce the stateless socat relays
-  (incus, oidc) when the relay itself is inactive; bounce vsock-ssh **last** and
-  only when local sshd `:22` is up but the relay is dead. It **never**
+  `chronyc makestep` when unsynchronised; then, in **one loop** over the relay
+  channel table, bounce a `bladerunner-vsock-relay@<name>` instance when it is
+  inactive (oidc/ntp unconditionally; incus/ssh only when their backend `:8443`
+  / `:22` is up). ssh heals **last**. It **never**
   blanket-restarts `systemd-networkd` (that would tear down Incus container
   bridges).
 
@@ -58,21 +60,23 @@ no backstop:
 
 | Path | Where | chrony + watchdog source |
 | --- | --- | --- |
-| cloud-init bootstrap | `internal/provision/cloudinit.go` (`renderTimeHeal`) | `go:embed`s the `internal/provision/scripts/*` files (see `embed.go`) and emits them verbatim |
-| image build, virt-customize | `scripts/build-guest-image.sh` | `--copy-in internal/provision/scripts/chrony.conf` + `bladerunner-watchdog.{sh,service}` + `bladerunner-vsock-ntp.service` |
-| image build, nbd/chroot | `scripts/build-guest-image.sh` | `install` the same `internal/provision/scripts/*` files (incl. `bladerunner-vsock-ntp.service`) |
-| br-agent minimal cloud-init | `internal/provision/cloudinit.go` (`buildMinimalCloudInit`) | **provisions nothing** — relies on the pre-baked image carrying chrony + watchdog |
+| cloud-init bootstrap | `internal/provision/cloudinit.go` (`renderTimeHeal`, `renderVsockRelays`) | `go:embed`s the `internal/provision/scripts/*` files (see `embed.go`) and emits them verbatim; the vsock relays are the templated `bladerunner-vsock-relay@` unit + per-channel arg files |
+| image build, virt-customize | `scripts/build-guest-image.sh` | `--copy-in internal/provision/scripts/chrony.conf` + `bladerunner-watchdog.{sh,service}` (the relays are **not** baked — cloud-init installs them every boot after #160) |
+| image build, nbd/chroot | `scripts/build-guest-image.sh` | `install` the same `internal/provision/scripts/*` files (chrony.conf + watchdog only) |
 
-**Single source of truth:** `internal/provision/scripts/chrony.conf`,
-`internal/provision/scripts/bladerunner-watchdog.{sh,service}`, and
-`internal/provision/scripts/bladerunner-vsock-ntp.service` are the ONE canonical
-copy. The cloud-init Go path `go:embed`s them (see `internal/provision/embed.go`)
-and the image build `--copy-in`s the same files, so there is no second copy to
-keep in sync. Port values are threaded via a templated
-`/etc/default/bladerunner-watchdog` env file, not by string substitution into the
-script body; the NTP bridge's `VsockNTPPort` is the one templated value, and its
-default *is* the `18557` baked into the checked-in unit file (`vsockNTPUnit`
-re-templates that literal at render time).
+**Single source of truth:** `internal/provision/scripts/chrony.conf` and
+`internal/provision/scripts/bladerunner-watchdog.{sh,service}` are the ONE
+canonical copy; the cloud-init Go path `go:embed`s them (see
+`internal/provision/embed.go`) and the image build `--copy-in`s the same files,
+so there is no second copy to keep in sync. The four vsock relays are **not**
+image-baked at all: after #160 every boot provisions via full cloud-init, which
+installs the single `bladerunner-vsock-relay@.service` template
+(`internal/provision/scripts/bladerunner-vsock-relay@.service`, `go:embed`'d) plus
+one `/etc/bladerunner/relays/<name>.env` per channel (ssh/incus/oidc/ntp) — so
+cloud-init is the sole runtime source for the relays. Port values are threaded
+via a templated `/etc/default/bladerunner-watchdog` env file for the watchdog and
+via each channel's `RELAY_ARGS` line for the relays (e.g. the NTP bridge's
+`VsockNTPPort`), not by string substitution into a script body.
 
 CI exercises the cloud-init path (`internal/provision/cloudinit_test.go`); the
 two image-build arms `--copy-in`/`install` the identical embedded files, so they
@@ -102,7 +106,7 @@ honestly:
 - **Hypothesis-driven:** `makestep 1.0 -1` and the offset magnitude are guesses.
 - **CONFIRMED (unit-tested):** the SNTP reply byte layout (mode=4, stratum=1, VN
   echoed, client-transmit echoed into origin, host-now timestamps); cloud-init
-  emits the `bladerunner-vsock-ntp.service` unit + the host-pointed
+  emits the `bladerunner-vsock-relay@ntp` instance + the host-pointed
   `server 127.0.0.1` chrony line + the public pool dropped, all `go:embed`'d from
   `internal/provision/scripts/`.
 - **HYPOTHESIS (cannot be unit-tested here):** (1) socat
