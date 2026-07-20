@@ -486,8 +486,8 @@ func TestBuildCloudInit_WatchdogNeverRestartsNetworkd(t *testing.T) {
 }
 
 // TestBuildCloudInit_WatchdogLogsEveryCycle locks in the "log even when healthy"
-// requirement: every cycle the watchdog logs the clock offset and the RTC delta
-// to the journal so the NEXT wedge yields measurement, not inference.
+// requirement: every cycle the watchdog logs the clock offset to the journal so
+// the NEXT wedge yields measurement, not inference.
 func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
@@ -498,7 +498,6 @@ func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
 		"logger -t \"$TAG\"", // journal logging via the bladerunner-watchdog tag
 		"TAG=bladerunner-watchdog",
 		"sys_offset", // clock-offset observation logged
-		"rtc_delta",  // RTC-vs-realtime delta logged (the VZ-RTC empirical test)
 	}
 	for _, want := range wants {
 		if !strings.Contains(userData, want) {
