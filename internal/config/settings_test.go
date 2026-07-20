@@ -44,9 +44,6 @@ func TestDefaultSettingsMatchesConfigDefault(t *testing.T) {
 	if cfg.NestedVirtDisabled != before.NestedVirtDisabled {
 		t.Errorf("NestedVirtDisabled changed: %v -> %v", before.NestedVirtDisabled, cfg.NestedVirtDisabled)
 	}
-	if cfg.UseGuestAgent != before.UseGuestAgent {
-		t.Errorf("UseGuestAgent changed: %v -> %v", before.UseGuestAgent, cfg.UseGuestAgent)
-	}
 	if cfg.UseHostedGuestImage != before.UseHostedGuestImage {
 		t.Errorf("UseHostedGuestImage changed: %v -> %v", before.UseHostedGuestImage, cfg.UseHostedGuestImage)
 	}

@@ -52,19 +52,18 @@ func fontFaceCSS() string {
 // Form field names, shared by the generated HTML and the parser so they can't
 // drift.
 const (
-	fStartPolicy   = "startPolicy"
-	fCPUs          = "cpus"
-	fMemoryGiB     = "memoryGiB"
-	fDiskSizeGiB   = "diskSizeGiB"
-	fNetworkMode   = "networkMode"
-	fBridgeIface   = "bridgeInterface"
-	fImageKind     = "imageKind"
-	fImageURL      = "imageURL"
-	fImagePath     = "imagePath"
-	fNestedVirt    = "nestedVirt"
-	fUseGuestAgent = "useGuestAgent"
-	fShowConsole   = "showConsole"
-	fWaitForIncus  = "waitForIncus"
+	fStartPolicy  = "startPolicy"
+	fCPUs         = "cpus"
+	fMemoryGiB    = "memoryGiB"
+	fDiskSizeGiB  = "diskSizeGiB"
+	fNetworkMode  = "networkMode"
+	fBridgeIface  = "bridgeInterface"
+	fImageKind    = "imageKind"
+	fImageURL     = "imageURL"
+	fImagePath    = "imagePath"
+	fNestedVirt   = "nestedVirt"
+	fShowConsole  = "showConsole"
+	fWaitForIncus = "waitForIncus"
 
 	// valTrue is the canonical checked value emitted by the form's checkboxes.
 	valTrue = "true"
@@ -78,19 +77,18 @@ func boolFromForm(v string) bool { return v == valTrue || v == "on" || v == "1" 
 // inputs hold, so generation and round-trip tests share one mapping.
 func valuesFromSettings(s config.Settings) map[string]string {
 	return map[string]string{
-		fStartPolicy:   string(s.StartPolicy),
-		fCPUs:          strconv.FormatUint(uint64(s.CPUs), 10),
-		fMemoryGiB:     strconv.FormatUint(s.MemoryGiB, 10),
-		fDiskSizeGiB:   strconv.Itoa(s.DiskSizeGiB),
-		fNetworkMode:   string(s.NetworkMode),
-		fBridgeIface:   s.BridgeInterface,
-		fImageKind:     string(s.Image.Kind),
-		fImageURL:      s.Image.URL,
-		fImagePath:     s.Image.Path,
-		fNestedVirt:    string(s.NestedVirt),
-		fUseGuestAgent: strconv.FormatBool(s.UseGuestAgent),
-		fShowConsole:   strconv.FormatBool(s.ShowConsole),
-		fWaitForIncus:  time.Duration(s.WaitForIncus).String(),
+		fStartPolicy:  string(s.StartPolicy),
+		fCPUs:         strconv.FormatUint(uint64(s.CPUs), 10),
+		fMemoryGiB:    strconv.FormatUint(s.MemoryGiB, 10),
+		fDiskSizeGiB:  strconv.Itoa(s.DiskSizeGiB),
+		fNetworkMode:  string(s.NetworkMode),
+		fBridgeIface:  s.BridgeInterface,
+		fImageKind:    string(s.Image.Kind),
+		fImageURL:     s.Image.URL,
+		fImagePath:    s.Image.Path,
+		fNestedVirt:   string(s.NestedVirt),
+		fShowConsole:  strconv.FormatBool(s.ShowConsole),
+		fWaitForIncus: time.Duration(s.WaitForIncus).String(),
 	}
 }
 
@@ -139,9 +137,6 @@ func parseSettingsForm(posted map[string]string, base config.Settings) (config.S
 			return config.Settings{}, fmt.Errorf("disk size: %w", err)
 		}
 		s.DiskSizeGiB = n
-	}
-	if v, ok := get(fUseGuestAgent); ok {
-		s.UseGuestAgent = boolFromForm(v)
 	}
 	if v, ok := get(fShowConsole); ok {
 		s.ShowConsole = boolFromForm(v)
@@ -215,8 +210,8 @@ func applySettingsForm(rawJSON, stateDir string, vmRunning bool) settingsSaveOut
 
 // settingsRequiresRestart reports whether the change from old to new touches a
 // field that only takes effect on the next VM start (CPUs/memory/disk/network/
-// image/nested-virt/guest-agent). StartPolicy and a bare bridge-iface tweak
-// while shared are menubar-only and don't need a restart.
+// image/nested-virt). StartPolicy and a bare bridge-iface tweak while shared are
+// menubar-only and don't need a restart.
 func settingsRequiresRestart(old, neu config.Settings) bool {
 	return old.CPUs != neu.CPUs ||
 		old.MemoryGiB != neu.MemoryGiB ||
@@ -224,7 +219,6 @@ func settingsRequiresRestart(old, neu config.Settings) bool {
 		old.NetworkMode != neu.NetworkMode ||
 		old.BridgeInterface != neu.BridgeInterface ||
 		old.NestedVirt != neu.NestedVirt ||
-		old.UseGuestAgent != neu.UseGuestAgent ||
 		old.ShowConsole != neu.ShowConsole ||
 		old.Image != neu.Image
 }
@@ -330,12 +324,6 @@ func settingsFormHTML(s config.Settings) string {
 		{string(config.NestedAuto), "Auto (where supported)"},
 		{string(config.NestedDisabled), "Disabled"},
 	})))
-	checked := ""
-	if v[fUseGuestAgent] == valTrue {
-		checked = " checked"
-	}
-	b.WriteString(srow("", "In-guest boot agent",
-		fmt.Sprintf(`<input class="sw" type="checkbox" name=%q%s>`, fUseGuestAgent, checked)))
 	consoleChecked := ""
 	if v[fShowConsole] == valTrue {
 		consoleChecked = " checked"

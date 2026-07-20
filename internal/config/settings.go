@@ -179,9 +179,8 @@ type Settings struct {
 	Image ImageSource `json:"image"`
 
 	// Advanced.
-	NestedVirt    NestedVirtSetting `json:"nestedVirt"`
-	UseGuestAgent bool              `json:"useGuestAgent"`
-	WaitForIncus  Duration          `json:"waitForIncus"`
+	NestedVirt   NestedVirtSetting `json:"nestedVirt"`
+	WaitForIncus Duration          `json:"waitForIncus"`
 
 	// ShowConsole opens the VZ serial/framebuffer console window on start. Off by
 	// default: the window freezes at the kernel hand-off (the cloud kernel logs
@@ -204,7 +203,6 @@ func DefaultSettings() Settings {
 		BridgeInterface: DefaultBridgeInterface,
 		Image:           ImageSource{Kind: ImageDebian},
 		NestedVirt:      NestedAuto,
-		UseGuestAgent:   false,
 		WaitForIncus:    Duration(DefaultTimeout),
 		ShowConsole:     false,
 	}
@@ -345,7 +343,6 @@ func (s Settings) ApplyTo(cfg *Config) {
 		cfg.BridgeInterface = s.BridgeInterface
 	}
 	cfg.NestedVirtDisabled = s.NestedVirt == NestedDisabled
-	cfg.UseGuestAgent = s.UseGuestAgent
 	cfg.WaitForIncus = time.Duration(s.WaitForIncus)
 	cfg.GUI = s.ShowConsole
 

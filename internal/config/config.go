@@ -37,11 +37,6 @@ const (
 	DefaultLocalNTPPort  = 15557
 	DefaultVsockNTPPort  = 18557
 
-	// DefaultAgentVsockPort is the host vsock port the in-guest br-agent dials
-	// to receive configuration commands. The host listens on this port (CID 2
-	// from inside the guest).
-	DefaultAgentVsockPort = 19001
-
 	// Default OIDC client ID and audience baked into Incus config.
 	DefaultOIDCClientID = "bladerunner"
 	DefaultOIDCAudience = "bladerunner"
@@ -138,16 +133,6 @@ type Config struct {
 	VsockOIDCPort           uint32
 	LocalNTPPort            int
 	VsockNTPPort            uint32
-	// AgentVsockPort is the host vsock port that br-agent (inside the guest)
-	// dials to participate in the configuration handshake. Default 19001.
-	AgentVsockPort uint32
-	// UseGuestAgent enables the vsock-native guest agent handshake path.
-	// When true, BuildCloudInit emits a minimal user-data form (SSH key +
-	// systemctl enable br-agent) and the host runs the agent listener.
-	// Default false for backwards compatibility with the legacy
-	// cloud-init bootstrap script. Requires br-agent to be present in the
-	// guest image (see #45) or installed via cloud-init user override.
-	UseGuestAgent bool
 	// OIDCIssuerURL is the issuer URL advertised in discovery and tokens. It uses
 	// the host provider's loopback port (LocalOIDCPort) so it resolves identically
 	// from inside the VM (Incus, via the guest→host vsock bridge) and on the host
@@ -325,8 +310,6 @@ func Default(baseDir string) (*Config, error) {
 		VsockOIDCPort:       DefaultVsockOIDCPort,
 		LocalNTPPort:        DefaultLocalNTPPort,
 		VsockNTPPort:        DefaultVsockNTPPort,
-		AgentVsockPort:      DefaultAgentVsockPort,
-		UseGuestAgent:       false,
 		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultLocalOIDCPort),
 		OIDCClientID:        DefaultOIDCClientID,
 		OIDCAudience:        DefaultOIDCAudience,
@@ -428,15 +411,6 @@ func (c *Config) validatePorts() error {
 	}
 	if c.VsockSSHPort == c.VsockAPIPort {
 		return errors.New("guest vsock ssh and api ports must differ")
-	}
-	if c.UseGuestAgent && c.AgentVsockPort == 0 {
-		return errors.New("agent vsock port must be set when use-guest-agent is true")
-	}
-	if c.AgentVsockPort != 0 {
-		switch c.AgentVsockPort {
-		case c.VsockSSHPort, c.VsockAPIPort, c.VsockOIDCPort, c.VsockNTPPort:
-			return errors.New("agent vsock port must differ from ssh/api/oidc/ntp vsock ports")
-		}
 	}
 	if c.VsockNTPPort != 0 {
 		switch c.VsockNTPPort {
