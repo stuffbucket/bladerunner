@@ -238,10 +238,18 @@ func DefaultBaseImageURL(goarch string) (string, error) {
 // --cloud-init CLI flag as a scriptable/non-interactive escape hatch.
 const ForceCloudInitEnvVar = "BLADERUNNER_FORCE_CLOUD_INIT"
 
-// ForceCloudInit reports whether the forced-cloud-init escape hatch is set via
-// the ForceCloudInitEnvVar environment variable.
-func ForceCloudInit() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(ForceCloudInitEnvVar))) {
+// ForceHostedImageEnvVar, when set to a truthy value ("1", "true", "yes", "on"),
+// forces the pre-baked hosted guest image + agent path. It mirrors the
+// --hosted-image CLI flag and completes the override surface symmetric to
+// ForceCloudInitEnvVar: it lets a caller (e.g. the e2e boot-verify) deterministic-
+// ally select the pre-baked image on ANY branch regardless of the built-in
+// default. If both force envs are truthy, hosted wins here (the CLI rejects the
+// combination up front; this only guards against a lower-level double-set).
+const ForceHostedImageEnvVar = "BLADERUNNER_FORCE_HOSTED_IMAGE"
+
+// envTruthy reports whether the named env var is set to a truthy token.
+func envTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
 	case "1", "true", "yes", "on":
 		return true
 	default:
@@ -249,12 +257,27 @@ func ForceCloudInit() bool {
 	}
 }
 
+// ForceCloudInit reports whether the forced-cloud-init escape hatch is set via
+// the ForceCloudInitEnvVar environment variable.
+func ForceCloudInit() bool {
+	return envTruthy(ForceCloudInitEnvVar)
+}
+
+// ForceHostedImage reports whether the force-hosted-image override is set via the
+// ForceHostedImageEnvVar environment variable.
+func ForceHostedImage() bool {
+	return envTruthy(ForceHostedImageEnvVar)
+}
+
 // DefaultUseHostedGuestImage reports whether a fresh install should use the
 // pre-baked hosted guest image. It is true (#155) unless the forced-cloud-init
-// escape hatch is engaged, in which case the legacy Debian + cloud-init path is
-// selected. This is the single source of truth for the built-in default that
-// both Default() and DefaultSettings() consult.
+// escape hatch is engaged (and force-hosted is not also set, which wins). This is
+// the single source of truth for the built-in default that both Default() and
+// DefaultSettings() consult.
 func DefaultUseHostedGuestImage() bool {
+	if ForceHostedImage() {
+		return true
+	}
 	return !ForceCloudInit()
 }
 

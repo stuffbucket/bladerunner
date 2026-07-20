@@ -41,6 +41,7 @@ var startFlags struct {
 	useAgent    bool
 	noAgent     bool
 	cloudInit   bool
+	hostedImage bool
 	noNested    bool
 	restoreFrom string
 }
@@ -66,6 +67,7 @@ func init() {
 	f.BoolVar(&startFlags.useAgent, "use-guest-agent", false, "Use the in-guest br-agent for boot config (requires pre-baked image or user-side install)")
 	f.BoolVar(&startFlags.noAgent, "no-agent", false, "Force the legacy cloud-init/HTTP-polling path even if use-guest-agent is enabled")
 	f.BoolVar(&startFlags.cloudInit, "cloud-init", false, "Escape hatch: force the legacy Debian genericcloud + first-boot cloud-init path instead of the default pre-baked guest image (also settable via BLADERUNNER_FORCE_CLOUD_INIT=1)")
+	f.BoolVar(&startFlags.hostedImage, "hosted-image", false, "Force the pre-baked hosted guest image + agent path regardless of defaults (also settable via BLADERUNNER_FORCE_HOSTED_IMAGE=1; mutually exclusive with --cloud-init)")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
 	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
 }
@@ -179,7 +181,7 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 	// and disables the hosted image + agent handshake (and its auto-fallback), so
 	// the whole boot follows the cloud-init path. A custom --image-url/--image-path
 	// below still wins (it sets an explicit source), but the agent stays off.
-	if apply("cloud-init") && startFlags.cloudInit {
+	if (apply("cloud-init") && startFlags.cloudInit) || config.ForceCloudInit() {
 		if url, err := config.DebianTrixieGenericCloudURL(cfg.Arch); err == nil {
 			cfg.BaseImageURL = url
 			cfg.BaseImageSHA512 = config.DebianTrixieGenericCloudSHA512(cfg.Arch)
@@ -187,6 +189,22 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 		cfg.UseHostedGuestImage = false
 		cfg.UseGuestAgent = false
 		cfg.HostedImageFallback = false
+	}
+	// --hosted-image forces the pre-baked hosted image + agent path regardless of
+	// the built-in default or a persisted Settings image choice. Symmetric to
+	// --cloud-init, it completes the override surface and lets the e2e boot-verify
+	// deterministically select the pre-baked image on any branch. It keeps the
+	// hosted auto-fallback armed (fail-closed checksum, warned Debian fallback).
+	if (apply("hosted-image") && startFlags.hostedImage) || config.ForceHostedImage() {
+		if url, err := config.HostedGuestImageURL(cfg.Arch); err == nil {
+			cfg.BaseImageURL = url
+		}
+		cfg.BaseImageSHA512 = ""
+		cfg.BaseImageExpectedSHA256 = ""
+		cfg.BaseImagePath = ""
+		cfg.UseHostedGuestImage = true
+		cfg.UseGuestAgent = true
+		cfg.HostedImageFallback = true
 	}
 	if apply("no-nested-virt") {
 		cfg.NestedVirtDisabled = startFlags.noNested
@@ -212,10 +230,29 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 	}
 }
 
+// validateImageOverrideFlags rejects contradictory image-selection overrides.
+// --cloud-init (force Debian + cloud-init) and --hosted-image (force the
+// pre-baked hosted image) are mutually exclusive, whether requested via the CLI
+// flags or their BLADERUNNER_FORCE_* env equivalents — asking for both at once is
+// a user error, not something to resolve silently by precedence.
+func validateImageOverrideFlags() error {
+	cloudInit := startFlags.cloudInit || config.ForceCloudInit()
+	hosted := startFlags.hostedImage || config.ForceHostedImage()
+	if cloudInit && hosted {
+		return fmt.Errorf("--cloud-init and --hosted-image are mutually exclusive " +
+			"(also check BLADERUNNER_FORCE_CLOUD_INIT / BLADERUNNER_FORCE_HOSTED_IMAGE)")
+	}
+	return nil
+}
+
 //nolint:gocyclo // runStart was already at the gocyclo ceiling; the applyBootManifest guard for `br boot` tips it one over with essential error propagation.
 func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	if err := validateImageOverrideFlags(); err != nil {
+		return err
+	}
 
 	// A cartridge boot OWNS the mounted image: detach it on the way out. This
 	// defer is registered first so, running LIFO, it executes LAST — after the

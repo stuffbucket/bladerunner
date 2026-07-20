@@ -215,12 +215,44 @@ func TestResolveBaseImageURL(t *testing.T) {
 
 func TestDefaultConfigUseHostedGuestImage(t *testing.T) {
 	t.Setenv(ForceCloudInitEnvVar, "")
+	t.Setenv(ForceHostedImageEnvVar, "")
 	cfg, err := Default(t.TempDir())
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
 	if !cfg.UseHostedGuestImage {
 		t.Error("Default config should use the pre-baked hosted guest image (#155)")
+	}
+}
+
+// TestDefaultUseHostedGuestImage_EnvOverrides covers the two force env vars and
+// their precedence: force-hosted wins over force-cloud-init (the CLI rejects the
+// combination up front; this guards the lower-level resolution).
+func TestDefaultUseHostedGuestImage_EnvOverrides(t *testing.T) {
+	tests := []struct {
+		name       string
+		cloudInit  string
+		hosted     string
+		wantHosted bool
+	}{
+		{"neither set -> hosted default", "", "", true},
+		{"force cloud-init -> Debian", "1", "", false},
+		{"force hosted -> hosted", "", "1", true},
+		{"both set -> hosted wins", "1", "1", true},
+		{"cloud-init truthy word", "true", "", false},
+		{"hosted truthy word", "", "yes", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(ForceCloudInitEnvVar, tt.cloudInit)
+			t.Setenv(ForceHostedImageEnvVar, tt.hosted)
+			if got := DefaultUseHostedGuestImage(); got != tt.wantHosted {
+				t.Errorf("DefaultUseHostedGuestImage() = %v, want %v", got, tt.wantHosted)
+			}
+			if got := ForceHostedImage(); got != (tt.hosted != "") {
+				t.Errorf("ForceHostedImage() = %v, want %v", got, tt.hosted != "")
+			}
+		})
 	}
 }
 
