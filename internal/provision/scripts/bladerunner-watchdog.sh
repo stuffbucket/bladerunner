@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # bladerunner-watchdog.sh — guest-LOCAL wake-heal backstop.
 #
-# SINGLE SOURCE OF TRUTH: this file is checked in and --copy-in'd by the image
-# build (scripts/build-guest-image.sh). The cloud-init path embeds a byte-for-
-# byte copy of this body in internal/provision/cloudinit.go; keep them in sync.
+# SINGLE SOURCE OF TRUTH: this file is checked in once and consumed two ways —
+# --copy-in'd by the image build (scripts/build-guest-image.sh) and go:embed'd
+# into the cloud-init path (internal/provision/cloudinit.go). There is no
+# duplicated copy to keep in sync.
+#
+# SINGLE OWNER OF POST-SLEEP RECOVERY: this always-running loop is the one place
+# that heals the guest after a Mac sleep. 'br reconnect' is only a manual, faster
+# clock kick (chronyc burst+makestep) and the menubar just shows a wake banner —
+# neither re-implements the recovery below.
 #
 # WHY THIS EXISTS: when the Mac sleeps, VZ pauses the guest vCPUs with no clean
 # ACPI suspend and no paravirt "you were stopped" signal. On wake the guest has

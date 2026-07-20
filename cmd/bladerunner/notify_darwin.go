@@ -18,7 +18,7 @@ const (
 	bodyRecovered    = "Your VM recovered and is responding again."
 	bodyUnresponsive = "Your VM is unresponsive — try Restart."
 	bodyStopped      = "Your VM stopped."
-	bodyReconnecting = "Reconnecting after sleep…"
+	bodyReconnecting = "Woke from sleep — the VM is re-syncing its clock…"
 	bodyEngineUpdate = "An update is ready — choose “Restart VM to finish update”."
 )
 
@@ -179,8 +179,10 @@ func (m *vmNotifier) notifyEngineUpdate() {
 	m.n.notify(notifyTitle, bodyEngineUpdate)
 }
 
-// onWake emits the one-shot "reconnecting after sleep" banner when the poll loop
-// detects the host slept and woke. Rate-limited like any other banner.
+// onWake emits the one-shot "woke from sleep" banner when the poll loop detects
+// the host slept and woke. The guest watchdog does the actual re-sync; this only
+// tells the user why the VM may be briefly out of sync. Rate-limited like any
+// other banner.
 func (m *vmNotifier) onWake(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
