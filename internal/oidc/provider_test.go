@@ -55,6 +55,16 @@ func TestDiscoveryEndpoint(t *testing.T) {
 	if doc.JWKSURI == "" || doc.TokenEndpoint == "" {
 		t.Fatal("missing endpoints in discovery")
 	}
+	// The SSH-key CLI grant was removed; discovery must advertise only the
+	// authorization_code grant that the browser SSO flow uses.
+	for _, g := range doc.GrantTypesSupported {
+		if strings.Contains(g, "ssh-key") {
+			t.Fatalf("discovery still advertises removed ssh-key grant: %q", doc.GrantTypesSupported)
+		}
+	}
+	if len(doc.GrantTypesSupported) != 1 || doc.GrantTypesSupported[0] != grantTypeAuthCode {
+		t.Fatalf("grant_types_supported=%v want [%s]", doc.GrantTypesSupported, grantTypeAuthCode)
+	}
 }
 
 func TestJWKSEndpoint(t *testing.T) {
@@ -81,16 +91,15 @@ func TestJWKSEndpoint(t *testing.T) {
 	}
 }
 
-func TestTokenEndpoint(t *testing.T) {
+// TestTokenEndpointRejectsUnsupportedGrants pins the token endpoint's grant
+// dispatch after the dead SSH-key CLI grant was removed: only authorization_code
+// is served (exercised end-to-end by the SSO tests), and every other grant —
+// including the removed SSH-key URN — is rejected as unsupported. A POST is
+// required.
+func TestTokenEndpointRejectsUnsupportedGrants(t *testing.T) {
 	p := newTestProvider(t)
 	srv := httptest.NewServer(p.Handler())
 	defer srv.Close()
-
-	line := genSSHKeyPair(t, "alice@host")
-	ident, err := p.store.Add(line)
-	if err != nil {
-		t.Fatalf("Add: %v", err)
-	}
 
 	tests := []struct {
 		name       string
@@ -99,36 +108,25 @@ func TestTokenEndpoint(t *testing.T) {
 		wantError  string
 	}{
 		{
-			name: "success",
+			name: "removed ssh-key grant is unsupported",
 			form: url.Values{
-				formFieldGrantType: {grantTypeSSHKey},
-				"fingerprint":      {ident.Fingerprint},
-				"client_id":        {oidcClientID},
-			},
-			wantStatus: http.StatusOK,
-		},
-		{
-			name: "unknown fingerprint",
-			form: url.Values{
-				formFieldGrantType: {grantTypeSSHKey},
-				"fingerprint":      {"SHA256:notreal"},
-			},
-			wantStatus: http.StatusUnauthorized,
-			wantError:  "invalid_grant",
-		},
-		{
-			name: "missing fingerprint",
-			form: url.Values{
-				formFieldGrantType: {grantTypeSSHKey},
+				formFieldGrantType: {"urn:bladerunner:params:oauth:grant-type:ssh-key"},
+				"fingerprint":      {"SHA256:whatever"},
 			},
 			wantStatus: http.StatusBadRequest,
-			wantError:  "invalid_request",
+			wantError:  "unsupported_grant_type",
 		},
 		{
-			name: "unsupported grant type",
+			name: "client_credentials is unsupported",
 			form: url.Values{
 				formFieldGrantType: {"client_credentials"},
 			},
+			wantStatus: http.StatusBadRequest,
+			wantError:  "unsupported_grant_type",
+		},
+		{
+			name:       "missing grant type is unsupported",
+			form:       url.Values{},
 			wantStatus: http.StatusBadRequest,
 			wantError:  "unsupported_grant_type",
 		},
@@ -148,28 +146,25 @@ func TestTokenEndpoint(t *testing.T) {
 			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			if tc.wantError != "" {
-				if got, _ := body["error"].(string); got != tc.wantError {
-					t.Fatalf("error=%v want=%s", body["error"], tc.wantError)
-				}
-				return
-			}
-			token, _ := body["access_token"].(string)
-			if token == "" {
-				t.Fatal("empty access_token")
-			}
-			if !strings.Contains(token, ".") {
-				t.Fatalf("token does not look like a JWT: %s", token)
-			}
-			// Verify via the provider's issuer.
-			claims, err := p.issuer.Verify(token)
-			if err != nil {
-				t.Fatalf("Verify: %v", err)
-			}
-			if claims.Subject != ident.Fingerprint {
-				t.Fatalf("sub mismatch")
+			if got, _ := body["error"].(string); got != tc.wantError {
+				t.Fatalf("error=%v want=%s", body["error"], tc.wantError)
 			}
 		})
+	}
+}
+
+func TestTokenEndpointRejectsNonPOST(t *testing.T) {
+	p := newTestProvider(t)
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + pathToken)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
 }
 
