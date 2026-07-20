@@ -1,0 +1,57 @@
+# Gated, manual end-to-end boot smoke test (#154).
+#
+# This boots a REAL Bladerunner VM via Virtualization.framework and proves Incus
+# answers inside the guest. It is intentionally:
+#
+#   * workflow_dispatch ONLY (manual) — never triggered by push/PR.
+#   * NON-BLOCKING — it is not wired as a required status check, so a slow or
+#     flaky boot can never block a merge.
+#
+# IMPORTANT — must run on a SELF-HOSTED macOS runner:
+#   GitHub-HOSTED macOS runners cannot run nested Virtualization.framework, so a
+#   VZ VM will not start there. This job targets the stuffbucket self-hosted mac
+#   mini (labels: [self-hosted, macOS]). If no self-hosted runner is available,
+#   run it locally instead (see docs/e2e-boot-smoke.md).
+name: e2e-boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      prebaked:
+        description: "Drive the pre-baked/agent provisioning path (--use-guest-agent) instead of cloud-init"
+        type: boolean
+        default: false
+      boot_timeout:
+        description: "Readiness budget for first boot (Go duration, e.g. 15m)"
+        type: string
+        default: "15m"
+
+permissions:
+  contents: read
+
+jobs:
+  boot-smoke:
+    name: Boot smoke (self-hosted macOS)
+    # Self-hosted because hosted macOS runners cannot nest Virtualization.framework.
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build + codesign br (Virtualization entitlement)
+        run: make build && make sign
+
+      - name: Run gated boot smoke test
+        env:
+          BLADERUNNER_E2E: "1"
+          BLADERUNNER_E2E_PREBAKED: ${{ inputs.prebaked && '1' || '0' }}
+          BLADERUNNER_E2E_BOOT_TIMEOUT: ${{ inputs.boot_timeout }}
+          # Reuse the just-signed binary rather than rebuilding inside the test.
+          BLADERUNNER_E2E_BIN: ${{ github.workspace }}/bin/br
+        run: go test -run TestE2EBootSmoke -count=1 -timeout 30m -v ./test/e2e/
