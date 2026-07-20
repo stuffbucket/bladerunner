@@ -18,6 +18,7 @@ on:
     branches: [main]
     paths:
       - scripts/build-guest-image.sh
+      - internal/provision/scripts/**
       - .github/workflows/build-guest-image.yml
   workflow_dispatch:
 

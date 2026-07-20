@@ -22,6 +22,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Time-heal provisioning assets (chrony.conf + watchdog + vsock-ntp unit) live
+# with the Go package that go:embed's them — internal/provision/scripts/ is the
+# SINGLE SOURCE OF TRUTH shared by the cloud-init and image-build paths.
+ASSET_DIR="$(cd -- "${SCRIPT_DIR}/../internal/provision/scripts" && pwd)"
 WORK_DIR="${WORK_DIR:-$(mktemp -d)}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -152,21 +156,21 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         --install "incus,incus-client,socat,jq,openssh-server,chrony"
         --run-command "systemctl enable incus incus.socket ssh"
         # chrony swap (suspend-tuned makestep) + guest-local wake-heal watchdog.
-        # Single source of truth: scripts/chrony.conf + scripts/bladerunner-watchdog.{sh,service}.
-        --copy-in     "${SCRIPT_DIR}/chrony.conf:/etc/chrony"
+        # Single source of truth: internal/provision/scripts/{chrony.conf,bladerunner-watchdog.{sh,service}}.
+        --copy-in     "${ASSET_DIR}/chrony.conf:/etc/chrony"
         --run-command "systemctl enable chrony"
         # Mask timesyncd once chrony is INSTALLED (half-removal guard). Offline
         # (virt-customize chroot) systemd is not running, so guard on the chronyd
         # binary, not 'is-active' which would always be false here.
         --run-command "command -v chronyd >/dev/null 2>&1 && (systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true) || true"
-        --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.sh:/usr/local/sbin"
+        --copy-in     "${ASSET_DIR}/bladerunner-watchdog.sh:/usr/local/sbin"
         --run-command "chmod 0755 /usr/local/sbin/bladerunner-watchdog.sh"
-        --copy-in     "${SCRIPT_DIR}/bladerunner-watchdog.service:/etc/systemd/system"
+        --copy-in     "${ASSET_DIR}/bladerunner-watchdog.service:/etc/systemd/system"
         --run-command "systemctl enable bladerunner-watchdog.service"
         # vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder. Baked
         # into the image so it is present regardless of cloud-init timing.
-        # Single source: scripts/bladerunner-vsock-ntp.service.
-        --copy-in     "${SCRIPT_DIR}/bladerunner-vsock-ntp.service:/etc/systemd/system"
+        # Single source: internal/provision/scripts/bladerunner-vsock-ntp.service.
+        --copy-in     "${ASSET_DIR}/bladerunner-vsock-ntp.service:/etc/systemd/system"
         --run-command "systemctl enable bladerunner-vsock-ntp.service"
         --append-line "/etc/initramfs-tools/modules:vmw_vsock_virtio_transport"
         --append-line "/etc/initramfs-tools/modules:vhost_vsock"
@@ -236,10 +240,10 @@ else
     # dirs already exist in the base image). chrony.conf is written AFTER apt
     # installs chrony inside the chroot (its /etc/chrony dir is created by the
     # package), via the single-source-of-truth file staged here.
-    install -m 0755 "${SCRIPT_DIR}/bladerunner-watchdog.sh" "${MNT}/usr/local/sbin/bladerunner-watchdog.sh"
-    install -m 0644 "${SCRIPT_DIR}/bladerunner-watchdog.service" "${MNT}/etc/systemd/system/bladerunner-watchdog.service"
-    install -m 0644 "${SCRIPT_DIR}/bladerunner-vsock-ntp.service" "${MNT}/etc/systemd/system/bladerunner-vsock-ntp.service"
-    install -m 0644 "${SCRIPT_DIR}/chrony.conf" "${MNT}/root/bladerunner-chrony.conf"
+    install -m 0755 "${ASSET_DIR}/bladerunner-watchdog.sh" "${MNT}/usr/local/sbin/bladerunner-watchdog.sh"
+    install -m 0644 "${ASSET_DIR}/bladerunner-watchdog.service" "${MNT}/etc/systemd/system/bladerunner-watchdog.service"
+    install -m 0644 "${ASSET_DIR}/bladerunner-vsock-ntp.service" "${MNT}/etc/systemd/system/bladerunner-vsock-ntp.service"
+    install -m 0644 "${ASSET_DIR}/chrony.conf" "${MNT}/root/bladerunner-chrony.conf"
 
     chroot "${MNT}" /bin/bash -eu <<EOS
 export DEBIAN_FRONTEND=noninteractive
