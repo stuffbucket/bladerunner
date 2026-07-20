@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,25 +106,15 @@ func TestE2EBootSmoke(t *testing.T) {
 	}
 	t.Logf("launched `br %s` (pid %d)", strings.Join(startArgs, " "), startCmd.Process.Pid)
 
-	// Wait for Incus to answer, bounded by the boot budget. This reuses the real
-	// readiness mechanism: `br status --json` reports "running" only once the
-	// guest is up and the control server's guest-liveness probe passes.
-	if err := waitForRunning(t, bin, env, boot, startCmd, &startOut); err != nil {
-		t.Fatalf("VM did not become ready within %s: %v\n--- br start output ---\n%s",
-			boot, err, startOut.String())
-	}
-	t.Logf("VM reported running; Incus should be reachable")
-
-	// One trivial guest op proves Incus actually answers inside the guest: list
-	// instances over the local Incus API (mTLS to the guest, tunneled on vsock).
-	// An empty list is success — we only assert the API responded without error.
-	out, err := runCmd(t, bin, env, cmdTimeout, "ls", "--json")
+	// Wait for Incus to actually answer an authenticated `br ls`. That — not a
+	// bare `br status`=="running" (which reflects guest liveness, can flip
+	// optimistically mid-provision, and says nothing about client-cert
+	// authorization) — is the real readiness signal. Poll until it returns valid
+	// JSON or the boot budget elapses.
+	out, err := waitForIncus(t, bin, env, boot, startCmd, &startOut)
 	if err != nil {
-		t.Fatalf("`br ls --json` failed after VM reported ready: %v\noutput:\n%s\n--- br start output ---\n%s",
-			err, out, startOut.String())
-	}
-	if !json.Valid(bytes.TrimSpace([]byte(out))) {
-		t.Fatalf("`br ls --json` did not return valid JSON:\n%s", out)
+		t.Fatalf("Incus not reachable within %s: %v\n--- br start output ---\n%s",
+			boot, err, startOut.String())
 	}
 	t.Logf("guest op OK: `br ls --json` returned valid JSON:\n%s", strings.TrimSpace(out))
 }
@@ -253,39 +244,42 @@ func bootTimeout(t *testing.T) time.Duration {
 // waitForRunning polls `br status --json` until it reports status "running"
 // (guest up + Incus reachable), the deadline passes, or the `br start` process
 // dies early. Returns nil once running.
-func waitForRunning(t *testing.T, bin string, env []string, within time.Duration, startCmd *exec.Cmd, startOut *startLog) error {
+func waitForIncus(t *testing.T, bin string, env []string, within time.Duration, startCmd *exec.Cmd, startOut *startLog) (string, error) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	// Watch for the start process exiting early (a signing/config error would
-	// make it exit before ever reaching "running") so we fail fast instead of
+	// make it exit before Incus ever comes up) so we fail fast instead of
 	// polling for the full timeout.
 	exited := make(chan error, 1)
 	go func() { exited <- startCmd.Wait() }()
 
+	var lastErr error
 	for {
-		status, err := queryStatus(t, bin, env)
-		if err == nil {
-			switch status {
-			case "running":
-				return nil
-			case "unreachable":
-				t.Logf("status: unreachable (host up, guest not answering yet)")
-			default:
-				t.Logf("status: %s", status)
-			}
+		out, err := runCmd(t, bin, env, cmdTimeout, "ls", "--json")
+		if err == nil && json.Valid(bytes.TrimSpace([]byte(out))) {
+			return out, nil
+		}
+		lastErr = err
+		// A connection-refused / not-authorized / not-yet-up `br ls` just means
+		// keep waiting; log the status alongside for diagnosis.
+		if status, serr := queryStatus(t, bin, env); serr == nil {
+			t.Logf("status: %s; `br ls` not ready yet (will retry)", status)
 		} else {
-			t.Logf("status poll error (will retry): %v", err)
+			t.Logf("`br ls` not ready yet (will retry): %v", err)
 		}
 
 		select {
 		case werr := <-exited:
-			return &earlyExitError{err: werr, log: startOut.String()}
+			return "", &earlyExitError{err: werr, log: startOut.String()}
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return context.DeadlineExceeded
+				if lastErr != nil {
+					return "", fmt.Errorf("deadline exceeded; last `br ls` error: %w", lastErr)
+				}
+				return "", context.DeadlineExceeded
 			}
 		}
 	}
