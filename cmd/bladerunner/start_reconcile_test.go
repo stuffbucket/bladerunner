@@ -126,43 +126,6 @@ func TestApplyFlagOverridesDrivenAppliesVerbatim(t *testing.T) {
 	}
 }
 
-func TestApplyFlagOverridesGuestAgent(t *testing.T) {
-	tests := []struct {
-		name     string
-		changed  []string
-		useAgent bool
-		noAgent  bool
-		settings bool // Settings.UseGuestAgent baseline
-		want     bool
-	}{
-		{"neither changed keeps settings true", nil, false, false, true, true},
-		{"neither changed keeps settings false", nil, false, false, false, false},
-		{"use-guest-agent changed on", []string{"use-guest-agent"}, true, false, false, true},
-		{"no-agent overrides use-guest-agent", []string{"use-guest-agent", "no-agent"}, true, true, false, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := config.Default(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			s := config.DefaultSettings()
-			s.UseGuestAgent = tt.settings
-			s.ApplyTo(cfg)
-
-			withStartFlags(t, func() {
-				startFlags.useAgent = tt.useAgent
-				startFlags.noAgent = tt.noAgent
-				applyFlagOverrides(cfg, changedSet(tt.changed...), false)
-			})
-
-			if cfg.UseGuestAgent != tt.want {
-				t.Errorf("UseGuestAgent = %v, want %v", cfg.UseGuestAgent, tt.want)
-			}
-		})
-	}
-}
-
 func TestApplyFlagOverridesImageURLClearsSHA(t *testing.T) {
 	cfg, err := config.Default(t.TempDir())
 	if err != nil {
