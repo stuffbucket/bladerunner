@@ -15,9 +15,13 @@ import (
 
 // DefaultManifestURL is the HTTPS location of the update manifest. It is a
 // package variable (not a const) so tests and the --manifest flag can point at
-// an httptest server. The production value publishes alongside the release
-// artifacts.
-var DefaultManifestURL = "https://stuffbucket.co/bladerunner/latest.json"
+// an httptest server. The production value is the GitHub Pages project site
+// (stuffbucket.github.io/bladerunner), where publish-update-manifest.yml commits
+// site/public/latest.json after each release.
+//
+// NOTE: if a stuffbucket.co Pages custom domain is configured later, update this
+// URL and add a site/public/CNAME + the CNAME step in pages.yml to match.
+var DefaultManifestURL = "https://stuffbucket.github.io/bladerunner/latest.json"
 
 // manifestTimeout bounds the manifest fetch so a hung server can't wedge the
 // command.
