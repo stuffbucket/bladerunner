@@ -22,9 +22,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# Time-heal provisioning assets (chrony.conf + watchdog + vsock-ntp unit) live
-# with the Go package that go:embed's them — internal/provision/scripts/ is the
-# SINGLE SOURCE OF TRUTH shared by the cloud-init and image-build paths.
+# Time-heal provisioning assets (chrony.conf + watchdog) live with the Go
+# package that go:embed's them — internal/provision/scripts/ is the SINGLE SOURCE
+# OF TRUTH shared by the cloud-init and image-build paths. The vsock relays
+# (ssh/incus/oidc/ntp) are NOT baked here: after #160 every boot provisions via
+# full cloud-init, which installs the templated bladerunner-vsock-relay@ unit +
+# per-channel arg files fresh each boot, so baking them would be redundant.
 ASSET_DIR="$(cd -- "${SCRIPT_DIR}/../internal/provision/scripts" && pwd)"
 WORK_DIR="${WORK_DIR:-$(mktemp -d)}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
@@ -167,11 +170,10 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         --run-command "chmod 0755 /usr/local/sbin/bladerunner-watchdog.sh"
         --copy-in     "${ASSET_DIR}/bladerunner-watchdog.service:/etc/systemd/system"
         --run-command "systemctl enable bladerunner-watchdog.service"
-        # vsock NTP bridge: guest UDP 123 -> vsock -> host SNTP responder. Baked
-        # into the image so it is present regardless of cloud-init timing.
-        # Single source: internal/provision/scripts/bladerunner-vsock-ntp.service.
-        --copy-in     "${ASSET_DIR}/bladerunner-vsock-ntp.service:/etc/systemd/system"
-        --run-command "systemctl enable bladerunner-vsock-ntp.service"
+        # The vsock relays (incl. the NTP bridge) are NOT baked: cloud-init
+        # installs the templated bladerunner-vsock-relay@ unit + per-channel arg
+        # files on every boot (post-#160), so baking them would only create a
+        # stale duplicate the cloud-init run has to supersede.
         --append-line "/etc/initramfs-tools/modules:vmw_vsock_virtio_transport"
         --append-line "/etc/initramfs-tools/modules:vhost_vsock"
         --write       "/etc/bladerunner-image-version:${BUILD_DATE}"
@@ -242,7 +244,6 @@ else
     # package), via the single-source-of-truth file staged here.
     install -m 0755 "${ASSET_DIR}/bladerunner-watchdog.sh" "${MNT}/usr/local/sbin/bladerunner-watchdog.sh"
     install -m 0644 "${ASSET_DIR}/bladerunner-watchdog.service" "${MNT}/etc/systemd/system/bladerunner-watchdog.service"
-    install -m 0644 "${ASSET_DIR}/bladerunner-vsock-ntp.service" "${MNT}/etc/systemd/system/bladerunner-vsock-ntp.service"
     install -m 0644 "${ASSET_DIR}/chrony.conf" "${MNT}/root/bladerunner-chrony.conf"
 
     chroot "${MNT}" /bin/bash -eu <<EOS
@@ -298,7 +299,6 @@ systemctl enable chrony
 # (chronyd binary), not 'is-active' which is always false here.
 if command -v chronyd >/dev/null 2>&1; then systemctl disable systemd-timesyncd || true; systemctl mask systemd-timesyncd || true; fi
 systemctl enable bladerunner-watchdog.service
-systemctl enable bladerunner-vsock-ntp.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
 update-initramfs -u
