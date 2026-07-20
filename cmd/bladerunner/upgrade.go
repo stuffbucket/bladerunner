@@ -38,7 +38,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	}
 	if serverVer == version {
 		if jsonOutput {
-			return emitJSON(map[string]string{jsonFieldStatus: "up-to-date", "version": version})
+			return emitJSON(map[string]string{jsonFieldStatus: statusUpToDate, "version": version})
 		}
 		fmt.Printf("%s Server already up to date (%s)\n", success("✓"), value(version))
 		return nil

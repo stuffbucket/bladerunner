@@ -8,6 +8,9 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/update"
 )
 
+// statusUpToDate is the stable JSON/status token meaning no update was needed.
+const statusUpToDate = "up-to-date"
+
 // selfUpdateFlags holds the flags for `br self-update`.
 var selfUpdateFlags struct {
 	check       bool
@@ -86,7 +89,7 @@ func runSelfUpdateApply(ctx context.Context, opts update.Options) error {
 	}
 	if res.FromVersion == res.ToVersion {
 		if jsonOutput {
-			return emitJSON(map[string]string{jsonFieldStatus: "up-to-date", "version": res.ToVersion})
+			return emitJSON(map[string]string{jsonFieldStatus: statusUpToDate, "version": res.ToVersion})
 		}
 		fmt.Printf("%s Already up to date (%s)\n", success("✓"), value(res.ToVersion))
 		return nil
@@ -111,5 +114,5 @@ func checkStatus(available bool) string {
 	if available {
 		return "update-available"
 	}
-	return "up-to-date"
+	return statusUpToDate
 }
