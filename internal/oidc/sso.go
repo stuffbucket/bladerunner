@@ -452,7 +452,6 @@ func (p *Provider) handleAuthnConsume(w http.ResponseWriter, r *http.Request) {
 	// TLS, and stays false on the loopback HTTP transport. HttpOnly (blocks
 	// script access) and SameSite=Lax (blocks cross-site CSRF while still
 	// riding the top-level GET redirect Incus performs) are always set.
-	//nolint:gosec // G124: Secure cannot be a static true for a loopback plain-HTTP service; it is derived from r.TLS and HttpOnly+SameSite are enforced.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    sid,
@@ -465,7 +464,6 @@ func (p *Provider) handleAuthnConsume(w http.ResponseWriter, r *http.Request) {
 	// sanitizeNext restricts the target to loopback or relative URLs, collapsing
 	// any absolute non-loopback destination to "/", so the redirect cannot be
 	// steered to an attacker-controlled origin.
-	//nolint:gosec // G710: the target is sanitized by sanitizeNext (loopback/relative only) immediately above, so it cannot be an open redirect.
 	http.Redirect(w, r, sanitizeNext(r.URL.Query().Get("next")), http.StatusFound)
 }
 
@@ -547,7 +545,6 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if respType != "" && respType != responseTypeCode {
 		// redirectURI was rejected above unless it is loopback or relative, and
 		// buildErrorRedirect only appends query params without touching the host.
-		//nolint:gosec // G710: redirectURI is validated as loopback/relative above before any redirect can be issued.
 		http.Redirect(w, r, buildErrorRedirect(redirectURI, "unsupported_response_type", state), http.StatusFound)
 		return
 	}
@@ -562,7 +559,6 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			}
 			// redirectURI was rejected above unless it is loopback or relative, and
 			// buildCodeRedirect only appends query params without touching the host.
-			//nolint:gosec // G710: redirectURI is validated as loopback/relative above before any redirect can be issued.
 			http.Redirect(w, r, buildCodeRedirect(redirectURI, code, state), http.StatusFound)
 			return
 		}
