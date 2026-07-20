@@ -17,15 +17,19 @@ const sudoCmd = "sudo"
 
 var reconnectCmd = &cobra.Command{
 	Use:   "reconnect",
-	Short: "Re-sync the guest after a host sleep (clock + Incus/OIDC forwarders), without restarting",
-	Long: `Heal the running VM after the Mac has slept.
+	Short: "Nudge the guest clock back into sync after a host sleep, without restarting",
+	Long: `Heal the running VM's clock after the Mac has slept.
 
 macOS sleep freezes the guest without a clean suspend, leaving the guest clock
-behind real time — which breaks the web UI's OIDC token exchange — and the
-Incus/OIDC vsock forwarders stale. 'reconnect' pushes the host's current time
-into the guest, kicks NTP, and restarts the Incus/OIDC vsock forwarders, all
-without restarting the VM. It is best-effort: if the guest is already fully
-unresponsive, use 'br stop' + 'br start' (or the menubar's Restart).`,
+behind real time — which breaks the web UI's OIDC token exchange. The guest
+watchdog owns post-sleep recovery autonomously (it kicks chrony on the next
+60s cycle and bounces any wedged vsock relay). 'reconnect' is a manual, faster
+version of that clock kick: it forces a fresh chrony measurement and steps the
+clock NOW rather than waiting for the watchdog cycle. The authoritative time
+source is the host, reached over the SNTP-over-vsock bridge; chrony
+re-disciplines against it. It is best-effort and never restarts the VM: if the
+guest is fully unresponsive, use 'br stop' + 'br start' (or the menubar's
+Restart).`,
 	RunE: runReconnect,
 }
 
@@ -38,33 +42,26 @@ func runReconnect(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Steps, in order: push host time so OIDC tokens validate immediately (an
-	// absolute UTC epoch — TZ/DST-independent), then restart chrony (now the time
-	// source; timesyncd is masked) and bounce the stale vsock relays — incl.
-	// the host-time NTP bridge — so chrony re-disciplines against the host. The
-	// relays are now instances of the bladerunner-vsock-relay@ template unit. We
-	// deliberately do NOT restart bladerunner-vsock-relay@ssh (we are connected
-	// through it) or systemd-networkd (avoid disrupting containers).
-	epoch := time.Now().Unix()
-	steps := [][]string{
-		{sudoCmd, "-n", "date", "-s", fmt.Sprintf("@%d", epoch)},
-		{sudoCmd, "-n", "systemctl", "restart", "chrony", "bladerunner-vsock-relay@ntp", "bladerunner-vsock-relay@incus", "bladerunner-vsock-relay@oidc"},
-	}
-
-	for _, step := range steps {
-		if err := guestExec(configPath, step...); err != nil {
-			err = fmt.Errorf("reconnect failed (guest may be fully unresponsive — try a restart): %w", err)
-			if jsonOutput {
-				emitJSONError(err)
-			}
-			return err
+	// One duty: kick chrony to re-measure against the host (over the vsock SNTP
+	// bridge) and step the clock immediately. 'burst 4/4' forces a fresh sample
+	// without waiting for chrony's autonomous poll; 'makestep' then applies any
+	// offset as a step (a step never disturbs CLOCK_MONOTONIC, so timers and
+	// containers are unaffected). We no longer stamp the wall clock with
+	// 'date -s @epoch' (TZ/DST-fragile, and needed a sudo-date path) nor bounce
+	// the relays here: the NTP relay is Restart=always and the watchdog owns
+	// wedged-relay recovery, so a manual clock kick is all reconnect needs to be.
+	if err := guestExec(configPath, sudoCmd, "-n", "sh", "-c", "chronyc burst 4/4 && chronyc makestep"); err != nil {
+		err = fmt.Errorf("reconnect failed (guest may be fully unresponsive — try a restart): %w", err)
+		if jsonOutput {
+			emitJSONError(err)
 		}
+		return err
 	}
 
 	if jsonOutput {
 		return emitJSON(map[string]string{jsonFieldStatus: "reconnected"})
 	}
-	fmt.Printf("%s Re-synced the guest (pushed host time, restarted Incus/OIDC forwarders)\n", success("✓"))
+	fmt.Printf("%s Nudged the guest clock back into sync (chrony re-measured + stepped)\n", success("✓"))
 	return nil
 }
 
