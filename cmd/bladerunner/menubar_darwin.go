@@ -31,7 +31,7 @@ const startActionTimeout = 5 * time.Minute
 
 // wakeGapSeconds: if wall-clock advances far more than the poll interval between
 // two polls, the Mac slept and woke (the agent was frozen meanwhile). On wake we
-// auto-reconnect to heal the guest's clock + vsock forwarders.
+// surface a banner; the guest watchdog heals the clock + relays autonomously.
 const wakeGapSeconds = 60
 
 // status-icon rendering constants.
@@ -207,7 +207,8 @@ func onMenubarReady() {
 
 	// Poll health off the click loop so a slow probe (a wedged guest) never
 	// blocks the menu. The same loop detects host sleep/wake (a big wall-clock
-	// jump between polls) and auto-reconnects to heal the guest.
+	// jump between polls) and surfaces a banner. The guest watchdog owns the
+	// actual post-sleep recovery, so the menubar no longer auto-reconnects.
 	healthCh := make(chan vmState, 1)
 	updateCh := make(chan struct{}, 1)
 	go func() {
@@ -217,8 +218,7 @@ func onMenubarReady() {
 			st := vmHealth()
 			now := time.Now().Unix()
 			if st != vmStopped && now-lastWall > int64(menubarRefreshInterval/time.Second)+wakeGapSeconds {
-				notif.onWake(time.Now())
-				go runnerRun("reconnect") // self-heal after a detected wake
+				notif.onWake(time.Now()) // banner only; the guest watchdog self-heals
 			}
 			lastWall = now
 			// Feed every reading (not just the ones that fit in the channel) to
