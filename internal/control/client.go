@@ -17,7 +17,6 @@ type ClientConfig struct {
 }
 
 // Client sends commands to a running control listener.
-// It also implements the Controller interface for remote access.
 type Client struct {
 	address    string
 	transport  Transport
@@ -121,10 +120,10 @@ func (c *Client) sendCommand(cmd string, timeout time.Duration) (*Message, error
 	return resp, nil
 }
 
-// --- Controller interface implementation ---
-// Client implements Controller for remote VM control.
+// --- Context-aware command primitives ---
+// The convenience methods below (IsRunning/StopVM/GetStatus) build on these.
 
-// PingContext implements Controller.Ping.
+// PingContext sends a ping and reports whether the server responded.
 func (c *Client) PingContext(_ context.Context) error {
 	resp, err := c.sendCommand(CmdPing, clientPingTimeout)
 	if err != nil {
@@ -136,7 +135,7 @@ func (c *Client) PingContext(_ context.Context) error {
 	return nil
 }
 
-// StopContext implements Controller.Stop.
+// StopContext sends a stop command to the running server.
 func (c *Client) StopContext(_ context.Context) error {
 	resp, err := c.sendCommand(CmdStop, clientCmdTimeout)
 	if err != nil {
@@ -154,7 +153,7 @@ func (c *Client) StopContext(_ context.Context) error {
 	return nil
 }
 
-// StatusContext implements Controller.Status.
+// StatusContext queries the running server for its VM status.
 func (c *Client) StatusContext(_ context.Context) (string, error) {
 	resp, err := c.sendCommand(CmdStatus, clientPingTimeout)
 	if err != nil {
@@ -219,20 +218,6 @@ func (c *Client) Eject(force bool, timeoutSeconds int) error {
 		return fmt.Errorf("eject error: %s", resp.Error)
 	}
 	return nil
-}
-
-// Controller interface adapter
-
-func (c *Client) Ping(ctx context.Context) error {
-	return c.PingContext(ctx)
-}
-
-func (c *Client) Stop(ctx context.Context) error {
-	return c.StopContext(ctx)
-}
-
-func (c *Client) Status(ctx context.Context) (string, error) {
-	return c.StatusContext(ctx)
 }
 
 // --- Convenience methods (without context) ---
