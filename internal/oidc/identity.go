@@ -18,6 +18,8 @@ import (
 	"sync"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
 // Identity represents a registered SSH-key-as-identity entry.
@@ -232,15 +234,9 @@ func fingerprintToFilename(fp string) string {
 	return safe + ".pub"
 }
 
-// DefaultIdentityDir returns the directory where bladerunner stores registered identities.
-// It mirrors the XDG-compliant layout used by internal/ssh.
+// DefaultIdentityDir returns the directory where bladerunner stores registered
+// identities. It delegates to config.DefaultIdentityDir, the single source of
+// truth for the XDG-compliant identity-dir layout.
 func DefaultIdentityDir() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bladerunner", "identities")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".config", "bladerunner", "identities")
-	}
-	return filepath.Join(home, ".config", "bladerunner", "identities")
+	return config.DefaultIdentityDir()
 }

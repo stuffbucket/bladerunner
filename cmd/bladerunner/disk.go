@@ -16,6 +16,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/util"
+	"github.com/stuffbucket/bladerunner/internal/vm"
 )
 
 const (
@@ -323,8 +324,8 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	if _, err := exec.LookPath("bash"); err != nil {
 		return jsonOrError(fmt.Errorf("bash not found in PATH (required to run the build script): %w", err))
 	}
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		return jsonOrError(fmt.Errorf("qemu-img not found in PATH (install with: brew install qemu): %w", err))
+	if err := vm.RequireQemuImg(); err != nil {
+		return jsonOrError(err)
 	}
 
 	scriptPath, err := resolveBuildScript()
