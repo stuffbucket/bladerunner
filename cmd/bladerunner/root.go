@@ -72,7 +72,7 @@ func init() {
 
 	addToGroup(groupLifecycle,
 		upCmd, startCmd, stopCmd, bootCmd, ejectCmd,
-		saveCmd, restoreCmd, resetCmd, upgradeCmd, reconnectCmd,
+		saveCmd, restoreCmd, resetCmd, upgradeCmd, selfUpdateCmd, reconnectCmd,
 	)
 	addToGroup(groupAccess,
 		sshCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd, eventsCmd,

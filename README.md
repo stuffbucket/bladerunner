@@ -37,6 +37,38 @@ brew install stuffbucket/tap/bladerunner
 
 The binary is automatically signed with required entitlements during installation.
 
+Homebrew installs update via `brew upgrade bladerunner`.
+
+### Download (`.dmg`)
+
+Every release also ships a signed, notarized `.dmg` installer on the
+[Releases page](https://github.com/stuffbucket/bladerunner/releases), named
+`bladerunner_<version>_darwin_aarch64.dmg` (with a matching `.sha256`).
+
+1. Download the `.dmg` from the latest release.
+2. (Optional) verify it:
+
+   ```bash
+   shasum -a 256 -c bladerunner_<version>_darwin_aarch64.dmg.sha256
+   ```
+
+3. Open the `.dmg` and drag **Bladerunner.app** to `/Applications`.
+
+The bundle is code-signed with the Virtualization entitlement and notarized, so
+Gatekeeper allows it on first launch — no `xattr` dance required.
+
+DMG installs self-update in place:
+
+```bash
+br self-update          # download + verify + install the latest signed .app
+br self-update --check   # just report whether a newer version is available
+```
+
+`br self-update` verifies the new bundle's Ed25519 signature before replacing
+anything and refuses to run on Homebrew-managed installs (use `brew upgrade`
+for those). It is distinct from `br upgrade`, which hands the *running* control
+server to a new binary already on disk.
+
 ### Build from Source
 
 Requires Xcode Command Line Tools:
