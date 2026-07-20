@@ -1,0 +1,180 @@
+name: Publish update manifest
+
+# After a GitHub Release is published, publish site/public/latest.json — the
+# update manifest that `br self-update` (internal/update) fetches from the Pages
+# site (https://stuffbucket.github.io/bladerunner/latest.json).
+#
+# WHY A SEPARATE WORKFLOW (not chained into release-please.yml): the signed
+# Bladerunner.app updater tarball is built OFF-REPO by stuffbucket/macos-builder,
+# which uploads Bladerunner.app.tar.gz{,.sig,.sha256} onto the release
+# ASYNCHRONOUSLY (minutes after the tag). release-please.yml only fires the
+# builder and returns, so the assets are not present when it finishes. This job
+# polls the release until the tarball + .sig appear, then builds and commits the
+# manifest.
+#
+# GRACEFUL NO-OP: if the updater assets never appear (repo not onboarded to
+# macos-builder, or the builder did not emit an updater artifact) this exits 0
+# with a ::notice::, mirroring macos-build.yml — nothing else depends on it.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)publish the manifest for, e.g. v0.4.8"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-update-manifest
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build + commit latest.json
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The updater tarball name comes from macos-builder's
+      # .macos-builder/config `updater_name`; tauri appends `.sig`.
+      TARBALL: Bladerunner.app.tar.gz
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Resolve tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "${TAG}" ]; then
+            echo "::error::No release tag resolved from event or dispatch input." >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Publishing update manifest for ${TAG}"
+
+      - name: Poll release for updater assets
+        id: poll
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          SIG="${TARBALL}.sig"
+          # Poll every 30s up to ~30 min for the async macos-builder upload.
+          deadline=$(( $(date +%s) + 30 * 60 ))
+          while :; do
+            assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            if echo "$assets" | grep -qx "$TARBALL" && echo "$assets" | grep -qx "$SIG"; then
+              echo "Found $TARBALL and $SIG on release $TAG."
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::notice::Updater assets ($TARBALL, $SIG) did not appear on $TAG within 30 min — repo may not be onboarded to macos-builder, or no updater artifact was emitted. Skipping manifest publish."
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            echo "Waiting for updater assets on $TAG (have: ${assets:-none})…"
+            sleep 30
+          done
+
+      - name: Build manifest
+        id: build
+        if: steps.poll.outputs.found == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          SIG="${TARBALL}.sig"
+          VERSION="${TAG#v}"
+
+          # Fetch the release metadata: the tarball's browser_download_url (an
+          # https:// github.com/.../releases/download/<tag>/... link), the
+          # publish timestamp, and the release name (for notes).
+          meta="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets,publishedAt,name)"
+          url="$(echo "$meta" | jq -r --arg n "$TARBALL" '.assets[] | select(.name == $n) | .url')"
+          pub_date="$(echo "$meta" | jq -r '.publishedAt // empty')"
+
+          if [ -z "$url" ]; then
+            echo "::error::Missing browser_download_url for $TARBALL on $TAG." >&2
+            exit 1
+          fi
+
+          # Download the minisign .sig file (multi-line text) and base64-encode
+          # the WHOLE file. internal/update/verify.go parseSignature() does
+          # base64.StdEncoding.DecodeString on the manifest `signature` field and
+          # then treats the decoded bytes as the minisign .sig file text (four
+          # lines: untrusted comment, sig record, trusted comment, global sig).
+          # So the manifest signature MUST be base64 of the entire .sig file —
+          # NOT the raw multi-line text. This matches tauri's updater convention.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$SIG" --dir "$RUNNER_TEMP" --clobber
+          signature="$(base64 -w0 "$RUNNER_TEMP/$SIG")"
+
+          if [ -z "$signature" ]; then
+            echo "::error::Empty signature after base64 of $SIG." >&2
+            exit 1
+          fi
+
+          # Pretty-printed manifest. `notes` uses the release name (kept short);
+          # jq --arg keeps every value a safely-escaped string.
+          name="$(echo "$meta" | jq -r '.name // empty')"
+          mkdir -p site/public
+          jq -n \
+            --arg version "$VERSION" \
+            --arg url "$url" \
+            --arg signature "$signature" \
+            --arg notes "${name:-Bladerunner $TAG}" \
+            --arg pub_date "$pub_date" \
+            '{version: $version, url: $url, signature: $signature, notes: $notes, pub_date: $pub_date}' \
+            > site/public/latest.json
+
+          echo "Wrote site/public/latest.json:"
+          # Print everything except the (long) signature for the log.
+          jq 'del(.signature)' site/public/latest.json
+
+      - name: Validate manifest
+        if: steps.poll.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          f=site/public/latest.json
+          # Assert version, url, signature are non-empty and url is https.
+          jq -e '
+            (.version | type == "string" and (. | length > 0)) and
+            (.url | type == "string" and (startswith("https://"))) and
+            (.signature | type == "string" and (. | length > 0))
+          ' "$f" > /dev/null || {
+            echo "::error::latest.json failed shape validation." >&2
+            jq 'del(.signature)' "$f" >&2 || cat "$f" >&2
+            exit 1
+          }
+          echo "latest.json validated (version/url(https)/signature present)."
+
+      - name: Commit and push
+        if: steps.poll.outputs.found == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add site/public/latest.json
+          if git diff --cached --quiet; then
+            echo "::notice::latest.json unchanged for $TAG — nothing to commit."
+            exit 0
+          fi
+          # Subject kept <=50 chars (commit-msg hook style). $TAG is ~7 chars.
+          git commit -m "chore: publish update manifest for $TAG"
+          git push origin HEAD:main
+          echo "Pushed latest.json for $TAG; pages.yml will redeploy the site."
