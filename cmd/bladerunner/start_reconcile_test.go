@@ -132,7 +132,12 @@ func TestApplyFlagOverridesImageURLClearsSHA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// config.Default for a supported arch carries the pinned Debian SHA-512.
+	// Default() is now the hosted image (no embedded SHA). Start from the Debian
+	// baseline so the config carries the pinned SHA-512 we expect --image-url to
+	// clear when it overrides with a custom URL.
+	s := config.DefaultSettings()
+	s.Image = config.ImageSource{Kind: config.ImageDebian}
+	s.ApplyTo(cfg)
 	if cfg.BaseImageSHA512 == "" {
 		t.Skip("no pinned SHA on this arch; nothing to clear")
 	}
@@ -212,12 +217,18 @@ func TestApplyFlagOverridesHostedImageForce(t *testing.T) {
 // exactly like --hosted-image (the non-interactive equivalent for e2e).
 func TestApplyFlagOverridesHostedImageForceViaEnv(t *testing.T) {
 	t.Setenv(config.ForceHostedImageEnvVar, "1")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
 	cfg, err := config.Default(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Default() is now hosted; start from the Debian baseline so the env force is
+	// proven to flip it back to hosted.
+	s := config.DefaultSettings()
+	s.Image = config.ImageSource{Kind: config.ImageDebian}
+	s.ApplyTo(cfg)
 	if cfg.UseHostedGuestImage {
-		t.Fatal("precondition: Default() must not use the hosted image")
+		t.Fatal("precondition: expected the Debian baseline before the hosted force env")
 	}
 
 	withStartFlags(t, func() {
@@ -234,13 +245,70 @@ func TestApplyFlagOverridesHostedImageForceViaEnv(t *testing.T) {
 	}
 }
 
-// validateImageOverrideFlags rejects --hosted-image combined with a conflicting
-// --image-url/--image-path, whether hosted is requested via the flag or the env.
+// TestApplyFlagOverridesDebianImageForce verifies the --debian-image escape
+// hatch (and its force env) flips the hosted default back to the verified Debian
+// + cloud-init path, restoring the pinned SHA-512 and re-resolving the URL.
+func TestApplyFlagOverridesDebianImageForce(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UseHostedGuestImage {
+		t.Fatal("precondition: Default() is expected to be hosted now")
+	}
+
+	withStartFlags(t, func() {
+		startFlags.debianImage = true
+		applyFlagOverrides(cfg, changedSet("debian-image"), false)
+	})
+
+	if cfg.UseHostedGuestImage {
+		t.Error("--debian-image must disarm UseHostedGuestImage")
+	}
+	wantURL, err := config.DebianTrixieGenericCloudURL(cfg.Arch)
+	if err != nil {
+		t.Skipf("no debian image for arch %s", cfg.Arch)
+	}
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want debian %q", cfg.BaseImageURL, wantURL)
+	}
+	if cfg.BaseImageSHA512 != config.DebianTrixieGenericCloudSHA512(cfg.Arch) {
+		t.Errorf("--debian-image must restore the pinned SHA-512, got %q", cfg.BaseImageSHA512)
+	}
+}
+
+// TestApplyFlagOverridesDebianImageForceViaEnv verifies BLADERUNNER_FORCE_DEBIAN_IMAGE=1
+// forces the Debian escape hatch with no flag.
+func TestApplyFlagOverridesDebianImageForceViaEnv(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "1")
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	withStartFlags(t, func() {
+		startFlags.debianImage = false // env, not flag
+		applyFlagOverrides(cfg, changedSet(), false)
+	})
+
+	if cfg.UseHostedGuestImage {
+		t.Error("BLADERUNNER_FORCE_DEBIAN_IMAGE=1 must disarm UseHostedGuestImage")
+	}
+}
+
+// validateImageOverrideFlags rejects --hosted-image / --debian-image combined
+// with each other or with a conflicting --image-url/--image-path, whether the
+// force is requested via the flag or the env.
 func TestValidateImageOverrideFlagsConflicts(t *testing.T) {
 	tests := []struct {
 		name        string
 		hostedFlag  bool
+		debianFlag  bool
 		hostedEnv   string
+		debianEnv   string
 		imageURL    string
 		imagePath   string
 		wantErr     bool
@@ -249,17 +317,27 @@ func TestValidateImageOverrideFlagsConflicts(t *testing.T) {
 		{name: "no override", wantErr: false},
 		{name: "hosted flag alone", hostedFlag: true, wantErr: false},
 		{name: "hosted env alone", hostedEnv: "1", wantErr: false},
+		{name: "debian flag alone", debianFlag: true, wantErr: false},
+		{name: "debian env alone", debianEnv: "1", wantErr: false},
 		{name: "image-url alone", imageURL: "https://x.test/i.qcow2", wantErr: false},
 		{name: "image-path alone", imagePath: "/tmp/i.qcow2", wantErr: false},
+		{name: "hosted flag + debian flag", hostedFlag: true, debianFlag: true, wantErr: true, wantErrText: "--debian-image"},
+		{name: "hosted flag + debian env", hostedFlag: true, debianEnv: "1", wantErr: true, wantErrText: "--debian-image"},
+		{name: "hosted env + debian flag", hostedEnv: "1", debianFlag: true, wantErr: true, wantErrText: "--debian-image"},
 		{name: "hosted flag + image-url", hostedFlag: true, imageURL: "https://x.test/i.qcow2", wantErr: true, wantErrText: "--image-url"},
 		{name: "hosted flag + image-path", hostedFlag: true, imagePath: "/tmp/i.qcow2", wantErr: true, wantErrText: "--image-path"},
 		{name: "hosted env + image-url", hostedEnv: "1", imageURL: "https://x.test/i.qcow2", wantErr: true, wantErrText: "--image-url"},
+		{name: "debian flag + image-url", debianFlag: true, imageURL: "https://x.test/i.qcow2", wantErr: true, wantErrText: "--image-url"},
+		{name: "debian flag + image-path", debianFlag: true, imagePath: "/tmp/i.qcow2", wantErr: true, wantErrText: "--image-path"},
+		{name: "debian env + image-path", debianEnv: "1", imagePath: "/tmp/i.qcow2", wantErr: true, wantErrText: "--image-path"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(config.ForceHostedImageEnvVar, tt.hostedEnv)
+			t.Setenv(config.ForceDebianImageEnvVar, tt.debianEnv)
 			withStartFlags(t, func() {
 				startFlags.hostedImage = tt.hostedFlag
+				startFlags.debianImage = tt.debianFlag
 				startFlags.imageURL = tt.imageURL
 				startFlags.imagePath = tt.imagePath
 				err := validateImageOverrideFlags()

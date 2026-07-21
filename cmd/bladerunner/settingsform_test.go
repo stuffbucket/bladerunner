@@ -121,7 +121,7 @@ func TestSettingsRequiresRestart(t *testing.T) {
 		func(s *config.Settings) { s.DiskSizeGiB = 99 },
 		func(s *config.Settings) { s.NetworkMode = config.NetSettingBridged; s.BridgeInterface = "en9" },
 		func(s *config.Settings) { s.NestedVirt = config.NestedDisabled },
-		func(s *config.Settings) { s.Image = config.ImageSource{Kind: config.ImageHosted} },
+		func(s *config.Settings) { s.Image = config.ImageSource{Kind: config.ImageDebian} },
 	} {
 		n := base
 		mut(&n)
