@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -167,5 +168,108 @@ func TestApplyFlagOverridesEmptyImageURLNoClobber(t *testing.T) {
 
 	if cfg.BaseImageURL != "https://example.test/from-settings.qcow2" {
 		t.Errorf("BaseImageURL = %q, want settings URL preserved", cfg.BaseImageURL)
+	}
+}
+
+// --hosted-image forces the pre-baked hosted image even when the persisted
+// Settings selected the Debian default, re-resolving the hosted URL for the arch
+// and clearing the pinned SHA-512 so the fail-closed sidecar path applies.
+func TestApplyFlagOverridesHostedImageForce(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Start from the Debian baseline so we prove --hosted-image flips it.
+	s := config.DefaultSettings()
+	s.Image = config.ImageSource{Kind: config.ImageDebian}
+	s.ApplyTo(cfg)
+	if cfg.UseHostedGuestImage {
+		t.Fatal("precondition: expected the Debian baseline before --hosted-image")
+	}
+
+	withStartFlags(t, func() {
+		startFlags.hostedImage = true
+		applyFlagOverrides(cfg, changedSet("hosted-image"), false)
+	})
+
+	if !cfg.UseHostedGuestImage {
+		t.Error("--hosted-image must set UseHostedGuestImage")
+	}
+	if cfg.BaseImageSHA512 != "" {
+		t.Errorf("--hosted-image must clear the pinned SHA-512, got %q", cfg.BaseImageSHA512)
+	}
+	if cfg.BaseImagePath != "" {
+		t.Errorf("--hosted-image must clear BaseImagePath, got %q", cfg.BaseImagePath)
+	}
+	wantURL, _ := config.HostedGuestImageURL(cfg.Arch)
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want hosted %q", cfg.BaseImageURL, wantURL)
+	}
+}
+
+// BLADERUNNER_FORCE_HOSTED_IMAGE=1 forces the hosted image without the flag,
+// exactly like --hosted-image (the non-interactive equivalent for e2e).
+func TestApplyFlagOverridesHostedImageForceViaEnv(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "1")
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UseHostedGuestImage {
+		t.Fatal("precondition: Default() must not use the hosted image")
+	}
+
+	withStartFlags(t, func() {
+		startFlags.hostedImage = false // env, not flag
+		applyFlagOverrides(cfg, changedSet(), false)
+	})
+
+	if !cfg.UseHostedGuestImage {
+		t.Error("BLADERUNNER_FORCE_HOSTED_IMAGE=1 must set UseHostedGuestImage")
+	}
+	wantURL, _ := config.HostedGuestImageURL(cfg.Arch)
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want hosted %q", cfg.BaseImageURL, wantURL)
+	}
+}
+
+// validateImageOverrideFlags rejects --hosted-image combined with a conflicting
+// --image-url/--image-path, whether hosted is requested via the flag or the env.
+func TestValidateImageOverrideFlagsConflicts(t *testing.T) {
+	tests := []struct {
+		name        string
+		hostedFlag  bool
+		hostedEnv   string
+		imageURL    string
+		imagePath   string
+		wantErr     bool
+		wantErrText string
+	}{
+		{name: "no override", wantErr: false},
+		{name: "hosted flag alone", hostedFlag: true, wantErr: false},
+		{name: "hosted env alone", hostedEnv: "1", wantErr: false},
+		{name: "image-url alone", imageURL: "https://x.test/i.qcow2", wantErr: false},
+		{name: "image-path alone", imagePath: "/tmp/i.qcow2", wantErr: false},
+		{name: "hosted flag + image-url", hostedFlag: true, imageURL: "https://x.test/i.qcow2", wantErr: true, wantErrText: "--image-url"},
+		{name: "hosted flag + image-path", hostedFlag: true, imagePath: "/tmp/i.qcow2", wantErr: true, wantErrText: "--image-path"},
+		{name: "hosted env + image-url", hostedEnv: "1", imageURL: "https://x.test/i.qcow2", wantErr: true, wantErrText: "--image-url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(config.ForceHostedImageEnvVar, tt.hostedEnv)
+			withStartFlags(t, func() {
+				startFlags.hostedImage = tt.hostedFlag
+				startFlags.imageURL = tt.imageURL
+				startFlags.imagePath = tt.imagePath
+				err := validateImageOverrideFlags()
+				if (err != nil) != tt.wantErr {
+					t.Fatalf("validateImageOverrideFlags() err = %v, wantErr %v", err, tt.wantErr)
+				}
+				if err != nil && !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("expected error to mention %q, got %v", tt.wantErrText, err)
+				}
+			})
+		})
 	}
 }
