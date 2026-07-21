@@ -21,28 +21,33 @@ import (
 	"time"
 )
 
-// Environment knobs (all optional; the default gives a plain cloud-init boot):
+// Environment knobs (all optional; the default now boots the pre-baked HOSTED
+// guest image — the shipped default):
 //
 //	BLADERUNNER_E2E=1            required — opt in to the real boot
 //	BLADERUNNER_E2E_BIN=/path    use an already signed `br` instead of building one
 //	BLADERUNNER_E2E_BOOT_TIMEOUT first-boot readiness budget (Go duration, default 15m)
-//	BLADERUNNER_E2E_HOSTED=1     boot the pre-baked hosted guest image by appending
-//	                             `--hosted-image` to `br start` (default: the Debian
-//	                             + cloud-init path). Use this to boot-verify the
-//	                             hosted image (fail-closed sidecar checksum) end to
-//	                             end. Requires a published guest-image-latest release.
+//	BLADERUNNER_E2E_DEBIAN=1     exercise the escape hatch / warned-fallback path by
+//	                             appending `--debian-image` to `br start` (the
+//	                             Debian genericcloud + first-boot cloud-init path).
+//	                             Use this to boot-verify the fallback image.
+//	BLADERUNNER_E2E_HOSTED=1     no-op alias: the hosted image is already the
+//	                             default, so this knob is retained only for
+//	                             backward compatibility and selects nothing extra.
 //
-// The default (BLADERUNNER_E2E_HOSTED unset) boots the single cloud-init/Debian
-// path; the hosted mode is purely additive and does not change the default.
+// The default (BLADERUNNER_E2E_DEBIAN unset) boots the pre-baked hosted image
+// (fail-closed sidecar checksum) — the shipped default. BLADERUNNER_E2E_DEBIAN=1
+// forces the Debian escape hatch instead.
 const (
 	envEnable      = "BLADERUNNER_E2E"
 	envBin         = "BLADERUNNER_E2E_BIN"
 	envBootTimeout = "BLADERUNNER_E2E_BOOT_TIMEOUT"
-	envHosted      = "BLADERUNNER_E2E_HOSTED"
+	envDebian      = "BLADERUNNER_E2E_DEBIAN"
 
 	// defaultBootTimeout bounds the wait for Incus to answer from a clean state.
-	// First boot downloads the guest image and installs Incus via cloud-init,
-	// which can exceed 10m on stock M-series hardware; 15m absorbs that.
+	// The default (hosted) path skips the first-boot apt install and is fast; the
+	// --debian-image fallback path downloads the guest image and installs Incus via
+	// cloud-init, which can exceed 10m on stock M-series hardware; 15m absorbs that.
 	defaultBootTimeout = 15 * time.Minute
 
 	// pollInterval is how often we re-check `br status --json` for readiness.
@@ -71,16 +76,16 @@ func TestE2EBootSmoke(t *testing.T) {
 		t.Skipf("e2e boot smoke test requires macOS Virtualization.framework; GOOS=%s", runtime.GOOS)
 	}
 
-	// Image selection: the default is the single cloud-init/Debian path;
-	// BLADERUNNER_E2E_HOSTED=1 boots the pre-baked hosted image instead by
-	// appending --hosted-image to `br start` (additive — no change to the
-	// default). This is what boot-verifies the hosted path (incl. its
-	// fail-closed sidecar checksum) end to end.
-	hosted := os.Getenv(envHosted) == "1"
-	if hosted {
-		t.Logf("e2e boot smoke: image = hosted (--hosted-image)")
+	// Image selection: the default now boots the pre-baked HOSTED image (the
+	// shipped default), verified fail-closed against its .sha256 sidecar.
+	// BLADERUNNER_E2E_DEBIAN=1 forces the Debian escape hatch / warned-fallback
+	// path instead by appending --debian-image to `br start`. This is what
+	// boot-verifies the fallback image end to end.
+	debian := os.Getenv(envDebian) == "1"
+	if debian {
+		t.Logf("e2e boot smoke: image = Debian escape hatch (--debian-image)")
 	} else {
-		t.Logf("e2e boot smoke: image = cloud-init/Debian (default)")
+		t.Logf("e2e boot smoke: image = pre-baked hosted (default)")
 	}
 
 	bin := signedBinary(t)
@@ -109,8 +114,8 @@ func TestE2EBootSmoke(t *testing.T) {
 	// blocks (serving the control socket) until stopped; readiness is observed
 	// out-of-band by polling `br status --json`, not by waiting on this process.
 	startArgs := []string{"start", "--json", "--timeout", boot.String()}
-	if hosted {
-		startArgs = append(startArgs, "--hosted-image")
+	if debian {
+		startArgs = append(startArgs, "--debian-image")
 	}
 	startCmd = exec.CommandContext(startCtx, bin, startArgs...)
 	startCmd.Env = env
