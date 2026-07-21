@@ -359,7 +359,7 @@ func Default(baseDir string) (*Config, error) {
 		LogPath:             filepath.Join(baseDir, logFileName),
 		ReportPath:          filepath.Join(baseDir, reportFileName),
 		MetadataPath:        filepath.Join(baseDir, metadataFileName),
-		SSHUser:             "incus",
+		SSHUser:             "bladerunner",
 		SSHPublicKey:        "", // Set by EnsureSSHKeys
 		SSHPrivateKeyPath:   "", // Set by EnsureSSHKeys
 		SSHConfigPath:       "", // Set after VM starts
