@@ -98,13 +98,22 @@ func fileSHA512(path string) (string, error) {
 // hash and a mismatch is fatal — this makes the default image reproducible and
 // tamper-evident without a network round-trip.
 //
-// Otherwise (custom --image-url) it falls back to a sidecar checksum hosted at
-// imageURL+".sha256". A missing or unreachable sidecar is logged at WARN and
-// skipped — many upstream image hosts (Debian's cloud.debian.org, GitHub
-// Releases pre-first-publish) don't publish per-image .sha256 sidecars, and
-// blocking boot on their absence regresses the default user experience.
-// Mismatched sidecars remain fatal.
-func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512, path string) error {
+// Otherwise verification falls back to a sidecar checksum hosted at
+// imageURL+".sha256". The strictSidecar flag decides how a missing/unreachable
+// sidecar is treated:
+//
+//   - strictSidecar=true (the pre-baked hosted guest image, which always ships a
+//     published .sha256): FAIL CLOSED. A mismatch, a missing/404 sidecar, or an
+//     unreachable sidecar host are all fatal — parity with the pinned-Debian
+//     SHA-512 path. The hosted image is release-managed, so its checksum must
+//     always be present and correct; a gap means "do not boot", not "boot
+//     anyway".
+//   - strictSidecar=false (a user-supplied --image-url): a missing or unreachable
+//     sidecar is logged at WARN and skipped — many upstream image hosts
+//     (cloud.debian.org, arbitrary URLs) don't publish per-image .sha256
+//     sidecars, and blocking boot on their absence regresses that experience.
+//     A mismatched sidecar remains fatal in both modes.
+func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512 string, strictSidecar bool, path string) error {
 	if expectedSHA512 != "" {
 		got, err := fileSHA512(path)
 		if err != nil {
@@ -119,11 +128,17 @@ func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512, path str
 
 	want, err := fetchSidecarSHA256(ctx, imageURL)
 	if err != nil {
+		if strictSidecar {
+			return fmt.Errorf("hosted image sidecar SHA-256 unreachable (%s): %w", imageURL+".sha256", err)
+		}
 		logging.L().Warn("sidecar SHA-256 fetch failed, continuing without verification",
 			"url", imageURL+".sha256", "err", err)
 		return nil
 	}
 	if want == "" {
+		if strictSidecar {
+			return fmt.Errorf("hosted image sidecar SHA-256 missing (%s): refusing to boot unverified", imageURL+".sha256")
+		}
 		logging.L().Warn("sidecar SHA-256 not present, skipping verification",
 			"url", imageURL+".sha256")
 		return nil
@@ -233,7 +248,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		return "", err
 	}
 
-	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, path); err != nil {
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, cfg.UseHostedGuestImage, path); err != nil {
 		// Remove the corrupt download so subsequent runs don't reuse it.
 		_ = os.Remove(path)
 		return "", err

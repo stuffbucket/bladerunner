@@ -187,6 +187,32 @@ func TestDefaultConfigUseHostedGuestImage(t *testing.T) {
 	}
 }
 
+func TestForceHostedImage(t *testing.T) {
+	tests := []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"nope", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"Yes", true},
+		{"on", true},
+		{" 1 ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.val, func(t *testing.T) {
+			t.Setenv(ForceHostedImageEnvVar, tt.val)
+			if got := ForceHostedImage(); got != tt.want {
+				t.Errorf("ForceHostedImage() with %q = %v, want %v", tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDefaultAptMirrorURI(t *testing.T) {
 	const want = "http://deb.debian.org/debian"
 	for _, arch := range []string{"arm64", "amd64", "riscv64", ""} {

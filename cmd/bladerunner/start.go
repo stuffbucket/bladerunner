@@ -37,6 +37,7 @@ var startFlags struct {
 	stateDir    string
 	imageURL    string
 	imagePath   string
+	hostedImage bool
 	timeout     time.Duration
 	noNested    bool
 	restoreFrom string
@@ -59,6 +60,7 @@ func init() {
 	f.StringVar(&startFlags.stateDir, "state-dir", "", "State directory (default: ~/.local/state/bladerunner)")
 	f.StringVar(&startFlags.imageURL, "image-url", "", "Base image URL")
 	f.StringVar(&startFlags.imagePath, "image-path", "", "Local base image path")
+	f.BoolVar(&startFlags.hostedImage, "hosted-image", false, "Force the pre-baked hosted guest image (guest-image-latest release) instead of the Debian default (also settable via BLADERUNNER_FORCE_HOSTED_IMAGE=1)")
 	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
 	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
@@ -179,12 +181,60 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 	if startFlags.imagePath != "" && apply("image-path") {
 		cfg.BaseImagePath = startFlags.imagePath
 	}
+	// --hosted-image (or BLADERUNNER_FORCE_HOSTED_IMAGE=1) forces the pre-baked
+	// hosted guest image regardless of the built-in default or a persisted
+	// Settings image choice. It re-resolves BaseImageURL to the guest-image-latest
+	// release asset for this arch, clears the pinned Debian SHA-512 and any local
+	// path, and arms UseHostedGuestImage — which switches vm asset verification to
+	// the fail-closed .sha256 sidecar path. Conflicts with an explicit
+	// --image-url/--image-path are rejected up front by validateImageOverrideFlags,
+	// so this override lands last and wins cleanly. This is additive: the default
+	// stays Debian + cloud-init unless the flag/env is set.
+	if forceHostedImage() {
+		if url, err := config.HostedGuestImageURL(cfg.Arch); err == nil {
+			cfg.BaseImageURL = url
+		}
+		cfg.BaseImageSHA512 = ""
+		cfg.BaseImageExpectedSHA256 = ""
+		cfg.BaseImagePath = ""
+		cfg.UseHostedGuestImage = true
+	}
+}
+
+// forceHostedImage reports whether this run must use the pre-baked hosted guest
+// image, requested either via the --hosted-image flag or the
+// BLADERUNNER_FORCE_HOSTED_IMAGE=1 env (the non-interactive equivalent).
+func forceHostedImage() bool {
+	return startFlags.hostedImage || config.ForceHostedImage()
+}
+
+// validateImageOverrideFlags rejects contradictory image-selection overrides.
+// --hosted-image (or its force env) selects the pre-baked hosted image, so it
+// cannot be combined with an explicit --image-url or --image-path (which pick a
+// different, user-supplied image). Asking for both at once is a user error, not
+// something to resolve silently by precedence.
+func validateImageOverrideFlags() error {
+	if !forceHostedImage() {
+		return nil
+	}
+	if startFlags.imageURL != "" {
+		return fmt.Errorf("--hosted-image conflicts with --image-url (also check BLADERUNNER_FORCE_HOSTED_IMAGE)")
+	}
+	if startFlags.imagePath != "" {
+		return fmt.Errorf("--hosted-image conflicts with --image-path (also check BLADERUNNER_FORCE_HOSTED_IMAGE)")
+	}
+	return nil
 }
 
 //nolint:gocyclo // runStart was already at the gocyclo ceiling; the applyBootManifest guard for `br boot` tips it one over with essential error propagation.
 func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Reject contradictory image-selection overrides before doing any work.
+	if err := validateImageOverrideFlags(); err != nil {
+		return err
+	}
 
 	// A cartridge boot OWNS the mounted image: detach it on the way out. This
 	// defer is registered first so, running LIFO, it executes LAST — after the

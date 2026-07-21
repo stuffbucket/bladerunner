@@ -258,6 +258,24 @@ func ResolveBaseImageURL(goarch string, useHosted bool) (string, error) {
 	return DebianTrixieGenericCloudURL(goarch)
 }
 
+// ForceHostedImageEnvVar, when set to a truthy value ("1", "true", "yes", "on"),
+// forces the pre-baked hosted guest image for the run — the non-interactive
+// equivalent of the --hosted-image start flag. It exists so a caller (e.g. the
+// e2e boot-verify) can deterministically select the hosted image without a CLI
+// flag while the built-in default is still the Debian + cloud-init path.
+const ForceHostedImageEnvVar = "BLADERUNNER_FORCE_HOSTED_IMAGE"
+
+// ForceHostedImage reports whether the forced-hosted-image override is set via
+// the ForceHostedImageEnvVar environment variable.
+func ForceHostedImage() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(ForceHostedImageEnvVar))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func Default(baseDir string) (*Config, error) {
 	if baseDir == "" {
 		baseDir = DefaultStateDir()

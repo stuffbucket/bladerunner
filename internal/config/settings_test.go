@@ -202,6 +202,22 @@ func TestApplyToImageSources(t *testing.T) {
 			if !c.UseHostedGuestImage {
 				t.Error("UseHostedGuestImage should be true for hosted")
 			}
+			// The URL must be re-resolved to the hosted release asset (not left
+			// pointing at the Debian default from Default()), and the pinned
+			// Debian SHA-512 must be cleared so the fail-closed sidecar path runs.
+			wantURL, err := HostedGuestImageURL(c.Arch)
+			if err != nil {
+				t.Fatalf("HostedGuestImageURL(%q): %v", c.Arch, err)
+			}
+			if c.BaseImageURL != wantURL {
+				t.Errorf("BaseImageURL = %q, want hosted %q", c.BaseImageURL, wantURL)
+			}
+			if c.BaseImageSHA512 != "" {
+				t.Errorf("hosted must clear the pinned SHA-512, got %q", c.BaseImageSHA512)
+			}
+			if c.BaseImagePath != "" {
+				t.Errorf("hosted must clear BaseImagePath, got %q", c.BaseImagePath)
+			}
 		}},
 		{"debian", ImageSource{Kind: ImageDebian}, func(t *testing.T, c *Config) {
 			if c.UseHostedGuestImage {

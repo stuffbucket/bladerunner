@@ -26,13 +26,19 @@ import (
 //	BLADERUNNER_E2E=1            required — opt in to the real boot
 //	BLADERUNNER_E2E_BIN=/path    use an already signed `br` instead of building one
 //	BLADERUNNER_E2E_BOOT_TIMEOUT first-boot readiness budget (Go duration, default 15m)
+//	BLADERUNNER_E2E_HOSTED=1     boot the pre-baked hosted guest image by appending
+//	                             `--hosted-image` to `br start` (default: the Debian
+//	                             + cloud-init path). Use this to boot-verify the
+//	                             hosted image (fail-closed sidecar checksum) end to
+//	                             end. Requires a published guest-image-latest release.
 //
-// Provisioning is unified onto the single cloud-init path (#160). Phase 3 (#155)
-// will reintroduce hosted-image selection and its own e2e coverage.
+// The default (BLADERUNNER_E2E_HOSTED unset) boots the single cloud-init/Debian
+// path; the hosted mode is purely additive and does not change the default.
 const (
 	envEnable      = "BLADERUNNER_E2E"
 	envBin         = "BLADERUNNER_E2E_BIN"
 	envBootTimeout = "BLADERUNNER_E2E_BOOT_TIMEOUT"
+	envHosted      = "BLADERUNNER_E2E_HOSTED"
 
 	// defaultBootTimeout bounds the wait for Incus to answer from a clean state.
 	// First boot downloads the guest image and installs Incus via cloud-init,
@@ -65,10 +71,17 @@ func TestE2EBootSmoke(t *testing.T) {
 		t.Skipf("e2e boot smoke test requires macOS Virtualization.framework; GOOS=%s", runtime.GOOS)
 	}
 
-	// Provisioning is unified onto the single cloud-init path (#160); there is no
-	// merged CLI flag to force the hosted image yet. Phase 3 (#155) will
-	// reintroduce hosted-image selection along with its e2e coverage.
-	t.Logf("e2e boot smoke: provisioning path = cloud-init")
+	// Image selection: the default is the single cloud-init/Debian path;
+	// BLADERUNNER_E2E_HOSTED=1 boots the pre-baked hosted image instead by
+	// appending --hosted-image to `br start` (additive — no change to the
+	// default). This is what boot-verifies the hosted path (incl. its
+	// fail-closed sidecar checksum) end to end.
+	hosted := os.Getenv(envHosted) == "1"
+	if hosted {
+		t.Logf("e2e boot smoke: image = hosted (--hosted-image)")
+	} else {
+		t.Logf("e2e boot smoke: image = cloud-init/Debian (default)")
+	}
 
 	bin := signedBinary(t)
 
@@ -96,6 +109,9 @@ func TestE2EBootSmoke(t *testing.T) {
 	// blocks (serving the control socket) until stopped; readiness is observed
 	// out-of-band by polling `br status --json`, not by waiting on this process.
 	startArgs := []string{"start", "--json", "--timeout", boot.String()}
+	if hosted {
+		startArgs = append(startArgs, "--hosted-image")
+	}
 	startCmd = exec.CommandContext(startCtx, bin, startArgs...)
 	startCmd.Env = env
 	var startOut startLog

@@ -350,6 +350,15 @@ func (s Settings) ApplyTo(cfg *Config) {
 	case ImageHosted:
 		cfg.UseHostedGuestImage = true
 		cfg.BaseImagePath = ""
+		// Re-resolve the download URL to the hosted release asset for this arch
+		// and drop the pinned Debian SHA-512 — the hosted image is verified
+		// against its own published .sha256 sidecar (fail-closed), not an
+		// embedded hash. Without this, the URL/SHA left over from Default() would
+		// still point at Debian even though UseHostedGuestImage is now true.
+		if url, err := ResolveBaseImageURL(cfg.Arch, true); err == nil {
+			cfg.BaseImageURL = url
+		}
+		cfg.BaseImageSHA512 = ""
 	case ImageDebian:
 		cfg.UseHostedGuestImage = false
 		cfg.BaseImagePath = ""
