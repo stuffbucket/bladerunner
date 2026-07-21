@@ -201,7 +201,7 @@ func DefaultSettings() Settings {
 		DiskSizeGiB:     DefaultDiskSizeGiB,
 		NetworkMode:     NetSettingShared,
 		BridgeInterface: DefaultBridgeInterface,
-		Image:           ImageSource{Kind: ImageDebian},
+		Image:           ImageSource{Kind: ImageHosted},
 		NestedVirt:      NestedAuto,
 		WaitForIncus:    Duration(DefaultTimeout),
 		ShowConsole:     false,
@@ -360,8 +360,13 @@ func (s Settings) ApplyTo(cfg *Config) {
 		}
 		cfg.BaseImageSHA512 = ""
 	case ImageDebian:
-		cfg.UseHostedGuestImage = false
-		cfg.BaseImagePath = ""
+		// Default() now resolves the hosted URL, so selecting Debian in Settings
+		// must re-point BaseImageURL back at the pinned genericcloud image and
+		// restore its embedded SHA-512 — otherwise the URL/SHA left over from
+		// Default() would still name the hosted image while UseHostedGuestImage
+		// is now false. UseDebianImage does exactly that (best effort: an
+		// unsupported arch leaves the resolved default in place).
+		_ = UseDebianImage(cfg)
 	case ImageCustomURL:
 		cfg.UseHostedGuestImage = false
 		cfg.BaseImageURL = s.Image.URL
