@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.8](https://github.com/stuffbucket/bladerunner/compare/v0.4.7...v0.4.8) (2026-07-21)
+
+
+### Features
+
+* **cli:** add br up + grouped help; dedup --json guard ([#146](https://github.com/stuffbucket/bladerunner/issues/146)) ([0f7cc73](https://github.com/stuffbucket/bladerunner/commit/0f7cc73e233625d7818af76b91f40cf7569af399)), closes [#131](https://github.com/stuffbucket/bladerunner/issues/131)
+* default to the pre-baked guest image ([#173](https://github.com/stuffbucket/bladerunner/issues/173)) ([ce330e8](https://github.com/stuffbucket/bladerunner/commit/ce330e8e7cdfa07221d4073cae0f81e5bd582d7a))
+* enable + fail-closed-verify the hosted image ([#172](https://github.com/stuffbucket/bladerunner/issues/172)) ([fb81338](https://github.com/stuffbucket/bladerunner/commit/fb81338f32a8b7313c07061a3bfbbcd0f8f4df04)), closes [#155](https://github.com/stuffbucket/bladerunner/issues/155)
+* **update:** ed25519 self-updater + .dmg docs ([#148](https://github.com/stuffbucket/bladerunner/issues/148)) ([cd3e0c1](https://github.com/stuffbucket/bladerunner/commit/cd3e0c1f829d9ec6b5d479da5039bc13c95b217e))
+* **update:** embed production update public key ([#150](https://github.com/stuffbucket/bladerunner/issues/150)) ([9bd25fd](https://github.com/stuffbucket/bladerunner/commit/9bd25fdcfc99b735dfb1441b8203c6082cb4e028))
+* **update:** publish latest.json on release ([#151](https://github.com/stuffbucket/bladerunner/issues/151)) ([09c1332](https://github.com/stuffbucket/bladerunner/commit/09c1332fdb603ec4fc4b1da94bc89be61f38de0d))
+
+
+### Bug Fixes
+
+* **image:** streamline the Incus base image ([#57](https://github.com/stuffbucket/bladerunner/issues/57), [#45](https://github.com/stuffbucket/bladerunner/issues/45)) ([#125](https://github.com/stuffbucket/bladerunner/issues/125)) ([29d0a8c](https://github.com/stuffbucket/bladerunner/commit/29d0a8cc462aa833fd48db1c7a8ba6a78bc5b786))
+* **lint:** drop stale nolint directives; pin golangci ([#149](https://github.com/stuffbucket/bladerunner/issues/149)) ([8e60abf](https://github.com/stuffbucket/bladerunner/commit/8e60abfa29314c2def794ccc6405366738462919))
+* **lint:** resolve golangci-lint failures blocking main ([#128](https://github.com/stuffbucket/bladerunner/issues/128)) ([477117d](https://github.com/stuffbucket/bladerunner/commit/477117d27c4b4f608d893d06ab7194c49a2867e5))
+* **provision:** close agent-path OIDC relay gap ([#130](https://github.com/stuffbucket/bladerunner/issues/130)) ([#145](https://github.com/stuffbucket/bladerunner/issues/145)) ([95403b0](https://github.com/stuffbucket/bladerunner/commit/95403b0fa9776d0d5a39f211ccbeaa84b0c443c8))
+* **provision:** dedicated ssh user, no incus collision ([#174](https://github.com/stuffbucket/bladerunner/issues/174)) ([f7f2548](https://github.com/stuffbucket/bladerunner/commit/f7f254842ed1fec168bda29da9eef2621c368f82))
+
 ## [0.4.7](https://github.com/stuffbucket/bladerunner/compare/v0.4.6...v0.4.7) (2026-06-22)
 
 
