@@ -4,8 +4,8 @@
 
 It is designed to provide the core behavior of a `colima --runtime incus` setup without Lima/Colima orchestration overhead:
 
-- Architecture-aware defaults (`arm64` and `amd64`) using Debian 13 (trixie) genericcloud images. Ubuntu and other cloud images remain reachable via `--image-url` or `BLADERUNNER_BASE_IMAGE_URL`.
-- Incus daemon bootstrapped inside the guest via cloud-init.
+- Architecture-aware defaults (`arm64` and `amd64`). Fresh installs boot the pre-baked bladerunner guest image (Debian 13 trixie + Incus, no first-boot apt); the Debian genericcloud image is the warned auto-fallback and the `--debian-image` escape hatch. Ubuntu and other cloud images remain reachable via `--image-url` or `BLADERUNNER_BASE_IMAGE_URL`.
+- Incus daemon shipped in the pre-baked image (or bootstrapped via cloud-init on the Debian fallback path).
 - Localhost-accessible SSH and Incus HTTPS endpoints via virtio-vsock port forwarding.
 - Incus web dashboard availability through the forwarded API endpoint.
 - Optional bridged networking (for transparent L2 presence) when signed with `com.apple.vm.networking`.
@@ -259,11 +259,12 @@ packing also needs `qemu-img`.
 
 ## Notes
 
-- The default base image is the Debian 13 (trixie) genericcloud qcow2 (`incus` and `incus-client` ship in trixie main, so no third-party apt repos are needed). Override with `--image-url` or `BLADERUNNER_BASE_IMAGE_URL` to use Ubuntu 24.04 or another distribution.
+- The default base image is the **pre-baked bladerunner guest image** (Debian 13 trixie + Incus + `br-agent`, built by `scripts/build-guest-image.sh` and published via the `build-guest-image` workflow under the `guest-image-latest` release). Fresh installs boot it directly — faster first boot, no first-boot apt. It is fetched fail-closed against its published `.sha256` sidecar: a missing, unreachable, or mismatched sidecar is fatal for the hosted image (bladerunner never boots an unverified image).
+- **Warned auto-fallback:** if the pre-baked image can't be used — a missing/renamed release asset for the arch, a download error, or a bad/missing/unreachable checksum sidecar — bladerunner emits a `WARN` and automatically falls back to the pinned Debian 13 (trixie) genericcloud qcow2 + first-boot cloud-init path. The Debian fallback is itself SHA-512 fail-closed against an embedded pin, so the invariant holds: you always boot a **verified** image (verified-hosted or verified-Debian), never an unverified one. The chosen path is logged.
+- **Escape hatch:** pass `--debian-image` (or set `BLADERUNNER_FORCE_DEBIAN_IMAGE=1`) to force the Debian genericcloud + cloud-init path explicitly — the "bring your own generic image" opt-out. `--hosted-image` (or `BLADERUNNER_FORCE_HOSTED_IMAGE=1`) forces the pre-baked image (already the default). The two are mutually exclusive, and neither can be combined with `--image-url`/`--image-path`. Override to Ubuntu 24.04 or another distribution with `--image-url` or `BLADERUNNER_BASE_IMAGE_URL`.
 - The base image can be raw or qcow2 format. qcow2 images are automatically converted to raw via `qemu-img`.
-- First boot can take several minutes while cloud-init installs and configures Incus.
-- A pre-baked bladerunner guest image (Debian Trixie + Incus + `br-agent`, built by `scripts/build-guest-image.sh` and published via the `build-guest-image` workflow) is the future default. While that release pipeline is bootstrapping it is opt-in: set `UseHostedGuestImage` (or pass `--image-url` with the GitHub Release URL) to use it. Once `guest-image-latest` is published the default will flip.
-- Downloaded base images are SHA-256 verified against a sidecar `.sha256` file. The check is strict for upstream Debian URLs and tolerant of a missing sidecar for GitHub Release URLs during the bootstrap window.
+- First boot on the Debian fallback path can take several minutes while cloud-init installs and configures Incus; the pre-baked default skips that.
+- Downloaded base images are checksum-verified: the pre-baked default and any disk-manifest-pinned image are SHA-256 verified fail-closed; a user-supplied `--image-url` falls back to a tolerant sidecar check (a missing sidecar is warned, not fatal, since arbitrary upstream hosts rarely publish one).
 - `br status` surfaces the pre-baked image build date from `/etc/bladerunner-image-version` when present.
 - GUI output is handled by VZ graphics window; serial console is logged at `console.log`.
 - Extended operations (download, VM readiness, Incus readiness) show live progress indicators in terminal.

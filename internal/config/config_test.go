@@ -19,6 +19,17 @@ func pinnedURL(arch string) string {
 		DebianTrixieBuild, arch, DebianTrixieBuild)
 }
 
+// hostedURL builds the expected hosted release-asset URL for an arch so the
+// tests track HostedGuestImageTag automatically.
+func hostedURL(arch string) string {
+	return fmt.Sprintf(
+		"https://github.com/stuffbucket/bladerunner/releases/download/%s/bladerunner-guest-%s.qcow2",
+		HostedGuestImageTag, arch)
+}
+
+// TestDefaultBaseImageURL verifies the default resolves the pre-baked hosted
+// image (the new default); the Debian genericcloud image is the fallback /
+// escape hatch, exercised via DebianTrixieGenericCloudURL.
 func TestDefaultBaseImageURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -27,15 +38,15 @@ func TestDefaultBaseImageURL(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "arm64 returns pinned Debian 13 trixie ARM64 image",
+			name:    "arm64 returns pre-baked hosted ARM64 image",
 			arch:    "arm64",
-			wantURL: pinnedURL("arm64"),
+			wantURL: hostedURL("arm64"),
 			wantErr: false,
 		},
 		{
-			name:    "amd64 returns pinned Debian 13 trixie AMD64 image",
+			name:    "amd64 returns pre-baked hosted AMD64 image",
 			arch:    "amd64",
-			wantURL: pinnedURL("amd64"),
+			wantURL: hostedURL("amd64"),
 			wantErr: false,
 		},
 		{
@@ -108,9 +119,12 @@ func TestDebianTrixieImageIsPinned(t *testing.T) {
 	}
 }
 
-// TestDefaultConfigCarriesPinnedChecksum verifies Default() wires the embedded
-// SHA-512 for the host arch so the download is verified.
-func TestDefaultConfigCarriesPinnedChecksum(t *testing.T) {
+// TestUseDebianImageCarriesPinnedChecksum verifies the Debian escape hatch
+// (UseDebianImage, shared by --debian-image and the warned auto-fallback)
+// repoints cfg at the Debian genericcloud image and restores the embedded
+// SHA-512 so the download is fail-closed verified. Default() itself is now hosted
+// and carries no embedded hash.
+func TestUseDebianImageCarriesPinnedChecksum(t *testing.T) {
 	want := DebianTrixieGenericCloudSHA512(runtime.GOARCH)
 	if want == "" {
 		t.Skipf("no pinned checksum for arch %s", runtime.GOARCH)
@@ -119,8 +133,18 @@ func TestDefaultConfigCarriesPinnedChecksum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
+	if err := UseDebianImage(cfg); err != nil {
+		t.Fatalf("UseDebianImage() error = %v", err)
+	}
+	if cfg.UseHostedGuestImage {
+		t.Error("UseDebianImage must disarm UseHostedGuestImage")
+	}
 	if cfg.BaseImageSHA512 != want {
-		t.Errorf("Default().BaseImageSHA512 = %q, want %q", cfg.BaseImageSHA512, want)
+		t.Errorf("BaseImageSHA512 = %q, want %q", cfg.BaseImageSHA512, want)
+	}
+	wantURL, _ := DebianTrixieGenericCloudURL(runtime.GOARCH)
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want debian %q", cfg.BaseImageURL, wantURL)
 	}
 }
 
@@ -177,13 +201,28 @@ func TestResolveBaseImageURL(t *testing.T) {
 	}
 }
 
-func TestDefaultConfigUseHostedGuestImage(t *testing.T) {
+// TestDefaultConfigIsHosted verifies Default() resolves the pre-baked hosted
+// image (the new default): UseHostedGuestImage is true, BaseImageURL names the
+// hosted release asset, and the pinned Debian SHA-512 is cleared (the hosted
+// image is verified fail-closed against its .sha256 sidecar, not an embedded
+// hash).
+func TestDefaultConfigIsHosted(t *testing.T) {
 	cfg, err := Default(t.TempDir())
 	if err != nil {
 		t.Fatalf("Default() error = %v", err)
 	}
-	if cfg.UseHostedGuestImage {
-		t.Error("Default config should have UseHostedGuestImage=false (opt-in)")
+	if !cfg.UseHostedGuestImage {
+		t.Error("Default config should have UseHostedGuestImage=true (pre-baked is the default)")
+	}
+	wantURL, err := HostedGuestImageURL(runtime.GOARCH)
+	if err != nil {
+		t.Skipf("no hosted image for arch %s", runtime.GOARCH)
+	}
+	if cfg.BaseImageURL != wantURL {
+		t.Errorf("BaseImageURL = %q, want hosted %q", cfg.BaseImageURL, wantURL)
+	}
+	if cfg.BaseImageSHA512 != "" {
+		t.Errorf("hosted default should clear the pinned SHA-512, got %q", cfg.BaseImageSHA512)
 	}
 }
 
@@ -208,6 +247,32 @@ func TestForceHostedImage(t *testing.T) {
 			t.Setenv(ForceHostedImageEnvVar, tt.val)
 			if got := ForceHostedImage(); got != tt.want {
 				t.Errorf("ForceHostedImage() with %q = %v, want %v", tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestForceDebianImage(t *testing.T) {
+	tests := []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"nope", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"Yes", true},
+		{"on", true},
+		{" 1 ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.val, func(t *testing.T) {
+			t.Setenv(ForceDebianImageEnvVar, tt.val)
+			if got := ForceDebianImage(); got != tt.want {
+				t.Errorf("ForceDebianImage() with %q = %v, want %v", tt.val, got, tt.want)
 			}
 		})
 	}

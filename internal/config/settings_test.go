@@ -223,6 +223,18 @@ func TestApplyToImageSources(t *testing.T) {
 			if c.UseHostedGuestImage {
 				t.Error("UseHostedGuestImage should be false for debian")
 			}
+			// Default() now resolves the hosted URL, so selecting Debian must
+			// re-point BaseImageURL back and restore the pinned SHA-512.
+			wantURL, err := DebianTrixieGenericCloudURL(c.Arch)
+			if err != nil {
+				t.Skipf("no debian image for arch %s", c.Arch)
+			}
+			if c.BaseImageURL != wantURL {
+				t.Errorf("BaseImageURL = %q, want debian %q", c.BaseImageURL, wantURL)
+			}
+			if c.BaseImageSHA512 != DebianTrixieGenericCloudSHA512(c.Arch) {
+				t.Errorf("debian must restore the pinned SHA-512, got %q", c.BaseImageSHA512)
+			}
 		}},
 		{"custom url", ImageSource{Kind: ImageCustomURL, URL: "https://x/y.qcow2"}, func(t *testing.T, c *Config) {
 			if c.BaseImageURL != "https://x/y.qcow2" {

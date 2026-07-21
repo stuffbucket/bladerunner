@@ -38,6 +38,7 @@ var startFlags struct {
 	imageURL    string
 	imagePath   string
 	hostedImage bool
+	debianImage bool
 	timeout     time.Duration
 	noNested    bool
 	restoreFrom string
@@ -60,7 +61,8 @@ func init() {
 	f.StringVar(&startFlags.stateDir, "state-dir", "", "State directory (default: ~/.local/state/bladerunner)")
 	f.StringVar(&startFlags.imageURL, "image-url", "", "Base image URL")
 	f.StringVar(&startFlags.imagePath, "image-path", "", "Local base image path")
-	f.BoolVar(&startFlags.hostedImage, "hosted-image", false, "Force the pre-baked hosted guest image (guest-image-latest release) instead of the Debian default (also settable via BLADERUNNER_FORCE_HOSTED_IMAGE=1)")
+	f.BoolVar(&startFlags.hostedImage, "hosted-image", false, "Force the pre-baked hosted guest image (guest-image-latest release); the default already resolves to it (also settable via BLADERUNNER_FORCE_HOSTED_IMAGE=1)")
+	f.BoolVar(&startFlags.debianImage, "debian-image", false, "Escape hatch: force the Debian Trixie genericcloud + cloud-init path instead of the pre-baked default (also settable via BLADERUNNER_FORCE_DEBIAN_IMAGE=1)")
 	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
 	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
@@ -182,14 +184,15 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 		cfg.BaseImagePath = startFlags.imagePath
 	}
 	// --hosted-image (or BLADERUNNER_FORCE_HOSTED_IMAGE=1) forces the pre-baked
-	// hosted guest image regardless of the built-in default or a persisted
-	// Settings image choice. It re-resolves BaseImageURL to the guest-image-latest
-	// release asset for this arch, clears the pinned Debian SHA-512 and any local
-	// path, and arms UseHostedGuestImage — which switches vm asset verification to
-	// the fail-closed .sha256 sidecar path. Conflicts with an explicit
-	// --image-url/--image-path are rejected up front by validateImageOverrideFlags,
-	// so this override lands last and wins cleanly. This is additive: the default
-	// stays Debian + cloud-init unless the flag/env is set.
+	// hosted guest image. Since the hosted image is now the DEFAULT, this mostly
+	// re-selects it over a persisted Settings image choice or makes the intent
+	// explicit. It re-resolves BaseImageURL to the guest-image-latest release asset
+	// for this arch, clears the pinned Debian SHA-512 and any local path, and arms
+	// UseHostedGuestImage — which switches vm asset verification to the fail-closed
+	// .sha256 sidecar path. --debian-image is the opposite escape hatch: it forces
+	// the Debian genericcloud + cloud-init path. Conflicts (both flags, or either
+	// with --image-url/--image-path) are rejected up front by
+	// validateImageOverrideFlags, so at most one force lands here.
 	if forceHostedImage() {
 		if url, err := config.HostedGuestImageURL(cfg.Arch); err == nil {
 			cfg.BaseImageURL = url
@@ -198,6 +201,13 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 		cfg.BaseImageExpectedSHA256 = ""
 		cfg.BaseImagePath = ""
 		cfg.UseHostedGuestImage = true
+	}
+	if forceDebianImage() {
+		// UseDebianImage repoints the URL, restores the pinned SHA-512, disarms
+		// UseHostedGuestImage, and clears any local path / manifest pin — so no
+		// auto-fallback is needed and the escape hatch boots the verified Debian
+		// path directly. Best effort: an unsupported arch leaves the default URL.
+		_ = config.UseDebianImage(cfg)
 	}
 }
 
@@ -208,20 +218,35 @@ func forceHostedImage() bool {
 	return startFlags.hostedImage || config.ForceHostedImage()
 }
 
+// forceDebianImage reports whether this run must use the Debian genericcloud +
+// cloud-init escape hatch, requested either via the --debian-image flag or the
+// BLADERUNNER_FORCE_DEBIAN_IMAGE=1 env (the non-interactive equivalent).
+func forceDebianImage() bool {
+	return startFlags.debianImage || config.ForceDebianImage()
+}
+
 // validateImageOverrideFlags rejects contradictory image-selection overrides.
-// --hosted-image (or its force env) selects the pre-baked hosted image, so it
-// cannot be combined with an explicit --image-url or --image-path (which pick a
-// different, user-supplied image). Asking for both at once is a user error, not
-// something to resolve silently by precedence.
+// --hosted-image (or its force env) selects the pre-baked hosted image and
+// --debian-image (or its force env) selects the Debian escape hatch, so the two
+// cannot be combined with each other or with an explicit --image-url/--image-path
+// (which pick a different, user-supplied image). Asking for two at once is a user
+// error, not something to resolve silently by precedence.
 func validateImageOverrideFlags() error {
-	if !forceHostedImage() {
+	if forceHostedImage() && forceDebianImage() {
+		return fmt.Errorf("--hosted-image conflicts with --debian-image (also check BLADERUNNER_FORCE_HOSTED_IMAGE / BLADERUNNER_FORCE_DEBIAN_IMAGE)")
+	}
+	if !forceHostedImage() && !forceDebianImage() {
 		return nil
 	}
+	which := "--hosted-image"
+	if forceDebianImage() {
+		which = "--debian-image"
+	}
 	if startFlags.imageURL != "" {
-		return fmt.Errorf("--hosted-image conflicts with --image-url (also check BLADERUNNER_FORCE_HOSTED_IMAGE)")
+		return fmt.Errorf("%s conflicts with --image-url", which)
 	}
 	if startFlags.imagePath != "" {
-		return fmt.Errorf("--hosted-image conflicts with --image-path (also check BLADERUNNER_FORCE_HOSTED_IMAGE)")
+		return fmt.Errorf("%s conflicts with --image-path", which)
 	}
 	return nil
 }

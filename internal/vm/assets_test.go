@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -304,5 +305,161 @@ func TestVerifyImageChecksum_PinnedSHA512(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SHA-512 mismatch") {
 		t.Errorf("expected SHA-512 mismatch error, got %v", err)
+	}
+}
+
+// hostedDebianServer serves a hosted image at /hosted (+ optional /hosted.sha256)
+// and a Debian fallback at /debian, so the hosted->Debian auto-fallback can be
+// exercised hermetically. hostedSidecar == "404" makes the hosted sidecar 404;
+// "" omits the handler entirely (also a 404). The Debian image ships no sidecar
+// and is verified via an embedded SHA-512 instead.
+func hostedDebianServer(t *testing.T, hosted, hostedSidecar, debian []byte) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hosted", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(hosted) })
+	if hostedSidecar != nil {
+		mux.HandleFunc("/hosted.sha256", func(w http.ResponseWriter, _ *http.Request) {
+			if string(hostedSidecar) == "404" {
+				http.NotFound(w, nil)
+				return
+			}
+			_, _ = w.Write(hostedSidecar)
+		})
+	}
+	mux.HandleFunc("/debian", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(debian) })
+	return httptest.NewServer(mux)
+}
+
+// withDebianFallback redirects the vm-package Debian fallback seam at the given
+// URL + embedded SHA-512 for the duration of the test, so ensureHostedOrDebian
+// falls back to a hermetic httptest endpoint instead of cloud.debian.org.
+func withDebianFallback(t *testing.T, url string, data []byte) {
+	t.Helper()
+	sum := sha512.Sum512(data)
+	sha := hex.EncodeToString(sum[:])
+	prev := useDebianImage
+	useDebianImage = func(cfg *config.Config) error {
+		cfg.BaseImageURL = url
+		cfg.BaseImageSHA512 = sha
+		cfg.BaseImageExpectedSHA256 = ""
+		cfg.BaseImagePath = ""
+		cfg.UseHostedGuestImage = false
+		return nil
+	}
+	t.Cleanup(func() { useDebianImage = prev })
+}
+
+// TestEnsureBaseImage_HostedSuccessStaysHosted verifies the default path: a
+// hosted image with a matching fail-closed sidecar is used verbatim and cfg
+// stays hosted (no fallback).
+func TestEnsureBaseImage_HostedSuccessStaysHosted(t *testing.T) {
+	hosted := []byte("pre-baked guest image bytes")
+	sidecar := []byte(sha256Hex(hosted) + "\n")
+	srv := hostedDebianServer(t, hosted, sidecar, []byte("debian bytes"))
+	defer srv.Close()
+	withDebianFallback(t, srv.URL+"/debian", []byte("debian bytes"))
+
+	cfg := &config.Config{
+		VMDir:               t.TempDir(),
+		Arch:                "arm64",
+		BaseImageURL:        srv.URL + "/hosted",
+		UseHostedGuestImage: true,
+	}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage: %v", err)
+	}
+	if !cfg.UseHostedGuestImage {
+		t.Error("hosted success must not flip UseHostedGuestImage")
+	}
+	if data, _ := os.ReadFile(got); !bytes.Equal(data, hosted) {
+		t.Errorf("booted image = %q, want the hosted bytes", string(data))
+	}
+}
+
+// TestEnsureBaseImage_Hosted404FallsBackToDebian verifies a missing hosted asset
+// (404 on the image) warns and lands on the verified Debian fallback — never an
+// unverified image.
+func TestEnsureBaseImage_Hosted404FallsBackToDebian(t *testing.T) {
+	debian := []byte("debian genericcloud bytes")
+	srv := hostedDebianServer(t, nil, nil, debian)
+	srv.Close() // shut the hosted endpoint down entirely -> download error (like a 404/DNS fail)
+	// Re-open only the debian endpoint on a fresh server.
+	debSrv := hostedDebianServer(t, nil, nil, debian)
+	defer debSrv.Close()
+	withDebianFallback(t, debSrv.URL+"/debian", debian)
+
+	cfg := &config.Config{
+		VMDir:               t.TempDir(),
+		Arch:                "arm64",
+		BaseImageURL:        srv.URL + "/hosted", // dead server -> hosted download fails
+		UseHostedGuestImage: true,
+	}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage should have fallen back, got error: %v", err)
+	}
+	if cfg.UseHostedGuestImage {
+		t.Error("fallback must disarm UseHostedGuestImage")
+	}
+	if data, _ := os.ReadFile(got); !bytes.Equal(data, debian) {
+		t.Errorf("booted image = %q, want the Debian fallback bytes", string(data))
+	}
+	if cfg.BaseImageSHA512 == "" {
+		t.Error("fallback must restore the pinned Debian SHA-512 (verified path)")
+	}
+}
+
+// TestEnsureBaseImage_HostedChecksumMismatchFallsBackToDebian verifies the
+// fail-closed sidecar: a hosted image whose sidecar does not match is rejected
+// (never booted) and the run falls back to the verified Debian path.
+func TestEnsureBaseImage_HostedChecksumMismatchFallsBackToDebian(t *testing.T) {
+	hosted := []byte("corrupt-or-tampered hosted image")
+	badSidecar := []byte(strings.Repeat("0", 64) + "\n") // valid-shaped hex, wrong digest
+	debian := []byte("debian genericcloud bytes v2")
+	srv := hostedDebianServer(t, hosted, badSidecar, debian)
+	defer srv.Close()
+	withDebianFallback(t, srv.URL+"/debian", debian)
+
+	cfg := &config.Config{
+		VMDir:               t.TempDir(),
+		Arch:                "arm64",
+		BaseImageURL:        srv.URL + "/hosted",
+		UseHostedGuestImage: true,
+	}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage should have fallen back on mismatch, got error: %v", err)
+	}
+	if cfg.UseHostedGuestImage {
+		t.Error("checksum-mismatch fallback must disarm UseHostedGuestImage")
+	}
+	if data, _ := os.ReadFile(got); !bytes.Equal(data, debian) {
+		t.Errorf("booted image = %q, want the Debian fallback bytes (never the mismatched hosted image)", string(data))
+	}
+}
+
+// TestEnsureBaseImage_HostedMissingSidecarFallsBackToDebian verifies a missing
+// (404) sidecar on the hosted image is fail-closed (never booted unverified) and
+// the run falls back to the verified Debian path.
+func TestEnsureBaseImage_HostedMissingSidecarFallsBackToDebian(t *testing.T) {
+	hosted := []byte("hosted image with no published sidecar")
+	debian := []byte("debian genericcloud bytes v3")
+	srv := hostedDebianServer(t, hosted, []byte("404"), debian)
+	defer srv.Close()
+	withDebianFallback(t, srv.URL+"/debian", debian)
+
+	cfg := &config.Config{
+		VMDir:               t.TempDir(),
+		Arch:                "arm64",
+		BaseImageURL:        srv.URL + "/hosted",
+		UseHostedGuestImage: true,
+	}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage should have fallen back on missing sidecar, got error: %v", err)
+	}
+	if data, _ := os.ReadFile(got); !bytes.Equal(data, debian) {
+		t.Errorf("booted image = %q, want the Debian fallback bytes", string(data))
 	}
 }

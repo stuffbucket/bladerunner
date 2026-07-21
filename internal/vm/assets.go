@@ -243,12 +243,22 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("base image url is empty")
 	}
 
+	// The default is the pre-baked hosted image, verified fail-closed against its
+	// .sha256 sidecar. If it can't be used — 404/missing asset, download error, or
+	// a missing/mismatched sidecar — warn and fall back to the pinned Debian +
+	// cloud-init path (itself SHA-512 fail-closed). A user-forced image
+	// (--image-url / --debian-image) or a disk-manifest pin is honored verbatim
+	// and never triggers this fallback.
+	if cfg.UseHostedGuestImage {
+		return ensureHostedOrDebian(ctx, cfg, path)
+	}
+
 	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", path)
 	if err := downloadFile(ctx, cfg.BaseImageURL, path); err != nil {
 		return "", err
 	}
 
-	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, cfg.UseHostedGuestImage, path); err != nil {
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, false, path); err != nil {
 		// Remove the corrupt download so subsequent runs don't reuse it.
 		_ = os.Remove(path)
 		return "", err
@@ -259,6 +269,66 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	}
 
 	logging.L().Info("downloaded base image", "path", path)
+	return path, nil
+}
+
+// useDebianImage repoints cfg at the Debian genericcloud + cloud-init fallback.
+// It is a package var (not a direct config call) solely so tests can redirect the
+// fallback to a local httptest server and exercise the hosted->Debian fallback
+// hermetically; production wiring is config.UseDebianImage.
+var useDebianImage = config.UseDebianImage
+
+// ensureHostedOrDebian downloads and STRICTLY (fail-closed) verifies the
+// pre-baked hosted guest image — the default — and on ANY failure (a 404 /
+// missing release asset for the arch, a download error, or a missing/unreachable/
+// mismatched .sha256 sidecar) emits a clear WARNING and auto-falls-back to the
+// pinned Debian genericcloud + first-boot cloud-init path (itself SHA-512
+// fail-closed). This preserves the invariant that bladerunner NEVER boots an
+// unverified image — it boots verified-hosted or verified-Debian — while never
+// bricking a first run on a flaky network or an arch whose hosted asset hasn't
+// shipped. It mutates cfg (via useDebianImage) when it falls back so the rest of
+// start (status reporting via UseHostedGuestImage) reflects the actual boot. The
+// chosen path is logged.
+func ensureHostedOrDebian(ctx context.Context, cfg *config.Config, path string) (string, error) {
+	logging.L().Info("downloading pre-baked guest image (default)", "url", cfg.BaseImageURL, "destination", path)
+	err := downloadFile(ctx, cfg.BaseImageURL, path)
+	if err == nil {
+		// BaseImageSHA512 is empty for the hosted image; strictSidecar=true makes a
+		// missing/unreachable/mismatched .sha256 fatal (fail-closed).
+		err = verifyImageChecksum(ctx, cfg.BaseImageURL, "", true, path)
+	}
+	if err == nil {
+		if convErr := ensureRawDiskImage(path); convErr != nil {
+			return "", convErr
+		}
+		logging.L().Info("using pre-baked guest image (verified)", "path", path)
+		return path, nil
+	}
+
+	// Discard any partial/corrupt/unverified hosted download before falling back.
+	_ = os.Remove(path)
+
+	hostedURL := cfg.BaseImageURL
+	if derr := useDebianImage(cfg); derr != nil {
+		// No Debian image for this arch either — surface the ORIGINAL hosted error.
+		return "", fmt.Errorf("pre-baked guest image unavailable and no Debian fallback for arch %q: %w", cfg.Arch, err)
+	}
+	logging.L().Warn("pre-baked guest image unavailable; falling back to Debian + cloud-init",
+		"reason", err, "hosted_url", hostedURL, "fallback_url", cfg.BaseImageURL)
+
+	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", path)
+	if err := downloadFile(ctx, cfg.BaseImageURL, path); err != nil {
+		return "", err
+	}
+	// The Debian fallback carries the pinned SHA-512, checked fail-closed here.
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, false, path); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := ensureRawDiskImage(path); err != nil {
+		return "", err
+	}
+	logging.L().Info("using Debian base image (cloud-init path, fallback)", "path", path)
 	return path, nil
 }
 
