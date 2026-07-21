@@ -269,12 +269,17 @@ if ! id -u "$SSH_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$SSH_USER" || true
 fi
 usermod -s /bin/bash "$SSH_USER" 2>/dev/null || true
-[ -d "/home/$SSH_USER" ] || mkdir -p "/home/$SSH_USER"
-mkdir -p "/home/$SSH_USER/.ssh"
-printf '%%s\n' "$SSH_PUBKEY" > "/home/$SSH_USER/.ssh/authorized_keys"
-chmod 700 "/home/$SSH_USER/.ssh"
-chmod 600 "/home/$SSH_USER/.ssh/authorized_keys"
-chown -R "$SSH_USER:$SSH_USER" "/home/$SSH_USER" 2>/dev/null || true
+# Resolve the user's ACTUAL home. A pre-existing system account (e.g. a distro's
+# own 'incus' user on the pre-baked image) may not live under /home, so writing
+# to /home/$SSH_USER would put the key where sshd never looks. getent gives the
+# real home; fall back to /home/$SSH_USER for a freshly-created user.
+SSH_HOME="$(getent passwd "$SSH_USER" | cut -d: -f6)"
+[ -n "$SSH_HOME" ] || SSH_HOME="/home/$SSH_USER"
+mkdir -p "$SSH_HOME/.ssh"
+printf '%%s\n' "$SSH_PUBKEY" > "$SSH_HOME/.ssh/authorized_keys"
+chmod 700 "$SSH_HOME/.ssh"
+chmod 600 "$SSH_HOME/.ssh/authorized_keys"
+chown -R "$SSH_USER:$SSH_USER" "$SSH_HOME/.ssh" 2>/dev/null || true
 usermod -aG sudo "$SSH_USER" 2>/dev/null || true
 echo "$SSH_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-bladerunner
 chmod 440 /etc/sudoers.d/90-bladerunner
