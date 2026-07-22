@@ -20,9 +20,13 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/bootstage"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/converge"
 )
 
-const menubarRefreshInterval = 3 * time.Second
+// menubarRefreshInterval is the fast poll cadence; it is the single source of
+// truth for the controller's Critical interval so the two always agree (the
+// controller reuses this one loop rather than adding a faster competing timer).
+const menubarRefreshInterval = converge.CriticalInterval
 
 // startActionTimeout bounds how long a StartOnFirstAction click waits for the
 // lazily-started guest to become healthy before giving up on running the
@@ -175,6 +179,38 @@ func onMenubarReady() {
 	// over an already-running VM.
 	setMenubarPresentHandler(notif.onPresent)
 
+	// Adaptive convergence controller. It is OBSERVE-FIRST: it watches the two
+	// cheap health invariants the poll loop already computes (the VM host process
+	// is up; the guest answers the liveness probe) on an adaptive cadence — fast
+	// (CriticalInterval) during boot/wake/drift, cheap and quiet (SteadyInterval,
+	// below the guest watchdog's 60s) once healthy — and only ESCALATES to the
+	// existing debounced notifier after repeated host-observed failure. It never
+	// reimplements guest self-heal (relay Restart=always, watchdog, chrony);
+	// reconverge for these invariants is nil (observe/escalate-only). The probes
+	// read lastHealth, captured from vmHealth() each tick, so we never dial twice.
+	var lastHealth vmState
+	sched := converge.NewScheduler()
+	invariants := []converge.Invariant{
+		{
+			// I0 vm-running: the control-socket IsRunning() the poll already did.
+			// A stopped VM short-circuits I1 (a guest probe would be meaningless).
+			Name:  "vm-running",
+			Probe: func(context.Context) (bool, error) { return lastHealth != vmStopped, nil },
+		},
+		{
+			// I1 guest-reachable: vmHealth() mapped the guest liveness probe to
+			// vmHealthy vs vmWedged/vmUnknown. Observe-only — the guest self-heals;
+			// the host only escalates after sustained failure.
+			Name:  "guest-reachable",
+			Probe: func(context.Context) (bool, error) { return lastHealth == vmHealthy, nil },
+		},
+	}
+	// Escalation reuses the existing notifier (debounce/rate-limit/app-bundle
+	// gating) — no second notification path. At-most-one banner, edge-triggered.
+	controller := converge.NewController(invariants, sched, func(string) {
+		notif.onNotConverging(time.Now())
+	})
+
 	// triggerStart boots the VM the same way the Start item does — show the
 	// splash + arm the notify machine, then launch `br start` detached. The
 	// single canonical start path, reused by the Start click and the policies.
@@ -183,6 +219,7 @@ func onMenubarReady() {
 	triggerStart := func() {
 		mStatus.SetTitle("bladerunner: starting…")
 		notif.onStart(time.Now())
+		sched.ForceCritical() // a fresh boot re-arms the aggressive cadence
 		_ = launchDetached("start")
 	}
 
@@ -212,13 +249,19 @@ func onMenubarReady() {
 	healthCh := make(chan vmState, 1)
 	updateCh := make(chan struct{}, 1)
 	go func() {
+		// The convergence probes are cheap in-process reads of lastHealth, so a
+		// background context suffices; the controller still wraps each probe in a
+		// short per-probe timeout.
+		ctx := context.Background()
 		lastWall := time.Now().Unix()
 		engineChecked := false
 		for {
 			st := vmHealth()
+			lastHealth = st // feed the controller's probes (never dial twice)
 			now := time.Now().Unix()
 			if st != vmStopped && now-lastWall > int64(menubarRefreshInterval/time.Second)+wakeGapSeconds {
 				notif.onWake(time.Now()) // banner only; the guest watchdog self-heals
+				sched.ForceCritical()    // wake is a critical period — re-arm fast probing
 			}
 			lastWall = now
 			// Feed every reading (not just the ones that fit in the channel) to
@@ -227,7 +270,23 @@ func onMenubarReady() {
 			// Feed the live boot stage too, so a boot that dwells too long on one
 			// stage surfaces a single conservative "still starting…" banner. Fast
 			// boots advance through the stages in seconds and never trip it.
-			notif.observeBoot(currentBootStage(), time.Now())
+			stage := currentBootStage()
+			notif.observeBoot(stage, time.Now())
+			// HANDOFF GUARD (anti-double-heal): while a `br start` boot is in
+			// progress it OWNS convergence, so the menubar controller stays
+			// OBSERVE-ONLY this tick (no reconverge/escalate). A non-empty,
+			// non-terminal boot stage is exactly "boot in progress"; keep the fast
+			// cadence but don't Tick/Observe so we can't escalate over an
+			// in-flight boot.
+			if bootInProgress(stage) {
+				sched.ForceCritical()
+			} else {
+				// Run one convergence tick and drive the schedule from its outcome.
+				results := controller.Tick(ctx)
+				if results != nil { // nil == single-flight skipped this tick
+					sched.Observe(converge.Converged(results), converge.Reconverging(results))
+				}
+			}
 			// Once the guest is up, check whether it's running an OLDER engine
 			// than this (possibly just-upgraded) menubar; if so, surface a
 			// user-gated "restart to apply". Checked once per session.
@@ -245,7 +304,9 @@ func onMenubarReady() {
 			case healthCh <- st:
 			default:
 			}
-			time.Sleep(menubarRefreshInterval)
+			// Adaptive cadence: fast during critical periods, cheap once steady,
+			// never a busy loop and never faster than the guest can heal.
+			time.Sleep(sched.NextInterval())
 		}
 	}()
 
@@ -371,6 +432,14 @@ func currentBootStage() bootstage.Stage {
 		return ""
 	}
 	return s.Stage
+}
+
+// bootInProgress reports whether a `br start` boot currently OWNS convergence:
+// the stage is non-empty and not terminal (Ready/Failed). While true the menubar
+// convergence controller stays observe-only so it can't double-heal or escalate
+// over an in-flight boot.
+func bootInProgress(stage bootstage.Stage) bool {
+	return stage != "" && stage != bootstage.Ready && stage != bootstage.Failed
 }
 
 // restartVM stops the VM (graceful, forcing after a timeout) then starts a fresh

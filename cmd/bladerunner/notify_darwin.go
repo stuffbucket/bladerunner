@@ -23,6 +23,11 @@ const (
 	bodyReconnecting  = "Woke from sleep — the VM is re-syncing its clock…"
 	bodyEngineUpdate  = "An update is ready — choose “Restart VM to finish update”."
 	bodyStillStarting = "Still starting… the VM is taking longer than usual."
+	// bodyNotConverging is the terminal escalation the convergence controller
+	// raises after the host has repeatedly observed the VM failing to converge
+	// (past the guest's own self-heal window). Phrased like bodyUnresponsive
+	// because the actionable fix is the same.
+	bodyNotConverging = "Your VM isn’t recovering — try Restart."
 )
 
 // Tuning for the transition state machine, sized against the 3s health poll.
@@ -212,6 +217,20 @@ func (m *vmNotifier) onWake(now time.Time) {
 	}
 	m.lastNotifyAt = now
 	m.n.notify(notifyTitle, bodyReconnecting)
+}
+
+// onNotConverging emits the terminal convergence-controller escalation, reusing
+// the same rate-limit gate as every other banner so a flapping guest can't spam.
+// The controller only calls this after it has exhausted its host-side attempts,
+// well past the guest's own self-heal window.
+func (m *vmNotifier) onNotConverging(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rateLimited(now) {
+		return
+	}
+	m.lastNotifyAt = now
+	m.n.notify(notifyTitle, bodyNotConverging)
 }
 
 // observe feeds one health reading into the machine, emitting a banner (and
