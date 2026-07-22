@@ -144,3 +144,86 @@ func TestExtractError_Truncation(t *testing.T) {
 		t.Error("expected truncated string to end with ...")
 	}
 }
+
+// TestParseLine_BootstrapMilestoneCaptured verifies a non-failing typed
+// breadcrumb updates BootstrapStage to the latest stage without marking a
+// failure. The host streams this as live "cloud-init: <stage>" progress.
+func TestParseLine_BootstrapMilestoneCaptured(t *testing.T) {
+	var status Status
+	parseLine(&status, "bladerunner-bootstrap: stage=apt-install-base t=2026-07-22T00:00:00Z")
+	if status.BootstrapStage != "apt-install-base" {
+		t.Errorf("BootstrapStage = %q, want %q", status.BootstrapStage, "apt-install-base")
+	}
+	if status.BootstrapFailed {
+		t.Error("a milestone stage must not set BootstrapFailed")
+	}
+
+	// The latest breadcrumb wins.
+	parseLine(&status, "bladerunner-bootstrap: stage=bootstrap-complete t=2026-07-22T00:01:00Z")
+	if status.BootstrapStage != "bootstrap-complete" {
+		t.Errorf("BootstrapStage = %q, want latest %q", status.BootstrapStage, "bootstrap-complete")
+	}
+	if status.BootstrapFailed {
+		t.Error("bootstrap-complete is terminal success, not a failure")
+	}
+}
+
+// TestParseLine_BootstrapFailStages verifies each known fatal/degraded typed
+// stage sets BootstrapFailed + BootstrapFailStage + the mapped human reason.
+func TestParseLine_BootstrapFailStages(t *testing.T) {
+	tests := []struct {
+		stage      string
+		wantReason string
+	}{
+		{"vsock-failed", "guest vsock device missing"},
+		{"core-install-failed", "core packages (socat/sshd) failed to install"},
+		{"incus-init-failed", "Incus failed to initialize a storage pool"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.stage, func(t *testing.T) {
+			var status Status
+			parseLine(&status, "bladerunner-bootstrap: stage="+tt.stage+" t=2026-07-22T00:00:00Z")
+			if !status.BootstrapFailed {
+				t.Fatalf("stage %q did not set BootstrapFailed", tt.stage)
+			}
+			if status.BootstrapFailStage != tt.stage {
+				t.Errorf("BootstrapFailStage = %q, want %q", status.BootstrapFailStage, tt.stage)
+			}
+			if status.BootstrapReason != tt.wantReason {
+				t.Errorf("BootstrapReason = %q, want %q", status.BootstrapReason, tt.wantReason)
+			}
+			if len(status.Errors) == 0 {
+				t.Error("a fatal bootstrap stage should record an error breadcrumb")
+			}
+		})
+	}
+}
+
+// TestParseLine_BootstrapUnknownFailStage verifies an unrecognized "*-failed"
+// stage still classifies as a failure with a generic reason, so a future guest
+// stage the host does not know about still fails legibly.
+func TestParseLine_BootstrapUnknownFailStage(t *testing.T) {
+	var status Status
+	parseLine(&status, "bladerunner-bootstrap: stage=mystery-layer-failed t=2026-07-22T00:00:00Z")
+	if !status.BootstrapFailed || status.BootstrapFailStage != "mystery-layer-failed" {
+		t.Fatalf("unknown -failed stage not classified as failure: %+v", status)
+	}
+	if !strings.Contains(status.BootstrapReason, "mystery-layer-failed") {
+		t.Errorf("generic reason should name the stage, got %q", status.BootstrapReason)
+	}
+}
+
+// TestParseLine_BootstrapFailureMonotonic verifies a later milestone breadcrumb
+// updates the latest-stage field but does NOT clear a previously recorded fatal
+// failure (the failure is sticky so the host still fails fast).
+func TestParseLine_BootstrapFailureMonotonic(t *testing.T) {
+	var status Status
+	parseLine(&status, "bladerunner-bootstrap: stage=vsock-failed t=2026-07-22T00:00:00Z")
+	parseLine(&status, "bladerunner-bootstrap: stage=ssh-up t=2026-07-22T00:00:01Z")
+	if !status.BootstrapFailed {
+		t.Error("a later milestone must not clear a recorded bootstrap failure")
+	}
+	if status.BootstrapFailStage != "vsock-failed" {
+		t.Errorf("BootstrapFailStage = %q, want the original %q", status.BootstrapFailStage, "vsock-failed")
+	}
+}

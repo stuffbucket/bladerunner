@@ -433,6 +433,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	bootPub := newBootStagePublisher(cfg.VMDir)
 	defer bootstage.Clear(cfg.VMDir)
 
+	// A guest-readiness ctx derived from the foreground ctx. The console tailer
+	// cancels it the instant it sees a FATAL typed bootstrap breadcrumb, so the
+	// downstream Incus-readiness wait (waitForGuestReady) returns immediately
+	// instead of burning the full 10-minute timeout. Canceling it does NOT abort
+	// the VM (that is torn down by the deferred runner.Stop via the parent ctx).
+	bootCtx, bootCancel := context.WithCancel(ctx)
+	defer bootCancel()
+	// Records a named guest-bootstrap failure so waitForGuestReady/report can name
+	// the failing LAYER instead of emitting the generic Incus-timeout error.
+	var bootFail bootFailure
+
 	// Build the buildx-style boot board when stderr is a TTY. It shows
 	// stage state on top and a live tail of the guest serial console
 	// underneath. Non-TTY callers (CI, log capture) still get plain slog
@@ -442,7 +453,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	var boardProg vm.Progress
 	tailCancel := context.CancelFunc(func() {})
 	if !jsonOutput {
-		brd, boardProg, tailCancel = startBootBoard(ctx, cfg)
+		brd, boardProg, tailCancel = startBootBoard(ctx, cfg, &bootFail, bootCancel)
 	}
 	defer tailCancel()
 
@@ -530,7 +541,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		// macOS event loop must run on the main thread immediately. We
 		// don't yet know if boot will succeed, so don't claim it did.
 		report(nil)
-		go func() { _ = waitForGuestReady(ctx, cfg, runner) }()
+		go func() { _ = waitForGuestReady(bootCtx, cfg, runner, &bootFail) }()
 
 		if !jsonOutput {
 			fmt.Println(subtle("Opening GUI window (runs on main thread)..."))
@@ -539,7 +550,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("start gui: %w", err)
 		}
 	} else {
-		bootErr := waitForGuestReady(ctx, cfg, runner)
+		bootErr := waitForGuestReady(bootCtx, cfg, runner, &bootFail)
 		report(bootErr)
 		if !jsonOutput {
 			fmt.Println(subtle("Headless mode. Press Ctrl+C to stop."))
@@ -572,11 +583,21 @@ func startReportJSON(cfg *config.Config, endpoint string, bootErr error) error {
 }
 
 // waitForGuestReady runs the Incus readiness wait. Returns nil if the guest
-// reached the Incus-ready state, or an error describing why it didn't. Errors
-// are non-fatal at the call site (partial reports are still useful) but the
-// caller should warn the user rather than pretend everything is fine.
-func waitForGuestReady(ctx context.Context, _ *config.Config, runner *vm.Runner) error {
+// reached the Incus-ready state, or an error describing why it didn't. When the
+// console tailer recorded a named guest-bootstrap failure (fail), that reason is
+// preferred over the generic Incus-timeout error so the message names the failing
+// LAYER — a FATAL stage also cancels the wait ctx, so WaitForIncus returns fast
+// rather than after the full 10-minute backstop. Errors are non-fatal at the call
+// site (partial reports are still useful) but the caller should warn the user.
+func waitForGuestReady(ctx context.Context, _ *config.Config, runner *vm.Runner, fail *bootFailure) error {
 	if _, err := runner.WaitForIncus(ctx); err != nil {
+		// A recorded bootstrap failure names the actual failing layer; prefer it
+		// over the generic "wait for incus authorization" timeout so the user sees
+		// e.g. "guest boot failed at vsock-failed: guest vsock device missing".
+		if reason := fail.err(); reason != nil {
+			logging.L().Error("guest boot failed", "error", reason)
+			return reason
+		}
 		logging.L().Error("wait for incus", "error", err)
 		return err
 	}
@@ -611,9 +632,12 @@ const (
 // startBootBoard constructs the split-view boot board, wires it into the
 // runner as the progress reporter, and starts a console.log tailer that
 // feeds raw lines into the tail panel and advances stage state from parsed
-// cloud-init / ssh markers. Returns the board (nil when stderr is not a
-// TTY) and a cancel function for the tailer goroutine.
-func startBootBoard(ctx context.Context, cfg *config.Config) (*board.Board, vm.Progress, context.CancelFunc) {
+// cloud-init / ssh markers. It also funnels the TYPED guest bootstrap
+// breadcrumbs into fail (naming the failing layer) and, on a FATAL stage,
+// cancels cancelBoot so the downstream Incus wait returns immediately. Returns
+// the board (nil when stderr is not a TTY) and a cancel function for the tailer
+// goroutine.
+func startBootBoard(ctx context.Context, cfg *config.Config, fail *bootFailure, cancelBoot context.CancelFunc) (*board.Board, vm.Progress, context.CancelFunc) {
 	if !term.IsTerminal(int(os.Stderr.Fd())) {
 		return nil, nil, func() {}
 	}
@@ -631,7 +655,7 @@ func startBootBoard(ctx context.Context, cfg *config.Config) (*board.Board, vm.P
 	brd.Start()
 
 	tailCtx, cancel := context.WithCancel(ctx)
-	go tailConsoleIntoBoard(tailCtx, brd, cfg.ConsoleLogPath)
+	go tailConsoleIntoBoard(tailCtx, brd, cfg.ConsoleLogPath, fail, cancelBoot)
 	return brd, newBoardAdapter(brd), cancel
 }
 
@@ -678,12 +702,70 @@ func mapRunnerStage(s string) string {
 
 const consoleTailPollInterval = 250 * time.Millisecond
 
+// bootFailure records a named guest-bootstrap failure surfaced by the console
+// tailer, so the boot-wait path can turn an opaque Incus timeout into an error
+// that names the failing LAYER. It is written by tailConsoleIntoBoard (from the
+// console watcher goroutine) and read by waitForGuestReady/report on the
+// foreground, so all access is mutex-guarded.
+//
+// A FATAL stage (fatal==true, e.g. vsock-failed / core-install-failed) means the
+// guest can never be reached; the tailer also cancels the boot ctx so the Incus
+// wait returns immediately instead of burning the full timeout. A non-fatal
+// stage (incus-init-failed) is recorded but does not cancel: the guest stays
+// reachable, and the reason is only used to NAME the layer IF the Incus-auth
+// wait later times out on its own.
+type bootFailure struct {
+	mu     sync.Mutex
+	stage  string
+	reason string
+	fatal  bool
+}
+
+// record stores the first failure seen. Later failures do not overwrite an
+// already-recorded one, so a fatal breadcrumb wins over a subsequent non-fatal
+// milestone the watcher might observe.
+func (f *bootFailure) record(stage, reason string, fatal bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stage != "" {
+		return
+	}
+	f.stage = stage
+	f.reason = reason
+	f.fatal = fatal
+}
+
+// err returns a layer-naming boot error when a failure was recorded, else nil.
+// A fatal failure reads "guest boot failed at <stage>: <reason>"; a non-fatal
+// one names the layer for a timed-out Incus wait.
+func (f *bootFailure) err() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case f.stage == "":
+		return nil
+	case f.fatal:
+		return fmt.Errorf("guest boot failed at %s: %s", f.stage, f.reason)
+	default:
+		return fmt.Errorf("incus never authorized — %s", f.reason)
+	}
+}
+
 // tailConsoleIntoBoard streams the guest serial console into the board's
 // tail panel and advances the cloud-init / ssh stages from the parsed boot
 // status. The kernel-boot transition is implicit (it happens before
 // cloud-init starts running).
-func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
-	var seenKernel, seenCIBegin, seenCIDone, seenCIFail, seenSSH bool
+//
+// It also funnels the TYPED guest bootstrap breadcrumbs: milestone stages are
+// streamed as cloud-init substatus so the user sees live progress, and a
+// *-failed stage is recorded into fail (naming the layer). A FATAL bootstrap
+// failure additionally fails the cloud-init board stage and calls cancelBoot so
+// the downstream Incus wait returns at once instead of timing out. A non-fatal
+// bootstrap failure (incus-init-failed) is surfaced as a prominent substatus and
+// recorded, but does not cancel — the guest is still reachable.
+func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string, fail *bootFailure, cancelBoot context.CancelFunc) {
+	var seenKernel, seenCIBegin, seenCIDone, seenCIFail, seenSSH, seenBootstrapFail bool
+	var lastStage string
 	for ev := range boot.WatchEvents(ctx, path, boot.WatchOptions{
 		PollInterval: consoleTailPollInterval,
 		FromEnd:      true,
@@ -695,6 +777,27 @@ func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
 		if (ev.Status.KernelBooted || ev.Status.SystemdReached) && !seenCIBegin {
 			seenCIBegin = true
 			b.Begin(boardStageCloudInit, 0)
+		}
+		// Stream the latest typed bootstrap milestone as live cloud-init
+		// substatus so the user sees "cloud-init: <stage>" instead of a blank
+		// wait. Only emit on change to avoid churning the board.
+		if s := ev.Status.BootstrapStage; s != "" && s != lastStage {
+			lastStage = s
+			b.Substatus(boardStageCloudInit, "cloud-init: "+s)
+		}
+		// A typed *-failed breadcrumb names the failing layer. Record it and, for
+		// a FATAL stage, fail the board + cancel the boot ctx so the Incus wait
+		// returns immediately instead of collapsing into the 10-minute timeout.
+		if ev.Status.BootstrapFailed && !seenBootstrapFail {
+			seenBootstrapFail = true
+			fatal := isFatalBootstrapStage(ev.Status.BootstrapFailStage)
+			fail.record(ev.Status.BootstrapFailStage, ev.Status.BootstrapReason, fatal)
+			if fatal {
+				b.Fail(boardStageCloudInit, fmt.Errorf("guest boot failed at %s: %s", ev.Status.BootstrapFailStage, ev.Status.BootstrapReason))
+				cancelBoot()
+			} else {
+				b.Substatus(boardStageCloudInit, "WARNING: "+ev.Status.BootstrapReason)
+			}
 		}
 		if ev.Status.CloudInitFailed && !seenCIFail {
 			seenCIFail = true
@@ -710,6 +813,20 @@ func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
 			b.Complete(boardStageSSH)
 		}
 	}
+}
+
+// fatalBootstrapStages are the typed guest bootstrap failures that make the
+// guest permanently unreachable, so the host should fail fast and cancel the
+// boot wait. incus-init-failed is deliberately absent: it is non-fatal (the
+// guest stays reachable over SSH), so it only names the layer for a later
+// Incus-auth timeout.
+var fatalBootstrapStages = map[string]bool{
+	"vsock-failed":        true,
+	"core-install-failed": true,
+}
+
+func isFatalBootstrapStage(stage string) bool {
+	return fatalBootstrapStages[stage]
 }
 
 // bootStagePublisher writes the coarse boot phase to the bootstage file,

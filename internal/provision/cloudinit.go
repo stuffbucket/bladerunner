@@ -172,9 +172,14 @@ modprobe vsock 2>/dev/null || true
 modprobe vmw_vsock_virtio_transport 2>/dev/null || true
 modprobe vhost_vsock 2>/dev/null || true
 
-# Verify vsock is available
+# Verify vsock is available. FATAL: without /dev/vsock the host<->guest vsock
+# bridges (SSH + Incus + OIDC + NTP) can never come up, so the guest is
+# permanently unreachable. Emit a TYPED breadcrumb and fail loud+fast so the
+# host names this layer instead of collapsing into an opaque 10-minute timeout.
 if [ ! -e /dev/vsock ]; then
-  echo "WARNING: /dev/vsock not found, vsock forwarding may not work" >&2
+  echo "FATAL: /dev/vsock not found; vsock forwarding impossible, guest unreachable" >&2
+  br_stage vsock-failed
+  exit 1
 fi
 
 # Resilient apt update: retry transient mirror failures (e.g. a freshly
@@ -261,6 +266,19 @@ systemctl enable --now ssh || true
 systemctl enable --now sshd || true
 br_stage ssh-up
 
+# FATAL: verify the two packages the host<->guest control path cannot live
+# without — socat (the vsock relay transport) and sshd (the break-glass shell).
+# If the resilient install loop above still could not land them, the guest is
+# unreachable; emit a TYPED breadcrumb and fail fast BEFORE the break-glass SSH /
+# relay setup so the host names this layer instead of waiting out the full Incus
+# timeout. (sshd installs to /usr/sbin on Debian, which may be off PATH here.)
+if ! command -v socat >/dev/null 2>&1 ||
+  { ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; }; then
+  echo "FATAL: core packages missing (socat/sshd); guest control path impossible" >&2
+  br_stage core-install-failed
+  exit 1
+fi
+
 # --- Break-glass SSH access, provisioned HERE in the bootstrap (runcmd) rather
 #     than via cloud-init's users/ssh_authorized_keys/chpasswd modules. Those are
 #     per-instance modules that the first-boot reboot (bootcmd, #56) runs BEFORE,
@@ -339,6 +357,17 @@ incus admin init --auto || true
 incus config set core.https_address "[::]:8443" || true
 br_stage incus-init-done
 
+# NON-FATAL: surface (but do not fail on) an Incus that came up without a usable
+# storage pool — the most common way 'incus admin init --auto' silently no-ops.
+# We deliberately do NOT exit: SSH + the relays are already up, so the guest
+# stays reachable and debuggable (matching the best-effort incus philosophy).
+# The TYPED breadcrumb just names this layer so, if the host's Incus-auth wait
+# later times out, it can blame storage-pool init instead of a generic timeout.
+if ! incus storage list --format=csv 2>/dev/null | grep -q .; then
+  echo "WARNING: incus initialized without a usable storage pool" >&2
+  br_stage incus-init-failed
+fi
+
 # Configure Incus to trust the bladerunner local OIDC provider.
 # The issuer URL is the loopback address inside the guest, which is forwarded
 # over vsock to the bladerunner OIDC server on the host. See internal/oidc.
@@ -383,6 +412,10 @@ sleep 2
 
 date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ >/var/lib/bladerunner/ready
 br_stage bootstrap-done
+# Definitive success terminal: the host treats bootstrap-complete as the one
+# breadcrumb that proves the guest bootstrap ran to the end. bootstrap-done is
+# kept immediately above for backward compatibility with older host parsers.
+br_stage bootstrap-complete
 `,
 		// Break-glass SSH block (SSH_USER, SSH_PUBKEY), placed first because it
 		// appears early in the bootstrap, before the vsock relays.

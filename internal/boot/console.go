@@ -33,9 +33,41 @@ type Status struct {
 	KernelPanic     bool
 	EmergencyMode   bool
 
+	// BootstrapStage is the name of the most recent TYPED guest bootstrap
+	// breadcrumb (bladerunner-bootstrap: stage=<name>), e.g. "apt-install-base"
+	// or "bootstrap-complete". Empty until the first breadcrumb is seen. Updated
+	// to the latest stage on every breadcrumb so callers can stream live
+	// progress ("cloud-init: <stage>") instead of a blank wait.
+	BootstrapStage string
+	// BootstrapFailed is set once a fatal typed stage (name ending in "-failed")
+	// is seen. It marks the guest bootstrap as having named a failing LAYER, so
+	// the host can fail fast and blame that layer instead of the generic Incus
+	// timeout.
+	BootstrapFailed bool
+	// BootstrapFailStage is the exact stage name that failed (e.g.
+	// "vsock-failed"), set alongside BootstrapFailed.
+	BootstrapFailStage string
+	// BootstrapReason is a human-readable explanation of the failing stage,
+	// mapped from BootstrapFailStage (see bootstrapFailReasons).
+	BootstrapReason string
+
 	// Errors detected during boot
 	Errors []string
 }
+
+// bootstrapFailReasons maps a fatal/degraded typed guest bootstrap stage to a
+// human-readable reason naming the LAYER that failed. Any stage whose name ends
+// in "-failed" is treated as a bootstrap failure; the table supplies a friendly
+// reason for the known ones (an unknown "*-failed" falls back to the raw stage).
+var bootstrapFailReasons = map[string]string{
+	"vsock-failed":        "guest vsock device missing",
+	"core-install-failed": "core packages (socat/sshd) failed to install",
+	"incus-init-failed":   "Incus failed to initialize a storage pool",
+}
+
+// bootstrapFailSuffix is the trailing marker every typed FATAL/degraded stage
+// carries, so the parser can classify unknown-but-failed stages generically.
+const bootstrapFailSuffix = "-failed"
 
 // Pattern definitions for boot stage detection.
 var (
@@ -49,6 +81,10 @@ var (
 	patternKernelPanic   = regexp.MustCompile(`(?i)Kernel panic|BUG:|Oops:`)
 	patternEmergency     = regexp.MustCompile(`(?i)emergency\.target|You are in emergency mode|systemd-emergency`)
 	patternError         = regexp.MustCompile(`(?i)\berror\b.*:|failed to|cannot|unable to`)
+	// patternBootstrapStage captures the TYPED guest bootstrap breadcrumbs the
+	// cloudinit bootstrap writes to /dev/hvc0 (see renderBootstrapScript's
+	// br_stage). The capture group is the stage name (a single \S+ token).
+	patternBootstrapStage = regexp.MustCompile(`bladerunner-bootstrap: stage=(\S+)`)
 )
 
 // WatchOptions configures WatchEvents.
@@ -185,6 +221,9 @@ func (t *tailState) drainInto(ctx context.Context, ch chan<- Event) bool {
 }
 
 func parseLine(status *Status, line string) {
+	if m := patternBootstrapStage.FindStringSubmatch(line); m != nil {
+		parseBootstrapStage(status, m[1])
+	}
 	if patternKernelBoot.MatchString(line) {
 		status.KernelBooted = true
 	}
@@ -220,6 +259,27 @@ func parseLine(status *Status, line string) {
 			status.Errors = append(status.Errors, extractError(line))
 		}
 	}
+}
+
+// parseBootstrapStage folds a TYPED guest bootstrap breadcrumb (the stage=<name>
+// token) into the status: it always records the latest stage, and classifies any
+// stage whose name ends in "-failed" as a fatal/degraded bootstrap failure,
+// setting the fail fields + a human reason. It is monotonic — once a failure has
+// been recorded, a later non-fatal milestone (e.g. a subsequent best-effort
+// stage) does not clear it.
+func parseBootstrapStage(status *Status, stage string) {
+	status.BootstrapStage = stage
+	if !strings.HasSuffix(stage, bootstrapFailSuffix) {
+		return
+	}
+	status.BootstrapFailed = true
+	status.BootstrapFailStage = stage
+	if reason, ok := bootstrapFailReasons[stage]; ok {
+		status.BootstrapReason = reason
+	} else {
+		status.BootstrapReason = "guest bootstrap failed at " + stage
+	}
+	status.Errors = append(status.Errors, "bootstrap "+stage+": "+status.BootstrapReason)
 }
 
 func extractError(line string) string {
