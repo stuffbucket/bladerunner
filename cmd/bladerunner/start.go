@@ -409,6 +409,21 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	// Pre-boot GRUB-stall pre-check. Only the "known-wedged" case warns: an
+	// un-hardened disk whose LAST shutdown was unclean, so the guest grubenv
+	// likely still has recordfail=1 and an un-hardened grub.cfg would park at the
+	// menu waiting for a keypress that never comes. A clean prior shutdown clears
+	// recordfail (GrubAtRisk stays silent), and a hardened/hosted/fresh disk is
+	// GrubSafe. The host can't edit the guest ext4 to fix it in place, but we CAN
+	// warn so the one-time self-repair pause doesn't read as a hang and the user
+	// stays patient instead of force-quitting (which only re-arms the stall). The
+	// boot itself re-runs update-grub, hardening the disk for every later boot.
+	if !jsonOutput && vm.AssessGrubRiskForConfig(cfg, startFlags.restoreFrom != "") == vm.GrubKnownWedged {
+		fmt.Println(warning("One-time setup: this VM may pause up to a minute while it finishes"))
+		fmt.Println(warning("a boot repair. Please keep it running — don't force-quit."))
+		fmt.Println()
+	}
+
 	// Publish coarse, human-friendly boot phase to the bootstage file for the
 	// menubar's starting splash. Driven by the runner's own stage events — which
 	// fire in every mode (GUI, headless, detached menubar boot) and don't depend
@@ -627,9 +642,9 @@ type boardAdapter struct{ b *board.Board }
 
 func newBoardAdapter(b *board.Board) *boardAdapter { return &boardAdapter{b: b} }
 
-func (a *boardAdapter) Begin(stage, _ string, _ time.Duration) {
+func (a *boardAdapter) Begin(stage, _ string, budget time.Duration) {
 	if id := mapRunnerStage(stage); id != "" {
-		a.b.Begin(id)
+		a.b.Begin(id, budget)
 	}
 }
 
@@ -679,7 +694,7 @@ func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
 		}
 		if (ev.Status.KernelBooted || ev.Status.SystemdReached) && !seenCIBegin {
 			seenCIBegin = true
-			b.Begin(boardStageCloudInit)
+			b.Begin(boardStageCloudInit, 0)
 		}
 		if ev.Status.CloudInitFailed && !seenCIFail {
 			seenCIFail = true
@@ -688,7 +703,7 @@ func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
 		if ev.Status.CloudInitDone && !seenCIDone {
 			seenCIDone = true
 			b.Complete(boardStageCloudInit)
-			b.Begin(boardStageSSH)
+			b.Begin(boardStageSSH, 0)
 		}
 		if ev.Status.SSHReady && !seenSSH {
 			seenSSH = true

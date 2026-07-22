@@ -224,6 +224,10 @@ func onMenubarReady() {
 			// Feed every reading (not just the ones that fit in the channel) to
 			// the transition machine, so edge detection never misses a change.
 			notif.observe(st, time.Now())
+			// Feed the live boot stage too, so a boot that dwells too long on one
+			// stage surfaces a single conservative "still starting…" banner. Fast
+			// boots advance through the stages in seconds and never trip it.
+			notif.observeBoot(currentBootStage(), time.Now())
 			// Once the guest is up, check whether it's running an OLDER engine
 			// than this (possibly just-upgraded) menubar; if so, surface a
 			// user-gated "restart to apply". Checked once per session.
@@ -356,6 +360,17 @@ func bootingPhase() (string, bool) {
 		return "", false
 	}
 	return bootstage.Message(s.Stage), true
+}
+
+// currentBootStage returns the live boot stage published by the running `br
+// start`, or "" when there is no recent boot underway (no file, or it went stale
+// past the 90s threshold bootingPhase uses). Feeds the boot-progress notifier.
+func currentBootStage() bootstage.Stage {
+	s, ok := bootstage.Read(config.DefaultStateDir())
+	if !ok || time.Since(s.UpdatedAt) > 90*time.Second {
+		return ""
+	}
+	return s.Stage
 }
 
 // restartVM stops the VM (graceful, forcing after a timeout) then starts a fresh

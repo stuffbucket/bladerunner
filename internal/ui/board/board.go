@@ -93,6 +93,7 @@ type stageRT struct {
 	state     State
 	started   time.Time
 	finished  time.Time
+	budget    time.Duration // per-stage expected duration; 0 = no "taking longer" hint
 	substatus string
 	err       error
 }
@@ -245,8 +246,11 @@ func (b *Board) handleResize() {
 }
 
 // Begin marks a stage as Running and records its start time. If the stage is
-// already running, this is a no-op (preserves the original start time).
-func (b *Board) Begin(id string) {
+// already running, this is a no-op (preserves the original start time). budget
+// is the expected duration for the stage; when it is exceeded the rendered
+// elapsed time grows a dim "taking longer than usual…" suffix. A zero budget
+// disables the hint.
+func (b *Board) Begin(id string, budget time.Duration) {
 	if !b.interactive {
 		logging.L().Info("stage begin", "stage", id, "label", b.labelOf(id))
 		return
@@ -259,6 +263,7 @@ func (b *Board) Begin(id string) {
 	}
 	s.state = StateRunning
 	s.started = time.Now()
+	s.budget = budget
 	s.substatus = ""
 	s.err = nil
 }
@@ -468,8 +473,15 @@ func (b *Board) elapsedFor(s *stageRT) string {
 	case StatePending:
 		return b.applyStyle(dimStyle, "       ")
 	case StateRunning:
-		d := time.Since(s.started).Round(time.Second)
-		return b.applyStyle(dimStyle, fmt.Sprintf("%6s", d))
+		since := time.Since(s.started)
+		out := b.applyStyle(dimStyle, fmt.Sprintf("%6s", since.Round(time.Second)))
+		// Past its budget the stage has stalled beyond the usual boot: append a
+		// dim hint. This rides the existing redraw loop, so it appears within one
+		// tick of crossing the budget — no extra timer.
+		if s.budget > 0 && since > s.budget {
+			out += b.applyStyle(dimStyle, "  taking longer than usual…")
+		}
+		return out
 	default:
 		end := s.finished
 		if end.IsZero() {

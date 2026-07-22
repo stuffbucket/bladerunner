@@ -41,6 +41,17 @@ var watchdogUnit string
 //go:embed scripts/chrony.conf
 var chronyConf string
 
+// grubDropIn is the /etc/default/grub.d/99_bladerunner.cfg drop-in written by
+// the cloud-init path (write_files) and --copy-in'd by the image build. It
+// routes the kernel console to hvc0+tty0 AND forces the bootloader to boot
+// straight through — timeout 0, hidden style, and recordfail timeout 0 — so an
+// unclean guest shutdown (every br stop / host sleep) can never strand the guest
+// at an interactive GRUB menu it will wait forever on. SINGLE SOURCE OF TRUTH
+// for both paths; grub-mkconfig/update-grub must run after it lands.
+//
+//go:embed scripts/99-bladerunner-grub.cfg
+var grubDropIn string
+
 // relayTemplateUnit is the single parameterized systemd unit that supervises all
 // four vsock relays. Each channel is a template instance
 // (bladerunner-vsock-relay@<name>.service) whose socat argv + optional

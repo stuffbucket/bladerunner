@@ -5,7 +5,21 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/bootstage"
 )
+
+// countStillStarting returns how many recorded banners are the boot-progress
+// "still starting…" body (the only banner these boot tests assert on).
+func countStillStarting(bodies []string) int {
+	n := 0
+	for _, b := range bodies {
+		if b == bodyStillStarting {
+			n++
+		}
+	}
+	return n
+}
 
 // fakeNotifier records the banners emitted so tests can assert the exact
 // sequence of transitions that produced a notification.
@@ -212,6 +226,108 @@ func TestNotifySuppressWedgedExpires(t *testing.T) {
 	h.m.observe(vmWedged, h.at(43*time.Second))
 	if len(h.n.bodies) != 0 {
 		t.Errorf("unexpected banner after suppression: %v", h.n.bodies)
+	}
+}
+
+// TestNotifyBootFastNoBanner: a fast boot advances through the stages in
+// seconds, so no stage ever dwells past notifyBootStuckAfter. Nothing should
+// ever surface bodyStillStarting; only the ready banner fires.
+func TestNotifyBootFastNoBanner(t *testing.T) {
+	h := newHarness()
+	h.m.observe(vmStopped, h.at(0)) // seed stopped
+	h.m.onStart(h.at(0))
+	// Boot marches forward every few seconds — no dwell.
+	h.m.observeBoot(bootstage.Boot, h.at(0))
+	h.m.observeBoot(bootstage.Setup, h.at(3*time.Second))
+	h.m.observeBoot(bootstage.Incus, h.at(6*time.Second))
+	// Guest becomes healthy -> ready banner.
+	h.m.observe(vmHealthy, h.at(9*time.Second))
+
+	if got := h.n.bodies; len(got) != 1 || got[0] != bodyReady {
+		t.Fatalf("bodies = %v, want only 'ready'", got)
+	}
+	if countStillStarting(h.n.bodies) != 0 {
+		t.Errorf("fast boot surfaced 'still starting': %v", h.n.bodies)
+	}
+}
+
+// TestNotifyBootStuckNotifiesOnce: a boot that sits on one stage past the
+// threshold surfaces exactly one bodyStillStarting on the confirming poll, and
+// never re-notifies while it stays stuck.
+func TestNotifyBootStuckNotifiesOnce(t *testing.T) {
+	h := newHarness()
+	h.m.observe(vmStopped, h.at(0))
+	h.m.onStart(h.at(0))
+	// Stuck on Setup: poll it repeatedly. First read arms the stage clock.
+	h.m.observeBoot(bootstage.Setup, h.at(0))
+	for _, secs := range []int{3, 6, 9, 30, 44} {
+		h.m.observeBoot(bootstage.Setup, h.at(time.Duration(secs)*time.Second))
+		if countStillStarting(h.n.bodies) != 0 {
+			t.Fatalf("notified before threshold (t=%ds): %v", secs, h.n.bodies)
+		}
+	}
+	// t=45s: crosses the threshold but only queues the single-flight candidate.
+	h.m.observeBoot(bootstage.Setup, h.at(45*time.Second))
+	if countStillStarting(h.n.bodies) != 0 {
+		t.Fatalf("notified on the first stuck poll (should only queue): %v", h.n.bodies)
+	}
+	// t=48s: the confirming poll fires exactly one banner.
+	h.m.observeBoot(bootstage.Setup, h.at(48*time.Second))
+	if got := countStillStarting(h.n.bodies); got != 1 {
+		t.Fatalf("'still starting' count = %d, want 1: %v", got, h.n.bodies)
+	}
+	// Further stuck polls must not re-notify.
+	h.m.observeBoot(bootstage.Setup, h.at(60*time.Second))
+	h.m.observeBoot(bootstage.Setup, h.at(90*time.Second))
+	if got := countStillStarting(h.n.bodies); got != 1 {
+		t.Errorf("re-notified while staying stuck, count = %d: %v", got, h.n.bodies)
+	}
+}
+
+// TestNotifyBootCandidateSupersededByProgress: a queued candidate (stuck past
+// the threshold, waiting on its confirming poll) is canceled when the boot
+// advances to the next stage. No banner should fire.
+func TestNotifyBootCandidateSupersededByProgress(t *testing.T) {
+	h := newHarness()
+	h.m.observe(vmStopped, h.at(0))
+	h.m.onStart(h.at(0))
+	// Arm the candidate: Setup stuck past the threshold.
+	h.m.observeBoot(bootstage.Setup, h.at(0))
+	h.m.observeBoot(bootstage.Setup, h.at(46*time.Second)) // crosses threshold -> queues candidate
+	if countStillStarting(h.n.bodies) != 0 {
+		t.Fatalf("candidate poll should not notify yet: %v", h.n.bodies)
+	}
+	// Progress to the next stage cancels the queued candidate.
+	h.m.observeBoot(bootstage.Incus, h.at(49*time.Second))
+	if countStillStarting(h.n.bodies) != 0 {
+		t.Errorf("progress did not supersede the queued candidate: %v", h.n.bodies)
+	}
+}
+
+// TestNotifyBootResetsOnReadyThenRearms: a stuck boot notifies once; reaching
+// Ready (or an empty stage) resets the machine; a fresh start + new stuck stage
+// can notify again.
+func TestNotifyBootResetsOnReadyThenRearms(t *testing.T) {
+	h := newHarness()
+	h.m.observe(vmStopped, h.at(0))
+	h.m.onStart(h.at(0))
+	// First episode: stuck on Setup -> one banner.
+	h.m.observeBoot(bootstage.Setup, h.at(0))
+	h.m.observeBoot(bootstage.Setup, h.at(46*time.Second)) // queue
+	h.m.observeBoot(bootstage.Setup, h.at(49*time.Second)) // confirm -> fire
+	if got := countStillStarting(h.n.bodies); got != 1 {
+		t.Fatalf("first episode 'still starting' count = %d, want 1: %v", got, h.n.bodies)
+	}
+	// Boot reaches Ready (terminal) -> reset.
+	h.m.observeBoot(bootstage.Ready, h.at(52*time.Second))
+	// A fresh start re-arms, and a new stuck stage can notify again.
+	h.m.observe(vmStopped, h.at(200*time.Second))
+	h.m.onStart(h.at(200 * time.Second))
+	h.m.observeBoot(bootstage.Setup, h.at(200*time.Second))
+	h.m.observeBoot(bootstage.Setup, h.at(246*time.Second)) // queue
+	h.m.observeBoot(bootstage.Setup, h.at(249*time.Second)) // confirm -> fire again
+	if got := countStillStarting(h.n.bodies); got != 2 {
+		t.Errorf("second episode did not re-arm; count = %d, want 2: %v", got, h.n.bodies)
 	}
 }
 

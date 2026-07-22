@@ -54,25 +54,19 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	b.WriteString("    permissions: '0755'\n")
 	b.WriteString("    content: |\n")
 	b.WriteString(indent(bootstrapScript, 6))
-	// Drop-in grub override: routes the kernel's own console to hvc0 (the
-	// VZ-captured serial device) on every subsequent natural boot. cloud-init
-	// applies write_files before bootcmd/runcmd, so the file is in place when
-	// update-grub runs below. This file APPENDS to GRUB_CMDLINE_LINUX rather than
-	// replacing it, so any existing distro defaults are preserved.
+	// Drop-in grub override (SINGLE SOURCE OF TRUTH: internal/provision/scripts/
+	// 99-bladerunner-grub.cfg, go:embed'd as grubDropIn and also --copy-in'd by
+	// the image build). It (1) routes the kernel console to hvc0 (the VZ-captured
+	// serial) + tty0 on every subsequent natural boot, and (2) forces the
+	// bootloader to boot straight through — timeout 0, hidden style, recordfail
+	// timeout 0 — so an unclean guest shutdown (every br stop / host sleep sets
+	// recordfail=1 in grubenv) can never strand the guest at an interactive GRUB
+	// menu that waits forever. cloud-init applies write_files before bootcmd, so
+	// the file is in place when update-grub runs below.
 	b.WriteString("  - path: /etc/default/grub.d/99_bladerunner.cfg\n")
 	b.WriteString("    permissions: '0644'\n")
 	b.WriteString("    content: |\n")
-	b.WriteString("      GRUB_CMDLINE_LINUX=\"$GRUB_CMDLINE_LINUX console=hvc0 console=tty0\"\n")
-	b.WriteString("bootcmd:\n")
-	b.WriteString("  # Regenerate grub config so the 99_bladerunner.cfg drop-in (written by\n")
-	b.WriteString("  # write_files above, which cloud-init applies before bootcmd) lands in\n")
-	b.WriteString("  # /boot/grub/grub.cfg, routing the KERNEL's console to hvc0 from the next\n")
-	b.WriteString("  # natural boot onward. We deliberately do NOT force a first-boot reboot:\n")
-	b.WriteString("  # the bootstrap's br_stage breadcrumbs write straight to /dev/hvc0, which\n")
-	b.WriteString("  # is present in late userspace regardless of the kernel console= cmdline,\n")
-	b.WriteString("  # so first-boot progress is already visible. The old bootcmd reboot never\n")
-	b.WriteString("  # fired reliably and doubled cold-boot time (#57).\n")
-	b.WriteString("  - [sh, -c, 'update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true']\n")
+	b.WriteString(indent(grubDropIn, 6))
 	b.WriteString("growpart:\n")
 	b.WriteString("  mode: auto\n")
 	b.WriteString("  devices: [/]\n")
@@ -161,6 +155,16 @@ br_stage() {
   echo "$msg" >/dev/hvc0 2>/dev/null || echo "$msg" >/dev/console 2>/dev/null || true
 }
 br_stage start
+
+# Regenerate grub.cfg NOW so the 99_bladerunner.cfg drop-in (written by
+# cloud-init write_files) takes effect from the first natural boot onward: route
+# the kernel console to hvc0/tty0 AND boot straight through (timeout 0, hidden
+# style, recordfail timeout 0) so an unclean shutdown can never strand the guest
+# at an interactive GRUB menu. This MUST run in runcmd, not bootcmd: cloud-init's
+# default module order runs bootcmd BEFORE write_files, so a bootcmd update-grub
+# would regenerate grub.cfg before the drop-in exists and silently no-op it.
+# Best-effort: a grub failure must never abort the rest of the bootstrap.
+update-grub 2>/dev/null || grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || true
 
 # Load vsock kernel modules early (required for socat VSOCK-LISTEN)
 # These may be built-in on some kernels, so ignore errors.

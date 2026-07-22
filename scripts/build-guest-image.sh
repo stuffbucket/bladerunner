@@ -176,6 +176,15 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         # stale duplicate the cloud-init run has to supersede.
         --append-line "/etc/initramfs-tools/modules:vmw_vsock_virtio_transport"
         --append-line "/etc/initramfs-tools/modules:vhost_vsock"
+        # GRUB drop-in (single source of truth: internal/provision/scripts/
+        # 99-bladerunner-grub.cfg): console=hvc0+tty0 AND boot straight through
+        # (timeout 0, hidden, recordfail timeout 0) so an unclean guest shutdown
+        # can never strand the baked image at an interactive GRUB menu. Bake it +
+        # regenerate grub.cfg now so the image boots through from its FIRST boot,
+        # before cloud-init has ever run.
+        --mkdir       "/etc/default/grub.d"
+        --copy-in     "${ASSET_DIR}/99-bladerunner-grub.cfg:/etc/default/grub.d"
+        --run-command "update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true"
         --write       "/etc/bladerunner-image-version:${BUILD_DATE}"
         --run-command "update-initramfs -u"
     )
@@ -245,6 +254,10 @@ else
     install -m 0755 "${ASSET_DIR}/bladerunner-watchdog.sh" "${MNT}/usr/local/sbin/bladerunner-watchdog.sh"
     install -m 0644 "${ASSET_DIR}/bladerunner-watchdog.service" "${MNT}/etc/systemd/system/bladerunner-watchdog.service"
     install -m 0644 "${ASSET_DIR}/chrony.conf" "${MNT}/root/bladerunner-chrony.conf"
+    # GRUB drop-in staged directly into place (its target dir may not exist in
+    # the base image); update-grub is run inside the chroot below.
+    mkdir -p "${MNT}/etc/default/grub.d"
+    install -m 0644 "${ASSET_DIR}/99-bladerunner-grub.cfg" "${MNT}/etc/default/grub.d/99-bladerunner-grub.cfg"
 
     chroot "${MNT}" /bin/bash -eu <<EOS
 export DEBIAN_FRONTEND=noninteractive
@@ -301,6 +314,10 @@ if command -v chronyd >/dev/null 2>&1; then systemctl disable systemd-timesyncd 
 systemctl enable bladerunner-watchdog.service
 printf '%s\n' '${INITRAMFS_MODULES}' >> /etc/initramfs-tools/modules
 printf '%s' '${BUILD_DATE}' > /etc/bladerunner-image-version
+# Regenerate grub.cfg so the 99-bladerunner-grub.cfg drop-in staged above (boot
+# straight through: timeout 0, hidden, recordfail timeout 0 + console=hvc0/tty0)
+# is baked in from the image's FIRST boot, before cloud-init ever runs.
+update-grub || grub-mkconfig -o /boot/grub/grub.cfg || true
 update-initramfs -u
 # Drop the apt cache + build-time retry config so the baked image stays pristine.
 apt-get clean

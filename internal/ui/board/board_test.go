@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func interactive() *bool { v := true; return &v }
@@ -27,7 +28,7 @@ func TestRenderFrame_StagesAndTail(t *testing.T) {
 	b.width = 100
 
 	b.Complete("vm")
-	b.Begin("ci")
+	b.Begin("ci", 0)
 	b.Substatus("ci", "running module final")
 	b.AppendLog("cloud-init[891]: Running module write-files")
 	b.AppendLog("cloud-init[891]: Running module users-groups")
@@ -58,7 +59,7 @@ func TestRenderFrame_FailureShowsError(t *testing.T) {
 	})
 	b.width = 80
 
-	b.Begin("incus")
+	b.Begin("incus", 0)
 	b.Fail("incus", errors.New("connect: connection refused"))
 
 	frame := stripANSI(b.RenderFrame())
@@ -70,6 +71,38 @@ func TestRenderFrame_FailureShowsError(t *testing.T) {
 	}
 }
 
+// TestRenderFrame_OverBudgetHint verifies that once a running stage exceeds its
+// Begin budget, the rendered elapsed line grows the dim "taking longer than
+// usual…" suffix (Part A of the boot-progress notifier). A zero budget must
+// never flag.
+func TestRenderFrame_OverBudgetHint(t *testing.T) {
+	var buf bytes.Buffer
+	b := New([]Stage{
+		{ID: "slow", Label: "Incus API ready"},
+		{ID: "fast", Label: "SSH ready"},
+	}, Options{
+		Out:         &buf,
+		Interactive: interactive(),
+	})
+	b.width = 120
+
+	b.Begin("slow", 10*time.Millisecond) // budget crosses almost immediately
+	b.Begin("fast", 0)                   // no budget -> must never flag
+
+	// Give the tiny budget time to elapse; the hint rides the render, not a timer.
+	time.Sleep(30 * time.Millisecond)
+
+	frame := stripANSI(b.RenderFrame())
+	if !strings.Contains(frame, "taking longer than usual…") {
+		t.Errorf("over-budget stage missing the hint\n--- got ---\n%s", frame)
+	}
+	// The hint must appear exactly once — only the budgeted stage flags, not the
+	// zero-budget one.
+	if n := strings.Count(frame, "taking longer than usual…"); n != 1 {
+		t.Errorf("hint count = %d, want 1 (only the budgeted stage)\n--- got ---\n%s", n, frame)
+	}
+}
+
 func TestNonInteractive_RendersNothingToOutput(t *testing.T) {
 	var buf bytes.Buffer
 	b := New([]Stage{{ID: "vm", Label: "VM"}}, Options{
@@ -77,7 +110,7 @@ func TestNonInteractive_RendersNothingToOutput(t *testing.T) {
 		Interactive: headless(),
 	})
 	b.Start() // no-op
-	b.Begin("vm")
+	b.Begin("vm", 0)
 	b.AppendLog("kernel: hello")
 	b.Complete("vm")
 	b.Stop() // no-op

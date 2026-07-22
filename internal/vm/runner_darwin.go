@@ -345,6 +345,13 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	}
 	r.metadata = md
 
+	// Arm crash detection: mark this run as not-yet-cleanly-stopped. A graceful
+	// Stop() sets it true again; a crash or kill -9 leaves it false, which the
+	// pre-boot grub-stall check reads as "recordfail likely set". Best-effort:
+	// these are advisory fields (see PeekMetadata / AssessGrubRisk).
+	md.LastShutdownClean = false
+	_ = saveMetadata(r.cfg, md)
+
 	log.Info("constructing virtual machine configuration")
 	vmCfg, err := r.newVMConfiguration()
 	if err != nil {
@@ -422,6 +429,15 @@ func (r *Runner) WaitForIncus(ctx context.Context) (*report.StartupReport, error
 	}
 	r.progress.Done(StageIncusWait)
 
+	// A fully-ready boot proves the first-boot bootstrap's update-grub ran and
+	// installed the recordfail-timeout-0 drop-in, so the disk's grub.cfg is now
+	// hardened and can never stall on recordfail. Record it once; never reverts.
+	// Best-effort: advisory field for the pre-boot grub-stall check.
+	if r.metadata != nil && !r.metadata.GrubHardened {
+		r.metadata.GrubHardened = true
+		_ = saveMetadata(r.cfg, r.metadata)
+	}
+
 	log.Info("assembling startup report")
 	reportData := r.makeReport(r.baseImagePath, endpoint, serverInfo)
 	if err := report.SaveJSON(r.cfg.ReportPath, reportData); err != nil {
@@ -495,6 +511,15 @@ func (r *Runner) Stop() error {
 
 		r.requestStopVM(log)
 		r.forceStopVMIfNeeded(log)
+
+		// Reaching this graceful teardown body means an orderly host stop (a
+		// kill -9 never runs deferred Stop()). Record the clean shutdown so the
+		// next boot's pre-check knows recordfail is likely unset. Best-effort:
+		// advisory field, guard against a nil metadata (Stop before StartVM).
+		if r.metadata != nil {
+			r.metadata.LastShutdownClean = true
+			_ = saveMetadata(r.cfg, r.metadata)
+		}
 	})
 
 	return r.stopErr

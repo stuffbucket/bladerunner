@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/bootstage"
 )
 
 // notifyTitle is the title shown on every banner. The body carries the detail.
@@ -14,12 +16,13 @@ const notifyTitle = "Bladerunner"
 
 // Banner bodies, as constants so the machine and its tests reference one source.
 const (
-	bodyReady        = "Your VM is ready."
-	bodyRecovered    = "Your VM recovered and is responding again."
-	bodyUnresponsive = "Your VM is unresponsive — try Restart."
-	bodyStopped      = "Your VM stopped."
-	bodyReconnecting = "Woke from sleep — the VM is re-syncing its clock…"
-	bodyEngineUpdate = "An update is ready — choose “Restart VM to finish update”."
+	bodyReady         = "Your VM is ready."
+	bodyRecovered     = "Your VM recovered and is responding again."
+	bodyUnresponsive  = "Your VM is unresponsive — try Restart."
+	bodyStopped       = "Your VM stopped."
+	bodyReconnecting  = "Woke from sleep — the VM is re-syncing its clock…"
+	bodyEngineUpdate  = "An update is ready — choose “Restart VM to finish update”."
+	bodyStillStarting = "Still starting… the VM is taking longer than usual."
 )
 
 // Tuning for the transition state machine, sized against the 3s health poll.
@@ -35,6 +38,12 @@ const (
 	notifySuppressAfterStart = 30 * time.Second
 	// notifyMinInterval rate-limits banners so a flapping guest can't spam.
 	notifyMinInterval = 10 * time.Second
+	// notifyBootStuckAfter is how long a single boot stage may sit before we
+	// consider the boot "stuck" and surface a conservative one-shot banner. Sized
+	// well above a fast boot (which advances through every stage in seconds); the
+	// single-flight delay (one confirming poll) means the earliest banner lands at
+	// ≈ notifyBootStuckAfter + one poll interval.
+	notifyBootStuckAfter = 45 * time.Second
 )
 
 // notifier delivers a user-facing macOS notification. The concrete
@@ -123,6 +132,17 @@ type vmNotifier struct {
 	splashUp       bool // the starting splash is currently shown
 	lastStartAt    time.Time
 	lastNotifyAt   time.Time
+
+	// Boot-progress tracking, driven by boot-stage transitions (observeBoot).
+	// bootStage is the last seen stage ("" = none/terminal); bootStageSince is
+	// when it was first seen. bootCandidate queues a single confirming poll so a
+	// one-off slow read isn't enough — the boot must still be stuck on the next
+	// poll. bootNotified latches the at-most-once "still starting" banner per
+	// boot episode.
+	bootStage      bootstage.Stage
+	bootStageSince time.Time
+	bootCandidate  bool
+	bootNotified   bool
 }
 
 // showSplash/hideSplash track visibility so the splash is shown/hidden at most
@@ -157,6 +177,7 @@ func (m *vmNotifier) onStart(now time.Time) {
 	defer m.mu.Unlock()
 	m.expectingStart = true
 	m.lastStartAt = now
+	m.resetBootLocked() // re-arm boot-progress tracking for this fresh start
 	m.showSplash()
 }
 
@@ -214,6 +235,7 @@ func (m *vmNotifier) observe(st vmState, now time.Time) {
 	// screen until the multi-minute safety timeout. hideSplash is idempotent.
 	if st == vmStopped {
 		m.expectingStart = false
+		m.resetBootLocked() // an aborted boot must not leak a queued candidate
 		m.hideSplash()
 	}
 
@@ -244,6 +266,65 @@ func (m *vmNotifier) observe(st vmState, now time.Time) {
 	}
 	m.lastNotifyAt = now
 	m.n.notify(notifyTitle, body)
+}
+
+// observeBoot feeds one boot-stage reading (from the boot-stage.json the running
+// `br start` publishes) into the boot-progress machine. It is edge-triggered like
+// observe: a stage that sits past notifyBootStuckAfter surfaces AT MOST ONE
+// conservative "still starting…" banner per boot episode, and any forward
+// progress cancels a queued banner (coalesce). Fast boots — which advance through
+// every stage in seconds — never dwell long enough to notify.
+func (m *vmNotifier) observeBoot(stage bootstage.Stage, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// No live boot, or a terminal stage: not "stuck starting". Re-arm for the
+	// next episode.
+	if stage == "" || stage == bootstage.Ready || stage == bootstage.Failed {
+		m.resetBootLocked()
+		return
+	}
+
+	// Advanced to a new stage (or the first stage of this episode): restart the
+	// dwell clock and drop any queued candidate — progress coalesces.
+	if stage != m.bootStage {
+		m.bootStage = stage
+		m.bootStageSince = now
+		m.bootCandidate = false
+		return
+	}
+
+	// At most one boot-progress banner per episode.
+	if m.bootNotified {
+		return
+	}
+
+	// Same stage as last poll: has it dwelt past the stuck threshold?
+	if now.Sub(m.bootStageSince) < notifyBootStuckAfter {
+		return
+	}
+	// Single-flight: the first stuck read only queues; require one more stuck
+	// poll before firing, so a lone slow reading can't trip a false banner.
+	if !m.bootCandidate {
+		m.bootCandidate = true
+		return
+	}
+	if m.rateLimited(now) {
+		return
+	}
+	m.bootCandidate = false
+	m.bootNotified = true
+	m.lastNotifyAt = now
+	m.n.notify(notifyTitle, bodyStillStarting)
+}
+
+// resetBootLocked clears the boot-progress tracking so the next boot episode
+// starts fresh. Caller holds m.mu.
+func (m *vmNotifier) resetBootLocked() {
+	m.bootStage = ""
+	m.bootStageSince = time.Time{}
+	m.bootCandidate = false
+	m.bootNotified = false
 }
 
 // commitState resolves a reading into the state to commit. healthy/stopped are
