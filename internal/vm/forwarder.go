@@ -6,9 +6,15 @@
 package vm
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os/exec"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/logging"
@@ -41,10 +47,10 @@ func newPortForwarder(name, listenAddr string, guestPort uint32, dialer func(uin
 	}
 }
 
-func (f *portForwarder) Start() error {
+func (f *portForwarder) Start(ctx context.Context) error {
 	ln, err := net.Listen("tcp", f.listenAddr)
 	if err != nil {
-		return err
+		return wrapListenErr(ctx, f.name, f.listenAddr, err)
 	}
 	f.ln = ln
 	logging.L().Info("started port forwarder", "name", f.name, "listen", f.listenAddr, "guest_vsock_port", f.guestPort)
@@ -130,4 +136,79 @@ func proxyBidirectional(a, b net.Conn) {
 	go cp(b, a)
 
 	<-done
+}
+
+// configKeyForForwarder maps an internal forwarder name to the writable config
+// key a user changes to move the conflicting host port (see
+// internal/control/control.go). Returns "" for unknown forwarders so the
+// caller can fall back to a generic remedy.
+func configKeyForForwarder(name string) string {
+	switch name {
+	case "ssh":
+		return "local-ssh-port"
+	case "incus-api":
+		return "local-api-port"
+	default:
+		return ""
+	}
+}
+
+// wrapListenErr turns a bind failure into an actionable message. For the common
+// "address already in use" case it names the port, best-effort identifies the
+// process holding it, and points at the exact `br config set` remedy. Any other
+// error is returned lightly wrapped with the forwarder name for context.
+func wrapListenErr(ctx context.Context, name, listenAddr string, err error) error {
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return fmt.Errorf("start %s forwarder on %s: %w", name, listenAddr, err)
+	}
+
+	port := portFromAddr(listenAddr)
+	remedy := "stop it or configure a different port"
+	if key := configKeyForForwarder(name); key != "" {
+		remedy = fmt.Sprintf("stop it or set a different port (br config set %s <port>)", key)
+	}
+
+	if holder := listenerHolder(ctx, port); holder != "" {
+		return fmt.Errorf("port %s already in use (by %s) — %s", port, holder, remedy)
+	}
+	return fmt.Errorf("port %s already in use — %s", port, remedy)
+}
+
+// portFromAddr extracts the port from a "host:port" listen address, falling
+// back to the raw address if it can't be split.
+func portFromAddr(listenAddr string) string {
+	if _, p, err := net.SplitHostPort(listenAddr); err == nil {
+		return p
+	}
+	return listenAddr
+}
+
+// listenerHolder returns a best-effort "<proc> pid <pid>" description of the
+// process currently listening on the given TCP port, via lsof. It returns ""
+// (rather than erroring) if lsof is missing, times out, or reports nothing —
+// the identification is a nicety, not a requirement.
+func listenerHolder(ctx context.Context, port string) string {
+	if port == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	// -nP: don't resolve hosts/ports (faster, avoids surprises);
+	// -sTCP:LISTEN: only the listening socket, not clients connected to it.
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+port, "-sTCP:LISTEN").Output()
+	if err != nil {
+		return ""
+	}
+
+	// lsof output: header line, then one row per fd. Columns are
+	// COMMAND PID USER ... — take the first data row's command + pid.
+	for line := range strings.SplitSeq(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] == "COMMAND" {
+			continue
+		}
+		return fmt.Sprintf("%s pid %s", fields[0], fields[1])
+	}
+	return ""
 }

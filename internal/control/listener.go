@@ -2,11 +2,13 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/logging"
@@ -65,21 +67,9 @@ func NewListenerWithConfig(cfg ListenerConfig) (*Listener, error) {
 
 	address := filepath.Join(cfg.StateDir, SocketName)
 
-	// Check if listener is already running
-	conn, err := cfg.Transport.Dial(address, SocketCheckTimeout)
-	if err == nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("listener already running on %s", address)
-	}
-
-	// Clean up stale socket
-	if err := cfg.Transport.Cleanup(address); err != nil {
-		return nil, fmt.Errorf("cleanup stale socket: %w", err)
-	}
-
-	netListen, err := cfg.Transport.Listen(address)
+	netListen, err := listenReclaiming(cfg.Transport, address)
 	if err != nil {
-		return nil, fmt.Errorf("listen on %s: %w", address, err)
+		return nil, err
 	}
 
 	// Restrict permissions for Unix sockets
@@ -103,6 +93,46 @@ func NewListenerWithConfig(cfg ListenerConfig) (*Listener, error) {
 		router:     router,
 		done:       make(chan struct{}),
 	}, nil
+}
+
+// listenReclaiming creates the listener at address, robustly reclaiming a
+// socket left behind by a hard-killed process. A `kill -9` never runs the
+// listener's cleanup, so a stale unix socket file lingers; the next start then
+// gets EADDRINUSE from Listen even though nobody is actually serving.
+//
+// Strategy: try Listen; on address-in-use, PROBE whether a live server really
+// answers on the socket. If it does → genuinely already running (return that
+// error). If nothing answers → the socket is stale from a dead process, so
+// remove it and retry Listen exactly ONCE. A second failure returns an error
+// carrying the exact manual remedy.
+//
+// The probe (a real dial) plus the single retry is enough to avoid two racing
+// starts both reclaiming: whichever wins Listen holds the socket, and the loser
+// sees a live answer from the winner (not a stale socket) and backs off.
+func listenReclaiming(transport Transport, address string) (net.Listener, error) {
+	ln, err := transport.Listen(address)
+	if err == nil {
+		return ln, nil
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return nil, fmt.Errorf("listen on %s: %w", address, err)
+	}
+
+	// Address in use: is a real server behind it, or a stale socket?
+	if conn, derr := transport.Dial(address, SocketCheckTimeout); derr == nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("listener already running on %s", address)
+	}
+
+	// Nothing answered: treat as stale and reclaim it once.
+	if cerr := transport.Cleanup(address); cerr != nil {
+		return nil, fmt.Errorf("remove stale socket %s: %w", address, cerr)
+	}
+	ln, err = transport.Listen(address)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s after reclaiming stale socket (remove it manually: rm %s): %w", address, address, err)
+	}
+	return ln, nil
 }
 
 // RegisterCommand adds a custom command handler.

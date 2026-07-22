@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -461,5 +463,128 @@ func TestEnsureBaseImage_HostedMissingSidecarFallsBackToDebian(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(got); !bytes.Equal(data, debian) {
 		t.Errorf("booted image = %q, want the Debian fallback bytes", string(data))
+	}
+}
+
+// --- G1: download retry classification -------------------------------------
+
+// TestDownloadFile_RetriesTransient500ThenSucceeds verifies a 500 (transient) is
+// retried with backoff and a subsequent 200 succeeds — a blip must not be fatal.
+func TestDownloadFile_RetriesTransient500ThenSucceeds(t *testing.T) {
+	body := []byte("recovered image bytes")
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	dst := filepath.Join(t.TempDir(), "image.raw")
+	if err := downloadFile(context.Background(), srv.URL, dst); err != nil {
+		t.Fatalf("downloadFile should have retried past the 500, got: %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("expected at least 2 attempts (retry), got %d", n)
+	}
+	if got, _ := os.ReadFile(dst); !bytes.Equal(got, body) {
+		t.Errorf("downloaded bytes = %q, want %q", string(got), string(body))
+	}
+}
+
+// TestDownloadFile_404NotRetried verifies a 404 (fatal) returns immediately
+// without retrying, so the caller can fall back / fail fast.
+func TestDownloadFile_404NotRetried(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		http.NotFound(w, nil)
+	}))
+	defer srv.Close()
+
+	dst := filepath.Join(t.TempDir(), "image.raw")
+	err := downloadFile(context.Background(), srv.URL, dst)
+	if err == nil {
+		t.Fatal("expected a fatal error for a 404, got nil")
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Fatalf("a 404 must not be retried: expected exactly 1 attempt, got %d", n)
+	}
+}
+
+// TestTransientDownloadError_Classification exercises the classifier directly.
+func TestTransientDownloadError_Classification(t *testing.T) {
+	if transientDownloadError(&fatalHTTPError{status: "404 Not Found", code: 404}) {
+		t.Error("a fatalHTTPError must be classified non-transient")
+	}
+	if transientDownloadError(context.Canceled) {
+		t.Error("context.Canceled must be classified non-transient")
+	}
+	if !transientDownloadError(io.ErrUnexpectedEOF) {
+		t.Error("io.ErrUnexpectedEOF must be classified transient")
+	}
+}
+
+// --- G2: partial-artifact cleanup ------------------------------------------
+
+// TestDownloadFile_FailedCopyRemovesTmp verifies a mid-stream body failure (the
+// server closes the connection after promising more bytes via Content-Length)
+// removes the partial ".tmp" instead of leaving a truncated artifact behind.
+func TestDownloadFile_FailedCopyRemovesTmp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Promise more than we send, then hijack + close to force an unexpected EOF.
+		w.Header().Set("Content-Length", "1048576")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("only a few bytes"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	dst := filepath.Join(t.TempDir(), "image.raw")
+	err := downloadFile(context.Background(), srv.URL, dst)
+	if err == nil {
+		t.Fatal("expected a mid-stream copy error, got nil")
+	}
+	if util.FileExists(dst + ".tmp") {
+		t.Error("a failed download must remove the partial .tmp")
+	}
+	if util.FileExists(dst) {
+		t.Error("a failed download must not leave the final artifact")
+	}
+}
+
+// --- G3: disk-space preflight arithmetic -----------------------------------
+
+func TestCheckDiskSpace(t *testing.T) {
+	const gib = int64(1) << 30
+	// Ample space: nil.
+	if err := checkDiskSpace(10*gib, 64*gib, "/tmp/disk.raw"); err != nil {
+		t.Errorf("expected nil when space is ample, got %v", err)
+	}
+	// Exactly enough: nil (avail == need is not "less than").
+	if err := checkDiskSpace(64*gib, 64*gib, "/tmp/disk.raw"); err != nil {
+		t.Errorf("expected nil when space is exactly enough, got %v", err)
+	}
+	// Insufficient: actionable error naming the path and the --disk hint.
+	err := checkDiskSpace(64*gib, 10*gib, "/tmp/disk.raw")
+	if err == nil {
+		t.Fatal("expected an error when space is insufficient, got nil")
+	}
+	for _, want := range []string{"not enough disk space", "/tmp/disk.raw", "--disk"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q", err.Error(), want)
+		}
 	}
 }

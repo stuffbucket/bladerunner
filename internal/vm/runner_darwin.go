@@ -393,7 +393,7 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	r.progress.Done(StageVMBoot)
 
 	log.Info("starting localhost forwarders")
-	if err := r.startForwarders(); err != nil {
+	if err := r.startForwarders(ctx); err != nil {
 		return nil, err
 	}
 
@@ -643,7 +643,7 @@ func (r *Runner) ProbeGuest(ctx context.Context) error {
 	}
 }
 
-func (r *Runner) startForwarders() error {
+func (r *Runner) startForwarders(ctx context.Context) error {
 	socketDevices := r.vm.SocketDevices()
 	if len(socketDevices) == 0 {
 		return errors.New("vm has no virtio socket device configured")
@@ -660,7 +660,7 @@ func (r *Runner) startForwarders() error {
 		r.cfg.VsockSSHPort,
 		dial,
 	)
-	if err := sshForward.Start(); err != nil {
+	if err := sshForward.Start(ctx); err != nil {
 		return fmt.Errorf("start ssh forwarder: %w", err)
 	}
 
@@ -670,7 +670,7 @@ func (r *Runner) startForwarders() error {
 		r.cfg.VsockAPIPort,
 		dial,
 	)
-	if err := apiForward.Start(); err != nil {
+	if err := apiForward.Start(ctx); err != nil {
 		_ = sshForward.Close()
 		return fmt.Errorf("start api forwarder: %w", err)
 	}

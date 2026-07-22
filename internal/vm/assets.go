@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,6 +20,100 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
+
+// downloadClient is the HTTP client used for image downloads. It deliberately
+// sets NO total request timeout — a legitimate multi-GB image can take many
+// minutes over a slow link and must not be killed mid-stream. Instead it bounds
+// the failure modes that actually hang forever: a dead TCP connect, a stalled
+// TLS handshake, and a server that accepts the connection but never sends
+// response headers. Once bytes are flowing, io.Copy progress is the liveness
+// signal; a truly stalled body is bounded by IdleConnTimeout / the OS TCP
+// keepalive. Redirect following is left at the default (up to 10 hops).
+const (
+	downloadDialTimeout    = 30 * time.Second
+	downloadKeepAlive      = 30 * time.Second
+	downloadTLSTimeout     = 30 * time.Second
+	downloadRespHdrTimeout = 60 * time.Second
+	downloadExpectContinue = 5 * time.Second
+	downloadIdleTimeout    = 90 * time.Second
+)
+
+var downloadClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   downloadDialTimeout,
+			KeepAlive: downloadKeepAlive,
+		}).DialContext,
+		TLSHandshakeTimeout:   downloadTLSTimeout,
+		ResponseHeaderTimeout: downloadRespHdrTimeout,
+		ExpectContinueTimeout: downloadExpectContinue,
+		IdleConnTimeout:       downloadIdleTimeout,
+		ForceAttemptHTTP2:     true,
+	},
+}
+
+// downloadMaxAttempts bounds the exponential-backoff retry loop in downloadFile.
+const downloadMaxAttempts = 4
+
+// bytesPerGiB is 1 GiB in bytes, used by the disk-space preflight.
+const bytesPerGiB = int64(1) << 30
+
+// checkDiskSpace fails closed with an actionable message when avail is less than
+// the need required to materialize the VM disk. It is a pure helper (no I/O) so
+// the arithmetic is unit-testable; path is used only for the message. (The
+// darwin free-space probe lives in assets_darwin.go; this is portable.)
+func checkDiskSpace(need, avail int64, path string) error {
+	if avail < need {
+		needGiB := float64(need) / float64(bytesPerGiB)
+		haveGiB := float64(avail) / float64(bytesPerGiB)
+		return fmt.Errorf(
+			"not enough disk space to create the VM disk: need ~%.1f GiB, have %.1f GiB free at %s — free space or lower --disk",
+			needGiB, haveGiB, path)
+	}
+	return nil
+}
+
+// transientDownloadError reports whether err from an HTTP download attempt is
+// worth retrying. Connection refused/reset, timeouts, and unexpected EOFs are
+// transient network blips; a fatalHTTPError (a definitive 4xx like 404/403/401)
+// is not — it should surface immediately so the caller can fall back or fail
+// fast rather than burning ~seconds of backoff on a URL that will never work.
+func transientDownloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var fatal *fatalHTTPError
+	if errors.As(err, &fatal) {
+		return false
+	}
+	// Context cancellation/deadline from the caller is not a retryable blip.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	// net.Error (dial/TLS/response-header timeouts) and the syscall-level
+	// connection refused/reset errors all warrant a retry.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return true
+}
+
+// fatalHTTPError marks an HTTP response whose status is definitively terminal
+// (a 4xx other than 429): retrying will not change the outcome, so the download
+// loop returns it immediately for the caller to handle (fall back / fail fast).
+type fatalHTTPError struct {
+	status string
+	code   int
+}
+
+func (e *fatalHTTPError) Error() string {
+	return fmt.Sprintf("download base image failed: %s", e.status)
+}
 
 // fetchSidecarSHA256 fetches a "<url>.sha256" sidecar and returns the
 // lowercased hex digest. The sidecar may be either bare hex or the
@@ -194,9 +290,11 @@ func MaterializeRawDisk(srcRaw, dst string, diskSizeGiB int) error {
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
+		_ = os.Remove(dst)
 		return fmt.Errorf("copy base image into cartridge: %w", err)
 	}
 	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
 		return fmt.Errorf("close root.img: %w", err)
 	}
 
@@ -206,6 +304,7 @@ func MaterializeRawDisk(srcRaw, dst string, diskSizeGiB int) error {
 	targetSize := fmt.Sprintf("%dG", diskSizeGiB)
 	cmd := exec.Command("qemu-img", "resize", "-f", "raw", dst, targetSize)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(dst)
 		return fmt.Errorf("qemu-img resize failed: %w: %s", err, string(output))
 	}
 	return nil
@@ -235,8 +334,16 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		if err := ensureRawDiskImage(path); err != nil {
 			return "", err
 		}
-		logging.L().Info("using cached base image", "path", path)
-		return path, nil
+		// Gate the cached file: a truncated/corrupt cache entry (from a prior
+		// interrupted convert/download) is rebuilt rather than silently booted.
+		if err := verifyImageIntegrity(path); err != nil {
+			logging.L().Warn("cached base image failed integrity check; re-downloading",
+				"path", path, "err", err)
+			_ = os.Remove(path)
+		} else {
+			logging.L().Info("using cached base image", "path", path)
+			return path, nil
+		}
 	}
 
 	if cfg.BaseImageURL == "" {
@@ -346,8 +453,18 @@ func ensureCachedBaseImage(ctx context.Context, cfg *config.Config) (string, err
 	cachePath := config.ImageCachePath(cfg.BaseImageExpectedSHA256)
 	okStamp := cachePath + ".ok"
 	if util.FileExists(cachePath) && util.FileExists(okStamp) {
-		logging.L().Info("using cached base image (content-addressed)", "path", cachePath, "sha256", cfg.BaseImageExpectedSHA256)
-		return cachePath, nil
+		// The .ok stamp marks a verified download+convert, but a subsequent disk
+		// event (partial write, truncation) could still corrupt the cached raw;
+		// gate it so a bad entry is rebuilt rather than booted.
+		if err := verifyImageIntegrity(cachePath); err != nil {
+			logging.L().Warn("cached base image failed integrity check; rebuilding",
+				"path", cachePath, "sha256", cfg.BaseImageExpectedSHA256, "err", err)
+			_ = os.Remove(cachePath)
+			_ = os.Remove(okStamp)
+		} else {
+			logging.L().Info("using cached base image (content-addressed)", "path", cachePath, "sha256", cfg.BaseImageExpectedSHA256)
+			return cachePath, nil
+		}
 	}
 
 	if cfg.BaseImageURL == "" {
@@ -432,6 +549,9 @@ func convertQcow2ToRaw(qcow2Path string) error {
 
 	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", qcow2Path, rawPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		// A partial/truncated .raw would otherwise linger and get renamed over a
+		// good source on a later run; remove it so the conversion is retried clean.
+		_ = os.Remove(rawPath)
 		return fmt.Errorf("qemu-img convert failed: %w: %s", err, string(output))
 	}
 
@@ -447,26 +567,146 @@ func convertQcow2ToRaw(qcow2Path string) error {
 	return nil
 }
 
+// verifyImageIntegrity is a fast, best-effort gate that a materialized image or
+// disk is not obviously truncated/corrupt, so a bad cached file is rebuilt
+// rather than silently booted. It never does a full multi-GB content scan:
+//
+//   - It always runs a cheap size>0 + first-byte readability probe.
+//   - When qemu-img is available it additionally runs `qemu-img check -q`, but
+//     only for formats that actually support a structural check (qcow2, qed,
+//     …). RAW images — which is what our convert/copy pipeline always produces —
+//     have no internal structure to walk; `qemu-img check` on a raw legitimately
+//     reports "does not support checks", so for raw the probe above IS the gate.
+//     A qemu-img that can't even open/identify the file (info fails) is treated
+//     as corrupt.
+//   - When qemu-img is absent the size/readability probe alone is the gate.
+//
+// A nil error means "usable"; a non-nil error means "rebuild me".
+func verifyImageIntegrity(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat image %s: %w", path, err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("image %s is empty (zero bytes)", path)
+	}
+
+	// Cheap readability probe (also the whole gate when qemu-img is unavailable).
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open image %s: %w", path, err)
+	}
+	if _, err := f.Read(make([]byte, 1)); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("read image %s: %w", path, err)
+	}
+	_ = f.Close()
+
+	haveQemuImg := RequireQemuImg() == nil
+	if !haveQemuImg {
+		return nil
+	}
+
+	// qemu-img must at least be able to open and identify the file; a failure here
+	// means the file is unreadable/unrecognizable (truncated header, etc.).
+	format, err := qemuImgFormat(path)
+	if err != nil {
+		return fmt.Errorf("qemu-img could not identify image %s: %w", path, err)
+	}
+	// `qemu-img check` only applies to formats with checkable structure. RAW has
+	// none, so the probe above is sufficient; running check on raw returns a
+	// spurious "does not support checks" error.
+	if format == "raw" || format == "" {
+		return nil
+	}
+	cmd := exec.Command("qemu-img", "check", "-q", path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img check reported a corrupt image %s: %w: %s", path, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// qemuImgFormat returns the file format qemu-img detects for path (e.g. "raw",
+// "qcow2"). An error means qemu-img could not open/identify the file at all.
+func qemuImgFormat(path string) (string, error) {
+	out, err := exec.Command("qemu-img", "info", path).Output()
+	if err != nil {
+		return "", err
+	}
+	// The plain (non-JSON) output has exactly one top-level "file format:" line,
+	// which avoids the nested-child ambiguity of --output=json (whose first
+	// "format" is the protocol node's "file").
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "file format:"); ok {
+			return strings.TrimSpace(rest), nil
+		}
+	}
+	return "", nil
+}
+
+// downloadFile downloads url to path, retrying transient failures (connection
+// refused/reset, dial/TLS/response-header timeouts, 5xx, 429, unexpected EOF)
+// with exponential backoff. Definitively fatal responses (a 4xx like 404/403/
+// 401) return immediately so the caller can fall back or fail fast instead of
+// burning backoff on a URL that will never work. On any failure the partial
+// ".tmp" is removed so a corrupt artifact is never left behind for reuse.
 func downloadFile(ctx context.Context, url, path string) error {
 	start := time.Now()
+	backoff := time.Second
+	var lastErr error
+	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
+		err := downloadOnce(ctx, url, path)
+		if err == nil {
+			logging.L().Info("download complete", "url", url, "path", path,
+				"attempts", attempt, "elapsed", time.Since(start).Round(time.Millisecond).String())
+			return nil
+		}
+		lastErr = err
+		if !transientDownloadError(err) {
+			return err
+		}
+		if attempt == downloadMaxAttempts {
+			break
+		}
+		logging.L().Warn("base image download failed, retrying",
+			"url", url, "attempt", attempt, "max_attempts", downloadMaxAttempts,
+			"backoff", backoff.String(), "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return fmt.Errorf("download base image failed after %d attempts: %w", downloadMaxAttempts, lastErr)
+}
+
+// downloadOnce performs a single download attempt into path+".tmp", renaming it
+// into place only on success. Any error removes the partial ".tmp" so a
+// truncated artifact is never reused by a later boot.
+func downloadOnce(ctx context.Context, url, path string) error {
+	tmpPath := path + ".tmp"
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("create download request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download base image: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// 4xx (except 429 Too Many Requests) is terminal: retrying won't help.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return &fatalHTTPError{status: resp.Status, code: resp.StatusCode}
+		}
 		return fmt.Errorf("download base image failed: %s", resp.Status)
 	}
 
-	tmpPath := path + ".tmp"
 	_ = os.Remove(tmpPath)
-
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("create temp image file: %w", err)
@@ -476,16 +716,18 @@ func downloadFile(ctx context.Context, url, path string) error {
 	if _, err := io.Copy(f, io.TeeReader(resp.Body, progress)); err != nil {
 		progress.Fail(err)
 		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write image to disk: %w", err)
 	}
 	progress.Finish()
 	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp image file: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("move downloaded image into place: %w", err)
 	}
-	logging.L().Info("download complete", "url", url, "path", path, "elapsed", time.Since(start).Round(time.Millisecond).String())
 	return nil
 }
