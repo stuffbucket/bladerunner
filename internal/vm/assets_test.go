@@ -588,3 +588,302 @@ func TestCheckDiskSpace(t *testing.T) {
 		}
 	}
 }
+
+// --- Fix 1: sidecar fetch uses the bounded client + bounded retry ------------
+
+// sidecarRetryServer serves /image.sha256 with a caller-controlled status
+// sequence, counting hits so a test can assert retry (or no-retry) behavior.
+func sidecarRetryServer(t *testing.T, hits *int32, statuses []int, body string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/image.sha256", func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(hits, 1)
+		idx := int(n) - 1
+		if idx >= len(statuses) {
+			idx = len(statuses) - 1
+		}
+		code := statuses[idx]
+		if code != http.StatusOK {
+			http.Error(w, http.StatusText(code), code)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestFetchSidecarSHA256_RetriesTransient500ThenSucceeds verifies a transient
+// 500 on the FIRST sidecar fetch is retried with backoff and a subsequent 200
+// yields the digest — a blip must not fail the fetch.
+func TestFetchSidecarSHA256_RetriesTransient500ThenSucceeds(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	var hits int32
+	srv := sidecarRetryServer(t, &hits, []int{http.StatusInternalServerError, http.StatusOK}, digest+"\n")
+	defer srv.Close()
+
+	got, err := fetchSidecarSHA256(context.Background(), srv.URL+"/image")
+	if err != nil {
+		t.Fatalf("fetchSidecarSHA256 should have retried past the 500, got: %v", err)
+	}
+	if got != digest {
+		t.Errorf("digest = %q, want %q", got, digest)
+	}
+	if n := atomic.LoadInt32(&hits); n < 2 {
+		t.Fatalf("expected at least 2 attempts (retry), got %d", n)
+	}
+}
+
+// TestFetchSidecarSHA256_404NotRetried verifies a 404 (no published sidecar) is
+// NOT retried: it returns ("", nil) immediately so the caller decides, and the
+// server is hit exactly once.
+func TestFetchSidecarSHA256_404NotRetried(t *testing.T) {
+	var hits int32
+	srv := sidecarRetryServer(t, &hits, []int{http.StatusNotFound}, "")
+	defer srv.Close()
+
+	got, err := fetchSidecarSHA256(context.Background(), srv.URL+"/image")
+	if err != nil {
+		t.Fatalf("a 404 sidecar must return no error, got %v", err)
+	}
+	if got != "" {
+		t.Errorf("a 404 sidecar must return an empty digest, got %q", got)
+	}
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Fatalf("a 404 sidecar must not be retried: expected exactly 1 hit, got %d", n)
+	}
+}
+
+// TestFetchSidecarSHA256_403NotRetried verifies a definitive 403 (a non-404
+// terminal 4xx) fails fast without retrying rather than burning backoff.
+func TestFetchSidecarSHA256_403NotRetried(t *testing.T) {
+	var hits int32
+	srv := sidecarRetryServer(t, &hits, []int{http.StatusForbidden}, "")
+	defer srv.Close()
+
+	if _, err := fetchSidecarSHA256(context.Background(), srv.URL+"/image"); err == nil {
+		t.Fatal("expected a terminal error for a 403 sidecar, got nil")
+	}
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Fatalf("a 403 sidecar must not be retried: expected exactly 1 hit, got %d", n)
+	}
+}
+
+// TestFetchSidecarSHA256_UsesBoundedClient asserts the fetch is issued over the
+// package's bounded downloadClient (dial/TLS/idle timeouts), not
+// http.DefaultClient — the whole point of Fix 1 (a captive portal / silent TCP
+// drop must not hang boot forever). The RoundTripper is temporarily swapped to
+// observe that the sidecar request flows through downloadClient's transport.
+func TestFetchSidecarSHA256_UsesBoundedClient(t *testing.T) {
+	digest := strings.Repeat("c", 64)
+	srv := fakeServer(t, nil, digest+"\n")
+	defer srv.Close()
+
+	base := downloadClient.Transport
+	var used atomic.Bool
+	downloadClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/image.sha256") {
+			used.Store(true)
+		}
+		return base.RoundTrip(r)
+	})
+	t.Cleanup(func() { downloadClient.Transport = base })
+
+	if _, err := fetchSidecarSHA256(context.Background(), srv.URL+"/image"); err != nil {
+		t.Fatalf("fetchSidecarSHA256 error = %v", err)
+	}
+	if !used.Load() {
+		t.Error("sidecar fetch must go through the bounded downloadClient, not http.DefaultClient")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// --- Fix 2: custom --image-url / --image-path fail CLOSED --------------------
+
+// TestEnsureBaseImage_CustomURL_NoShaNoSidecar_FailsClosed verifies a custom
+// --image-url with neither an explicit --image-sha256 nor a published .sha256
+// sidecar REFUSES to boot (fail-closed) instead of warning and booting an
+// unverified image.
+func TestEnsureBaseImage_CustomURL_NoShaNoSidecar_FailsClosed(t *testing.T) {
+	data := []byte("unverified custom image bytes")
+	srv := fakeServer(t, data, "404") // no sidecar published
+	defer srv.Close()
+
+	prev := requireVerifiedCustomImage
+	SetRequireVerifiedCustomImage(true)
+	t.Cleanup(func() { requireVerifiedCustomImage = prev })
+
+	cfg := &config.Config{
+		VMDir:        t.TempDir(),
+		Arch:         "arm64",
+		BaseImageURL: srv.URL + "/image",
+	}
+	_, err := ensureBaseImage(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected a fail-closed error for an unverified custom image, got nil")
+	}
+	if !strings.Contains(err.Error(), "--image-sha256") || !strings.Contains(err.Error(), "sidecar") {
+		t.Errorf("error must name the remedy (--image-sha256 / sidecar), got: %v", err)
+	}
+}
+
+// TestEnsureBaseImage_CustomURL_MatchingSidecar_OK verifies a custom --image-url
+// with a present+matching .sha256 sidecar boots (verified).
+func TestEnsureBaseImage_CustomURL_MatchingSidecar_OK(t *testing.T) {
+	data := []byte("verified custom image bytes")
+	srv := fakeServer(t, data, sha256Hex(data)+"\n")
+	defer srv.Close()
+
+	prev := requireVerifiedCustomImage
+	SetRequireVerifiedCustomImage(true)
+	t.Cleanup(func() { requireVerifiedCustomImage = prev })
+
+	cfg := &config.Config{
+		VMDir:        t.TempDir(),
+		Arch:         "arm64",
+		BaseImageURL: srv.URL + "/image",
+	}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage with a matching sidecar should pass, got: %v", err)
+	}
+	if b, _ := os.ReadFile(got); !bytes.Equal(b, data) {
+		t.Errorf("booted image = %q, want the custom bytes", string(b))
+	}
+}
+
+// TestEnsureBaseImage_CustomURL_MismatchedSidecar_FailsClosed verifies a custom
+// --image-url whose bytes don't match its published sidecar digest fails closed.
+func TestEnsureBaseImage_CustomURL_MismatchedSidecar_FailsClosed(t *testing.T) {
+	data := []byte("tampered custom image bytes")
+	srv := fakeServer(t, data, strings.Repeat("0", 64)+"\n") // valid-shaped, wrong digest
+	defer srv.Close()
+
+	prev := requireVerifiedCustomImage
+	SetRequireVerifiedCustomImage(true)
+	t.Cleanup(func() { requireVerifiedCustomImage = prev })
+
+	cfg := &config.Config{
+		VMDir:        t.TempDir(),
+		Arch:         "arm64",
+		BaseImageURL: srv.URL + "/image",
+	}
+	_, err := ensureBaseImage(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected a mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("expected a mismatch error, got %v", err)
+	}
+}
+
+// TestEnsureBaseImage_CustomURL_ExplicitSHA256_Matches verifies a custom
+// --image-url pinned with an explicit --image-sha256 (threaded via
+// BaseImageExpectedSHA256) is verified fail-closed against that digest and
+// boots when it matches — no sidecar required.
+func TestEnsureBaseImage_CustomURL_ExplicitSHA256_Matches(t *testing.T) {
+	data := []byte("explicitly pinned custom image bytes")
+	digest := sha256Hex(data)
+	srv := fakeServer(t, data, "404") // no sidecar; the explicit hash is authoritative
+	defer srv.Close()
+
+	state := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", state)
+
+	cfg := &config.Config{
+		VMDir:                   t.TempDir(),
+		Arch:                    "arm64",
+		BaseImageURL:            srv.URL + "/image",
+		BaseImageExpectedSHA256: digest,
+	}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ensureBaseImage with a matching explicit --image-sha256 should pass, got: %v", err)
+	}
+	if got != config.ImageCachePath(digest) {
+		t.Errorf("explicit-hash image should resolve via the content-addressed cache, got %q", got)
+	}
+}
+
+// TestEnsureBaseImage_CustomURL_ExplicitSHA256_Mismatch verifies a custom
+// --image-url pinned with an explicit --image-sha256 fails closed on mismatch.
+func TestEnsureBaseImage_CustomURL_ExplicitSHA256_Mismatch(t *testing.T) {
+	data := []byte("bytes that will not match the pin")
+	srv := fakeServer(t, data, "404")
+	defer srv.Close()
+
+	state := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", state)
+
+	cfg := &config.Config{
+		VMDir:                   t.TempDir(),
+		Arch:                    "arm64",
+		BaseImageURL:            srv.URL + "/image",
+		BaseImageExpectedSHA256: strings.Repeat("0", 64),
+	}
+	_, err := ensureBaseImage(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected a mismatch error for a wrong --image-sha256, got nil")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("expected a mismatch error, got %v", err)
+	}
+}
+
+// TestEnsureBaseImage_ImagePath_NoHash_OK verifies a local --image-path with NO
+// --image-path-sha256 is usable without a hash (the user controls the file).
+func TestEnsureBaseImage_ImagePath_NoHash_OK(t *testing.T) {
+	data := []byte("local image, not a qcow2 header")
+	path := writeTempFile(t, data)
+
+	cfg := &config.Config{BaseImagePath: path, Arch: "arm64"}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("a local --image-path without a hash should be usable, got: %v", err)
+	}
+	if got != path {
+		t.Errorf("image path = %q, want %q", got, path)
+	}
+}
+
+// TestEnsureBaseImage_ImagePath_Hash_Matches verifies a local --image-path with
+// a matching --image-path-sha256 (threaded via BaseImageExpectedSHA256) passes.
+func TestEnsureBaseImage_ImagePath_Hash_Matches(t *testing.T) {
+	data := []byte("local image with a pinned hash")
+	path := writeTempFile(t, data)
+
+	cfg := &config.Config{
+		BaseImagePath:           path,
+		Arch:                    "arm64",
+		BaseImageExpectedSHA256: sha256Hex(data),
+	}
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("a matching --image-path-sha256 should pass, got: %v", err)
+	}
+	if got != path {
+		t.Errorf("image path = %q, want %q", got, path)
+	}
+}
+
+// TestEnsureBaseImage_ImagePath_Hash_Mismatch verifies a local --image-path with
+// a mismatched --image-path-sha256 fails closed.
+func TestEnsureBaseImage_ImagePath_Hash_Mismatch(t *testing.T) {
+	data := []byte("local image whose hash will not match")
+	path := writeTempFile(t, data)
+
+	cfg := &config.Config{
+		BaseImagePath:           path,
+		Arch:                    "arm64",
+		BaseImageExpectedSHA256: strings.Repeat("0", 64),
+	}
+	_, err := ensureBaseImage(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected a mismatch error for a wrong --image-path-sha256, got nil")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("expected a mismatch error, got %v", err)
+	}
+}

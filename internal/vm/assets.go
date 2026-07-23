@@ -56,6 +56,34 @@ var downloadClient = &http.Client{
 // downloadMaxAttempts bounds the exponential-backoff retry loop in downloadFile.
 const downloadMaxAttempts = 4
 
+// sidecarMaxAttempts bounds the short retry loop in fetchSidecarSHA256. A
+// captive portal / silent TCP drop must not hang boot forever (the bounded
+// downloadClient caps the connect/TLS/header stall), and a transient blip
+// should retry a couple of times — but a definitive 404 fails fast (it means
+// "no sidecar published", which the caller must decide on), so it is never
+// retried.
+const sidecarMaxAttempts = 3
+
+// sidecarInitialBackoff is the first backoff between failed sidecar fetches; it
+// doubles each retry, mirroring downloadFile's exponential-backoff pattern.
+const sidecarInitialBackoff = 500 * time.Millisecond
+
+// requireVerifiedCustomImage, when true, makes a user-supplied --image-url fail
+// CLOSED: absent an explicit --image-sha256 (threaded via
+// BaseImageExpectedSHA256), the download must be covered by a present+matching
+// .sha256 sidecar, and a missing/unreachable/mismatched sidecar refuses to boot
+// rather than warning-and-continuing. It is armed by the start command
+// (SetRequireVerifiedCustomImage) only for an explicit --image-url, so the
+// Debian/hosted defaults and disk-manifest pins keep their own verification
+// semantics.
+var requireVerifiedCustomImage bool
+
+// SetRequireVerifiedCustomImage arms (or disarms) fail-closed verification for a
+// user-supplied --image-url. The start command calls it once, before
+// EnsureBaseImage, when the user passed --image-url without an --image-sha256 so
+// the run refuses to boot an unverified custom image.
+func SetRequireVerifiedCustomImage(v bool) { requireVerifiedCustomImage = v }
+
 // bytesPerGiB is 1 GiB in bytes, used by the disk-space preflight.
 const bytesPerGiB = int64(1) << 30
 
@@ -87,6 +115,10 @@ func transientDownloadError(err error) bool {
 	if errors.As(err, &fatal) {
 		return false
 	}
+	var terminal *terminalError
+	if errors.As(err, &terminal) {
+		return false
+	}
 	// Context cancellation/deadline from the caller is not a retryable blip.
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -115,18 +147,68 @@ func (e *fatalHTTPError) Error() string {
 	return fmt.Sprintf("download base image failed: %s", e.status)
 }
 
+// terminalError wraps an error that must NOT be retried even though it is not an
+// HTTP status (e.g. a malformed sidecar body: retrying the same URL yields the
+// same bad bytes). transientDownloadError classifies it non-transient so the
+// bounded retry loops fail fast instead of burning backoff.
+type terminalError struct{ err error }
+
+func (e *terminalError) Error() string { return e.err.Error() }
+func (e *terminalError) Unwrap() error { return e.err }
+
 // fetchSidecarSHA256 fetches a "<url>.sha256" sidecar and returns the
 // lowercased hex digest. The sidecar may be either bare hex or the
 // `sha256sum` format ("<hex>  <filename>"); only the first whitespace-
 // separated token is used. Returns "" with no error if the sidecar
 // 404s (caller decides whether that's acceptable).
+//
+// It uses the package's bounded downloadClient (dial/TLS/idle timeouts) rather
+// than http.DefaultClient so a captive portal / silent TCP drop cannot hang
+// boot forever, and wraps the fetch in a short exponential-backoff retry so a
+// transient network blip retries — but a definitive 404 (via fatalHTTPError)
+// fails fast rather than burning backoff on a sidecar that will never appear.
 func fetchSidecarSHA256(ctx context.Context, imageURL string) (string, error) {
+	backoff := sidecarInitialBackoff
+	var lastErr error
+	for attempt := 1; attempt <= sidecarMaxAttempts; attempt++ {
+		digest, err := fetchSidecarSHA256Once(ctx, imageURL)
+		if err == nil {
+			return digest, nil
+		}
+		lastErr = err
+		if !transientDownloadError(err) {
+			// A 404 is surfaced by fetchSidecarSHA256Once as ("", nil), so any
+			// non-transient error here (a definitive non-2xx, a malformed sidecar)
+			// is terminal: retrying will not change the outcome.
+			return "", err
+		}
+		if attempt == sidecarMaxAttempts {
+			break
+		}
+		logging.L().Warn("sidecar checksum fetch failed, retrying",
+			"url", imageURL+".sha256", "attempt", attempt, "max_attempts", sidecarMaxAttempts,
+			"backoff", backoff.String(), "err", err)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return "", fmt.Errorf("fetch sidecar checksum after %d attempts: %w", sidecarMaxAttempts, lastErr)
+}
+
+// fetchSidecarSHA256Once performs a single sidecar fetch attempt over the
+// bounded downloadClient. A 404 returns ("", nil); a definitive non-2xx returns
+// a fatalHTTPError (so the retry loop fails fast); a transient network error is
+// returned as-is for the loop to retry.
+func fetchSidecarSHA256Once(ctx context.Context, imageURL string) (string, error) {
 	sidecarURL := imageURL + ".sha256"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sidecarURL, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("create sidecar request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetch sidecar checksum: %w", err)
 	}
@@ -136,6 +218,11 @@ func fetchSidecarSHA256(ctx context.Context, imageURL string) (string, error) {
 		return "", nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// A definitive non-2xx (other than 429) is terminal; mark it fatal so the
+		// retry loop does not burn backoff on it. 5xx / 429 stay transient.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return "", &fatalHTTPError{status: resp.Status, code: resp.StatusCode}
+		}
 		return "", fmt.Errorf("fetch sidecar checksum: %s", resp.Status)
 	}
 
@@ -146,15 +233,15 @@ func fetchSidecarSHA256(ctx context.Context, imageURL string) (string, error) {
 	}
 	first := strings.Fields(strings.TrimSpace(string(b)))
 	if len(first) == 0 {
-		return "", fmt.Errorf("sidecar checksum is empty")
+		return "", &terminalError{fmt.Errorf("sidecar checksum is empty")}
 	}
 	digest := strings.ToLower(first[0])
 	if len(digest) != sha256.Size*2 {
-		return "", fmt.Errorf("sidecar checksum has unexpected length: %d", len(digest))
+		return "", &terminalError{fmt.Errorf("sidecar checksum has unexpected length: %d", len(digest))}
 	}
 	for _, r := range digest {
 		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			return "", fmt.Errorf("sidecar checksum is not hex: %q", digest)
+			return "", &terminalError{fmt.Errorf("sidecar checksum is not hex: %q", digest)}
 		}
 	}
 	return digest, nil
@@ -199,12 +286,14 @@ func fileSHA512(path string) (string, error) {
 // sidecar is treated:
 //
 //   - strictSidecar=true (the pre-baked hosted guest image, which always ships a
-//     published .sha256): FAIL CLOSED. A mismatch, a missing/404 sidecar, or an
+//     published .sha256; or a user-supplied --image-url with fail-closed custom
+//     verification armed): FAIL CLOSED. A mismatch, a missing/404 sidecar, or an
 //     unreachable sidecar host are all fatal — parity with the pinned-Debian
 //     SHA-512 path. The hosted image is release-managed, so its checksum must
 //     always be present and correct; a gap means "do not boot", not "boot
 //     anyway".
-//   - strictSidecar=false (a user-supplied --image-url): a missing or unreachable
+//   - strictSidecar=false (the Debian genericcloud fallback, verified via its
+//     embedded SHA-512, or a legacy tolerant custom URL): a missing or unreachable
 //     sidecar is logged at WARN and skipped — many upstream image hosts
 //     (cloud.debian.org, arbitrary URLs) don't publish per-image .sha256
 //     sidecars, and blocking boot on their absence regresses that experience.
@@ -225,7 +314,8 @@ func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512 string, s
 	want, err := fetchSidecarSHA256(ctx, imageURL)
 	if err != nil {
 		if strictSidecar {
-			return fmt.Errorf("hosted image sidecar SHA-256 unreachable (%s): %w", imageURL+".sha256", err)
+			return fmt.Errorf("image sidecar SHA-256 unreachable (%s): refusing to boot an unverified image — pass --image-sha256 <hex> or publish a %s sidecar: %w",
+				imageURL+".sha256", imageURL+".sha256", err)
 		}
 		logging.L().Warn("sidecar SHA-256 fetch failed, continuing without verification",
 			"url", imageURL+".sha256", "err", err)
@@ -233,7 +323,8 @@ func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512 string, s
 	}
 	if want == "" {
 		if strictSidecar {
-			return fmt.Errorf("hosted image sidecar SHA-256 missing (%s): refusing to boot unverified", imageURL+".sha256")
+			return fmt.Errorf("image sidecar SHA-256 missing (%s): refusing to boot an unverified custom image — pass --image-sha256 <hex> or publish a %s sidecar",
+				imageURL+".sha256", imageURL+".sha256")
 		}
 		logging.L().Warn("sidecar SHA-256 not present, skipping verification",
 			"url", imageURL+".sha256")
@@ -310,10 +401,36 @@ func MaterializeRawDisk(srcRaw, dst string, diskSizeGiB int) error {
 	return nil
 }
 
+// verifyLocalImageSHA256 fail-closed verifies the local file at path against an
+// expected SHA-256 hex digest. An empty expected is a no-op (the user controls a
+// local --image-path, so the hash is optional); a non-empty expected that does
+// not match is fatal so a pinned local image never boots tampered.
+func verifyLocalImageSHA256(path, expectedSHA256 string) error {
+	if expectedSHA256 == "" {
+		return nil
+	}
+	got, err := fileSHA256(path)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(got, expectedSHA256) {
+		return fmt.Errorf("base image SHA-256 mismatch: got %s, want %s", got, expectedSHA256)
+	}
+	logging.L().Info("base image SHA-256 verified (--image-path)", "sha256", got, "path", path)
+	return nil
+}
+
 func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	if cfg.BaseImagePath != "" {
 		if !util.FileExists(cfg.BaseImagePath) {
 			return "", fmt.Errorf("base image path does not exist: %s", cfg.BaseImagePath)
+		}
+		// The user controls the local file, so a hash is optional — but when one is
+		// supplied (--image-path-sha256, threaded via BaseImageExpectedSHA256),
+		// verify it fail-closed BEFORE any qcow2->raw conversion so the digest
+		// matches the file the user pinned.
+		if err := verifyLocalImageSHA256(cfg.BaseImagePath, cfg.BaseImageExpectedSHA256); err != nil {
+			return "", err
 		}
 		if err := ensureRawDiskImage(cfg.BaseImagePath); err != nil {
 			return "", err
@@ -365,7 +482,13 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		return "", err
 	}
 
-	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, false, path); err != nil {
+	// For a custom --image-url with no embedded SHA-512 and no pinned SHA-256
+	// (which would have routed to ensureCachedBaseImage), verification is
+	// sidecar-based. requireVerifiedCustomImage makes that fail-closed: a
+	// missing/unreachable/mismatched .sha256 refuses to boot rather than warning
+	// and continuing. The Debian fallback carries an embedded SHA-512 and so takes
+	// the strictSidecar-independent SHA-512 branch regardless.
+	if err := verifyImageChecksum(ctx, cfg.BaseImageURL, cfg.BaseImageSHA512, requireVerifiedCustomImage, path); err != nil {
 		// Remove the corrupt download so subsequent runs don't reuse it.
 		_ = os.Remove(path)
 		return "", err

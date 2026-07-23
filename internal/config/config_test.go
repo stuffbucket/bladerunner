@@ -279,7 +279,7 @@ func TestForceDebianImage(t *testing.T) {
 }
 
 func TestDefaultAptMirrorURI(t *testing.T) {
-	const want = "http://deb.debian.org/debian"
+	const want = "https://deb.debian.org/debian"
 	for _, arch := range []string{"arm64", "amd64", "riscv64", ""} {
 		t.Run("arch="+arch, func(t *testing.T) {
 			if got := DefaultAptMirrorURI(arch); got != want {

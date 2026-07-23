@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 
@@ -16,8 +17,29 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
+// breakGlassPasswordLen is the length of the generated per-instance break-glass
+// SSH password. 24 characters from a 62-symbol alphabet is ~143 bits of entropy
+// — far beyond brute force over the loopback-only vsock bridge.
+const breakGlassPasswordLen = 24
+
+// breakGlassPasswordAlphabet is the character set the per-instance password is
+// drawn from. It deliberately excludes the single-quote (the shell literal
+// delimiter in the bootstrap) and other shell/YAML metacharacters, so the
+// password is safe to embed verbatim in the cloud-init chpasswd module and the
+// bootstrap's single-quoted SSH_BREAK_GLASS_PW without any escaping.
+const breakGlassPasswordAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
 type runtimeMetadata struct {
 	MACAddress string `json:"mac_address"`
+
+	// SSHBreakGlassPassword is the per-instance random break-glass SSH password.
+	// Primary access is the SSH key in authorized_keys; this is only a fallback
+	// over the loopback-only vsock bridge. It is generated once and persisted so
+	// it is stable for this VM across binary updates and can be surfaced to the
+	// operator. Older VMs provisioned with the historical hardcoded literal are
+	// unaffected: they never re-provision, so their guest password is unchanged
+	// regardless of what this file holds.
+	SSHBreakGlassPassword string `json:"ssh_break_glass_password,omitempty"`
 
 	// GrubHardened is set true once the disk completes a fully-ready boot, which
 	// proves the first-boot bootstrap's update-grub ran and installed the
@@ -55,26 +77,47 @@ func peekMetadata(cfg *config.Config) runtimeMetadata {
 }
 
 func loadOrCreateMetadata(cfg *config.Config) (*runtimeMetadata, error) {
+	var md runtimeMetadata
+	loaded := false
 	if util.FileExists(cfg.MetadataPath) {
 		b, err := os.ReadFile(cfg.MetadataPath)
 		if err == nil {
-			var md runtimeMetadata
-			if err := json.Unmarshal(b, &md); err == nil && md.MACAddress != "" {
-				return &md, nil
+			if err := json.Unmarshal(b, &md); err == nil {
+				loaded = true
+			} else {
+				md = runtimeMetadata{}
 			}
 		}
 	}
 
-	mac, err := generateLocalMAC()
-	if err != nil {
-		return nil, err
+	// Ensure both the MAC and the break-glass password exist (load-or-create):
+	// either may be absent on a fresh VM or an older metadata file that predates
+	// the password field. Persist only when we actually filled something in, so a
+	// complete existing file is never rewritten.
+	dirty := false
+	if md.MACAddress == "" {
+		mac, err := generateLocalMAC()
+		if err != nil {
+			return nil, err
+		}
+		md.MACAddress = mac.String()
+		dirty = true
+	}
+	if md.SSHBreakGlassPassword == "" {
+		pw, err := generateBreakGlassPassword()
+		if err != nil {
+			return nil, err
+		}
+		md.SSHBreakGlassPassword = pw
+		dirty = true
 	}
 
-	md := &runtimeMetadata{MACAddress: mac.String()}
-	if err := saveMetadata(cfg, md); err != nil {
-		return nil, err
+	if dirty || !loaded {
+		if err := saveMetadata(cfg, &md); err != nil {
+			return nil, err
+		}
 	}
-	return md, nil
+	return &md, nil
 }
 
 func saveMetadata(cfg *config.Config, md *runtimeMetadata) error {
@@ -82,7 +125,9 @@ func saveMetadata(cfg *config.Config, md *runtimeMetadata) error {
 	if err != nil {
 		return fmt.Errorf("marshal runtime metadata: %w", err)
 	}
-	if err := os.WriteFile(cfg.MetadataPath, b, 0o644); err != nil {
+	// 0600: the metadata now carries the per-instance break-glass SSH password, so
+	// keep it readable only by the owner.
+	if err := os.WriteFile(cfg.MetadataPath, b, 0o600); err != nil {
 		return fmt.Errorf("write runtime metadata: %w", err)
 	}
 	return nil
@@ -95,4 +140,21 @@ func generateLocalMAC() (net.HardwareAddr, error) {
 	}
 	mac[0] = (mac[0] | 2) & 0xfe // locally administered unicast
 	return net.HardwareAddr(mac), nil
+}
+
+// generateBreakGlassPassword returns a cryptographically-random break-glass SSH
+// password drawn from breakGlassPasswordAlphabet. The alphabet has no shell/YAML
+// metacharacters, so the result is safe to embed verbatim in the cloud-init
+// chpasswd module and the single-quoted bootstrap variable.
+func generateBreakGlassPassword() (string, error) {
+	alphabetLen := big.NewInt(int64(len(breakGlassPasswordAlphabet)))
+	buf := make([]byte, breakGlassPasswordLen)
+	for i := range buf {
+		n, err := rand.Int(rand.Reader, alphabetLen)
+		if err != nil {
+			return "", fmt.Errorf("generate break-glass password: %w", err)
+		}
+		buf[i] = breakGlassPasswordAlphabet[n.Int64()]
+	}
+	return string(buf), nil
 }

@@ -52,6 +52,25 @@ var chronyConf string
 //go:embed scripts/99-bladerunner-grub.cfg
 var grubDropIn string
 
+// zabblyKey is the Zabbly apt-repository GPG public key, embedded from the
+// checked-in internal/provision/scripts/zabbly-key.asc. It is the trust anchor
+// for the Zabbly incus/incus-ui-canonical .deb repository.
+//
+// SUPPLY-CHAIN ANCHOR: this key is PINNED at build time rather than fetched over
+// the network on first boot. Both the cloud-init path (install_zabbly_repo) and
+// the image build previously did `curl -fsSL https://pkgs.zabbly.com/key.asc` at
+// runtime — a trust-on-first-use fetch a network MITM could poison to inject a
+// forged key and serve backdoored incus packages. Embedding the reviewed key
+// bytes here converts that runtime TOFU fetch into an in-repo pin: any change to
+// the trust root shows up as a reviewable diff. Update deliberately, verifying
+// the fingerprint against Zabbly's published key:
+//
+//	pub rsa3072 4EFC590696CB15B87C73A3AD82CC8797C838DCFD
+//	           Zabbly Kernel Builds <info@zabbly.com>
+//
+//go:embed scripts/zabbly-key.asc
+var zabblyKey string
+
 // relayTemplateUnit is the single parameterized systemd unit that supervises all
 // four vsock relays. Each channel is a template instance
 // (bladerunner-vsock-relay@<name>.service) whose socat argv + optional

@@ -545,6 +545,12 @@ func DefaultIdentityDir() string {
 // DefaultAptMirrorURI returns the apt mirror URI used by the default base image.
 // Debian serves all architectures from a single mirror URL, so the arch argument
 // is accepted for API stability but does not vary the result.
+//
+// The scheme is https:// to encrypt package-index/download transport: Debian
+// Trixie genericcloud ships ca-certificates and apt has built-in https support,
+// so no apt-transport-https package is needed. This only protects transport
+// (metadata privacy + tamper-evidence in flight); package integrity is still
+// enforced independently by apt's GPG Release signature verification.
 func DefaultAptMirrorURI(_ string) string {
-	return "http://deb.debian.org/debian"
+	return "https://deb.debian.org/debian"
 }

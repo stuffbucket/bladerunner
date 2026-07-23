@@ -314,13 +314,23 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	r.clientCrt = certPEM
 	r.clientKey = keyPEM
 
+	// Load-or-create runtime metadata FIRST: it holds the per-instance break-glass
+	// SSH password that the cloud-init payload below embeds, and its MAC that the
+	// VM configuration needs. Both are generated once and persisted, so they stay
+	// stable for this VM across binary updates.
+	md, err := loadOrCreateMetadata(r.cfg)
+	if err != nil {
+		return nil, err
+	}
+	r.metadata = md
+
 	// On restore the guest is already configured and frozen in the saved
 	// state; regenerating cloud-init would needlessly rewrite the seed ISO. The
 	// existing ISO file is still attached so the device topology matches the
 	// saved configuration.
 	if r.restoreFrom == "" {
 		log.Info("building cloud-init payload")
-		userData, metaData := provision.BuildCloudInit(r.cfg, string(certPEM))
+		userData, metaData := provision.BuildCloudInit(r.cfg, string(certPEM), md.SSHBreakGlassPassword)
 		if err := provision.WriteSeedFiles(r.cfg, userData, metaData); err != nil {
 			return nil, err
 		}
@@ -338,12 +348,6 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 	if err := ensureMainDisk(r.cfg, baseImagePath); err != nil {
 		return nil, err
 	}
-
-	md, err := loadOrCreateMetadata(r.cfg)
-	if err != nil {
-		return nil, err
-	}
-	r.metadata = md
 
 	// Arm crash detection: mark this run as not-yet-cleanly-stopped. A graceful
 	// Stop() sets it true again; a crash or kill -9 leaves it false, which the
@@ -753,6 +757,16 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 		}
 	} else {
 		sshCommand = fmt.Sprintf("ssh -p %d %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHUser)
+	}
+
+	// Surface the per-instance break-glass SSH password alongside the access
+	// report. Primary access is the SSH key (host key in authorized_keys); this
+	// password is only a fallback over the loopback-only vsock bridge. It is
+	// logged rather than added to the JSON report so it does not persist into the
+	// on-disk report file. Guard against nil metadata (Stop before StartVM).
+	if r.metadata != nil && r.metadata.SSHBreakGlassPassword != "" {
+		logging.L().Info("break-glass SSH password (fallback; primary access is the SSH key)",
+			"user", r.cfg.SSHUser, "password", r.metadata.SSHBreakGlassPassword)
 	}
 
 	data := &report.StartupReport{

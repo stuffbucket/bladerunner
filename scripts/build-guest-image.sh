@@ -254,6 +254,11 @@ else
     install -m 0755 "${ASSET_DIR}/bladerunner-watchdog.sh" "${MNT}/usr/local/sbin/bladerunner-watchdog.sh"
     install -m 0644 "${ASSET_DIR}/bladerunner-watchdog.service" "${MNT}/etc/systemd/system/bladerunner-watchdog.service"
     install -m 0644 "${ASSET_DIR}/chrony.conf" "${MNT}/root/bladerunner-chrony.conf"
+    # Zabbly apt GPG trust root: the build-time-PINNED key checked into the repo
+    # (internal/provision/scripts/zabbly-key.asc). Staged into the chroot so the
+    # UI-repo step below installs it from disk instead of curl-fetching key.asc at
+    # build time — no trust-on-first-use network fetch of the trust anchor.
+    install -m 0644 "${ASSET_DIR}/zabbly-key.asc" "${MNT}/root/bladerunner-zabbly-key.asc"
     # GRUB drop-in staged directly into place (its target dir may not exist in
     # the base image); update-grub is run inside the chroot below.
     mkdir -p "${MNT}/etc/default/grub.d"
@@ -274,10 +279,16 @@ systemctl enable incus incus.socket ssh
 # .deb and extract its static files to /opt/incus/ui WITHOUT installing the
 # package, then point incusd at it via INCUS_UI. Entirely non-fatal so a missing
 # Zabbly suite never fails the image build.
+#
+# The Zabbly GPG trust root is the build-time-PINNED key staged above from the
+# repo (internal/provision/scripts/zabbly-key.asc). Install those reviewed bytes
+# instead of curl-fetching https://pkgs.zabbly.com/key.asc: a build-time TOFU
+# fetch could be poisoned by a MITM and bake a forged trust root into the image.
 if [ ! -e /etc/apt/keyrings/zabbly.asc ]; then
   mkdir -p /etc/apt/keyrings
-  curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc || true
+  install -m 0644 /root/bladerunner-zabbly-key.asc /etc/apt/keyrings/zabbly.asc
 fi
+rm -f /root/bladerunner-zabbly-key.asc
 cat >/etc/apt/sources.list.d/zabbly-incus-stable.sources <<SRC || true
 Enabled: yes
 Types: deb

@@ -30,18 +30,20 @@ import (
 )
 
 var startFlags struct {
-	cpus        uint
-	memory      uint64
-	disk        int
-	gui         bool
-	stateDir    string
-	imageURL    string
-	imagePath   string
-	hostedImage bool
-	debianImage bool
-	timeout     time.Duration
-	noNested    bool
-	restoreFrom string
+	cpus         uint
+	memory       uint64
+	disk         int
+	gui          bool
+	stateDir     string
+	imageURL     string
+	imageSHA256  string
+	imagePath    string
+	imagePathSHA string
+	hostedImage  bool
+	debianImage  bool
+	timeout      time.Duration
+	noNested     bool
+	restoreFrom  string
 }
 
 var startCmd = &cobra.Command{
@@ -60,7 +62,9 @@ func init() {
 	f.BoolVar(&startFlags.gui, "gui", false, "Open GUI console window")
 	f.StringVar(&startFlags.stateDir, "state-dir", "", "State directory (default: ~/.local/state/bladerunner)")
 	f.StringVar(&startFlags.imageURL, "image-url", "", "Base image URL")
+	f.StringVar(&startFlags.imageSHA256, "image-sha256", "", "Expected SHA-256 (hex) of the --image-url download; verified fail-closed. Without it, --image-url requires a present+matching <url>.sha256 sidecar")
 	f.StringVar(&startFlags.imagePath, "image-path", "", "Local base image path")
+	f.StringVar(&startFlags.imagePathSHA, "image-path-sha256", "", "Optional expected SHA-256 (hex) of the --image-path file; when set it is verified fail-closed")
 	f.BoolVar(&startFlags.hostedImage, "hosted-image", false, "Force the pre-baked hosted guest image (guest-image-latest release); the default already resolves to it (also settable via BLADERUNNER_FORCE_HOSTED_IMAGE=1)")
 	f.BoolVar(&startFlags.debianImage, "debian-image", false, "Escape hatch: force the Debian Trixie genericcloud + cloud-init path instead of the pre-baked default (also settable via BLADERUNNER_FORCE_DEBIAN_IMAGE=1)")
 	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
@@ -177,11 +181,23 @@ func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bo
 	if startFlags.imageURL != "" && apply("image-url") {
 		cfg.BaseImageURL = startFlags.imageURL
 		// A custom image isn't the pinned Debian default, so the embedded
-		// SHA-512 no longer applies; fall back to sidecar verification.
+		// SHA-512 no longer applies. Verification is fail-closed instead of
+		// fail-open: if the user pinned --image-sha256 we verify the download
+		// against it (via the content-addressed SHA-256 path); otherwise we
+		// require a present+matching .sha256 sidecar (armed below in runStart).
 		cfg.BaseImageSHA512 = ""
+		if startFlags.imageSHA256 != "" {
+			cfg.BaseImageExpectedSHA256 = startFlags.imageSHA256
+		}
 	}
 	if startFlags.imagePath != "" && apply("image-path") {
 		cfg.BaseImagePath = startFlags.imagePath
+		// An optional --image-path-sha256 pins the local file; when set it is
+		// verified fail-closed. Reuses BaseImageExpectedSHA256 (disambiguated by
+		// BaseImagePath being non-empty, which short-circuits the download paths).
+		if startFlags.imagePathSHA != "" {
+			cfg.BaseImageExpectedSHA256 = startFlags.imagePathSHA
+		}
 	}
 	// --hosted-image (or BLADERUNNER_FORCE_HOSTED_IMAGE=1) forces the pre-baked
 	// hosted guest image. Since the hosted image is now the DEFAULT, this mostly
@@ -340,6 +356,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// the RW share. This must land AFTER the manifest/flag overrides so the
 	// cartridge's own root.img / state / share win. No-op for a non-cartridge boot.
 	applyBootCartridge(cfg)
+
+	// Fail-closed verify hook for a user-supplied --image-url: when the user
+	// passed --image-url WITHOUT an explicit --image-sha256 (which would already
+	// verify the download fail-closed), require a present+matching .sha256 sidecar
+	// so a missing/mismatched sidecar refuses to boot instead of warning and
+	// booting an unverified custom image.
+	if startFlags.imageURL != "" && startFlags.imageSHA256 == "" {
+		vm.SetRequireVerifiedCustomImage(true)
+	}
 
 	// Setup logging
 	if err := logging.Init(cfg.LogPath); err != nil {

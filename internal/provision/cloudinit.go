@@ -15,8 +15,8 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
-func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
-	bootstrapScript := renderBootstrapScript(cfg)
+func BuildCloudInit(cfg *config.Config, clientCertPEM, breakGlassPassword string) (string, string) {
+	bootstrapScript := renderBootstrapScript(cfg, breakGlassPassword)
 
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
@@ -43,7 +43,7 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	b.WriteString("  expire: false\n")
 	b.WriteString("  users:\n")
 	fmt.Fprintf(&b, "    - name: %s\n", cfg.SSHUser)
-	b.WriteString("      password: bladerunner\n")
+	fmt.Fprintf(&b, "      password: %s\n", breakGlassPassword)
 	b.WriteString("      type: text\n")
 	b.WriteString("write_files:\n")
 	b.WriteString("  - path: /var/lib/bladerunner/host-client.crt\n")
@@ -136,7 +136,7 @@ func BuildCloudInitISO(ctx context.Context, cfg *config.Config) error {
 	return fmt.Errorf("cloud-init ISO not produced at expected paths (wanted %s)", cfg.CloudInitISO)
 }
 
-func renderBootstrapScript(cfg *config.Config) string {
+func renderBootstrapScript(cfg *config.Config, breakGlassPassword string) string {
 	return fmt.Sprintf(`#!/usr/bin/env bash
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -202,10 +202,18 @@ apt_update_retry() {
 # Zabbly fallback: dormant for the default Debian 13 (trixie) image, which ships
 # incus and incus-client in main. Retained for Ubuntu and other distros reached
 # via --image-url where the native package is not available.
+#
+# The Zabbly GPG trust root is the build-time-PINNED key embedded from the repo
+# (internal/provision/scripts/zabbly-key.asc). We write those reviewed bytes here
+# instead of curl-fetching https://pkgs.zabbly.com/key.asc at runtime: a network
+# MITM on first boot could otherwise inject a forged key and serve backdoored
+# incus packages (TOFU). No runtime fetch of the key happens anymore.
 install_zabbly_repo() {
   if [ ! -e /etc/apt/keyrings/zabbly.asc ]; then
     mkdir -p /etc/apt/keyrings
-    curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+    cat >/etc/apt/keyrings/zabbly.asc <<'ZABBLYKEY'
+%s
+ZABBLYKEY
   fi
 
   codename=""
@@ -287,6 +295,11 @@ fi
 #     incus provisioning that follows fails.
 SSH_USER='%s'
 SSH_PUBKEY='%s'
+# Break-glass password: a per-instance random secret (generated + persisted on the
+# host, threaded in here) rather than a shared hardcoded literal. Primary access is
+# still the SSH key above; this password is only a fallback over the loopback-only
+# vsock bridge. The alphabet excludes the single-quote used to delimit it.
+SSH_BREAK_GLASS_PW='%s'
 if ! id -u "$SSH_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$SSH_USER" || true
 fi
@@ -305,7 +318,7 @@ chown -R "$SSH_USER:$SSH_USER" "$SSH_HOME/.ssh" 2>/dev/null || true
 usermod -aG sudo "$SSH_USER" 2>/dev/null || true
 echo "$SSH_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-bladerunner
 chmod 440 /etc/sudoers.d/90-bladerunner
-echo "$SSH_USER:bladerunner" | chpasswd 2>/dev/null || true
+echo "$SSH_USER:$SSH_BREAK_GLASS_PW" | chpasswd 2>/dev/null || true
 # SSH password auth as a fallback escape hatch (loopback-only vsock bridge).
 if [ -d /etc/ssh/sshd_config.d ]; then
   echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/90-bladerunner.conf
@@ -417,9 +430,16 @@ br_stage bootstrap-done
 # kept immediately above for backward compatibility with older host parsers.
 br_stage bootstrap-complete
 `,
-		// Break-glass SSH block (SSH_USER, SSH_PUBKEY), placed first because it
-		// appears early in the bootstrap, before the vsock relays.
-		cfg.SSHUser, cfg.SSHPublicKey,
+		// Zabbly apt GPG trust root: the build-time-PINNED key (embed.go zabblyKey,
+		// from internal/provision/scripts/zabbly-key.asc). Written verbatim into the
+		// install_zabbly_repo heredoc so first boot NEVER curl-fetches the key. It
+		// appears first because install_zabbly_repo is defined near the top of the
+		// bootstrap.
+		zabblyKey,
+		// Break-glass SSH block (SSH_USER, SSH_PUBKEY, SSH_BREAK_GLASS_PW), placed
+		// next because it appears early in the bootstrap, before the vsock relays.
+		// The password is a per-instance random secret; the SSH key stays primary.
+		cfg.SSHUser, cfg.SSHPublicKey, breakGlassPassword,
 		// All guest-side vsock relays (ssh/incus/oidc/ntp as ONE template unit) +
 		// the chrony/watchdog time stack + the optional VirtioFS share, rendered
 		// as one fragment. Ordered relays -> time-heal -> share, all before incus,

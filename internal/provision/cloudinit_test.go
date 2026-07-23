@@ -7,6 +7,12 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
+// testBreakGlassPassword is a fixed, obviously-fake per-instance break-glass
+// password the render tests thread through BuildCloudInit. Using a sentinel
+// (rather than the literal "bladerunner") lets the tests assert the password is
+// templated from the argument and that the old hardcoded literal is gone.
+const testBreakGlassPassword = "TESTpw0123456789abcdef00"
+
 // testConfig returns a minimal but valid *config.Config sufficient to drive
 // BuildCloudInit. Only the fields the cloud-init renderer dereferences are
 // populated; arch defaults to arm64 to match the primary Apple-silicon target.
@@ -39,7 +45,7 @@ func TestBuildCloudInit_FirstBootConsoleDropIn(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n")
+	userData, _ := BuildCloudInit(cfg, "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n", testBreakGlassPassword)
 
 	wants := []string{
 		"path: /etc/default/grub.d/99_bladerunner.cfg",
@@ -61,7 +67,7 @@ func TestBuildCloudInit_NoFirstBootReboot(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	forbidden := []string{
 		".boot1-rebooted",
@@ -83,7 +89,7 @@ func TestBuildCloudInit_NoLegacySedGrubEdit(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	if strings.Contains(userData, "sed -i 's/^GRUB_CMDLINE_LINUX=") {
 		t.Errorf("user-data still contains legacy sed grub edit; should be replaced by 99_bladerunner.cfg drop-in\n---\n%s\n---", userData)
@@ -103,7 +109,7 @@ func TestBuildCloudInit_VsockSSHBridgeBeforeIncusInstall(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	bridgeIdx := strings.Index(userData, "/etc/bladerunner/relays/ssh.env")
 	incusIdx := strings.Index(userData, "incus incus-client")
@@ -126,7 +132,7 @@ func TestBuildCloudInit_AptUpdateResilient(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"apt_update_retry",       // retry helper is defined and used
@@ -153,7 +159,7 @@ func TestBuildCloudInit_BootBreadcrumbs(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"br_stage() {",   // helper defined
@@ -180,7 +186,7 @@ func TestBuildCloudInit_ShareAutomountWhenEnabled(t *testing.T) {
 	cfg.ShareDir = "/some/host/dir"
 	cfg.ShareTag = config.DefaultShareTag
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"Type=virtiofs",                  // mount unit type
@@ -209,7 +215,7 @@ func TestBuildCloudInit_ShareHonorsGuestPath(t *testing.T) {
 	cfg.ShareTag = config.DefaultShareTag
 	cfg.ShareGuestPath = "/srv/data"
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"Where=/srv/data",
@@ -233,7 +239,7 @@ func TestBuildCloudInit_NoShareWhenDisabled(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig() // ShareDir empty
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	unwanted := []string{
 		"Type=virtiofs",
@@ -255,7 +261,7 @@ func TestBuildCloudInit_UpdateGrubStillRuns(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	if !strings.Contains(userData, "update-grub") {
 		t.Errorf("user-data missing update-grub invocation in bootcmd\n---\n%s\n---", userData)
@@ -269,7 +275,7 @@ func TestBuildCloudInit_ChronyInstalled(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	if !strings.Contains(userData, "openssh-server socat jq chrony") {
 		t.Errorf("user-data does not install chrony in the core apt line\n---\n%s\n---", userData)
@@ -285,7 +291,7 @@ func TestBuildCloudInit_ChronyInstallsInCoreBlockBeforeIncus(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	chronyIdx := strings.Index(userData, "openssh-server socat jq chrony")
 	incusIdx := strings.Index(userData, "incus incus-client")
@@ -306,7 +312,7 @@ func TestBuildCloudInit_ChronyConfEmitted(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"/etc/chrony/chrony.conf",
@@ -337,7 +343,7 @@ func TestBuildCloudInit_NTPBridgeEmitted(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"/etc/bladerunner/relays/ntp.env",
@@ -361,7 +367,7 @@ func TestBuildCloudInit_AllFourRelayChannels(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	// One template unit, exec'ing socat with the word-split $RELAY_ARGS argv.
 	tmplWants := []string{
@@ -443,7 +449,7 @@ func TestBuildCloudInit_RelayPortsThreadThrough(t *testing.T) {
 	cfg.VsockOIDCPort = 28556
 	cfg.VsockNTPPort = 28557
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"RELAY_ARGS=VSOCK-LISTEN:20022,fork,reuseaddr TCP:127.0.0.1:22",
@@ -466,7 +472,7 @@ func TestBuildCloudInit_TimesyncdMaskedAfterChronyActive(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	guardIdx := strings.Index(userData, "systemctl is-active --quiet chrony")
 	maskIdx := strings.Index(userData, "systemctl mask systemd-timesyncd")
@@ -489,7 +495,7 @@ func TestBuildCloudInit_WatchdogEmitted(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"/usr/local/sbin/bladerunner-watchdog.sh",
@@ -517,7 +523,7 @@ func TestBuildCloudInit_WatchdogNeverRestartsNetworkd(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	if strings.Contains(userData, "systemctl restart systemd-networkd") {
 		t.Errorf("watchdog must NEVER restart systemd-networkd (disrupts Incus container bridges)\n---\n%s\n---", userData)
@@ -531,7 +537,7 @@ func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig()
 
-	userData, _ := BuildCloudInit(cfg, "")
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
 
 	wants := []string{
 		"logger -t \"$TAG\"", // journal logging via the bladerunner-watchdog tag
@@ -550,3 +556,95 @@ func TestBuildCloudInit_WatchdogLogsEveryCycle(t *testing.T) {
 // of the shared relay template, so its port-threading is covered by
 // TestBuildCloudInit_RelayPortsThreadThrough (non-default VsockNTPPort) and the
 // exact-line assertion in TestBuildCloudInit_AllFourRelayChannels.
+
+// TestBuildCloudInit_ZabblyKeyPinnedNotFetched verifies the supply-chain fix for
+// the Zabbly apt GPG key: the embedded, build-time-reviewed key bytes are written
+// into /etc/apt/keyrings/zabbly.asc, and the guest NEVER curl-fetches the trust
+// root at runtime (the old TOFU fetch a network MITM could poison).
+func TestBuildCloudInit_ZabblyKeyPinnedNotFetched(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
+
+	// The embedded key is written into the keyring via a heredoc.
+	wants := []string{
+		"cat >/etc/apt/keyrings/zabbly.asc <<'ZABBLYKEY'",
+		"-----BEGIN PGP PUBLIC KEY BLOCK-----",
+		"-----END PGP PUBLIC KEY BLOCK-----",
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("user-data does not write the embedded Zabbly key %q\n---\n%s\n---", want, userData)
+		}
+	}
+
+	// The runtime curl fetch of the key must be gone entirely. (The word
+	// "pkgs.zabbly.com" still legitimately appears — in the sources.list URI and
+	// in an explanatory comment — so match the actual fetch command, not any
+	// mention of the host.)
+	forbidden := []string{
+		"curl -fsSL https://pkgs.zabbly.com/key.asc",
+		"key.asc -o /etc/apt/keyrings/zabbly.asc",
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(userData, bad) {
+			t.Errorf("user-data still fetches the Zabbly key at runtime (%q); it must be the embedded pin\n---\n%s\n---", bad, userData)
+		}
+	}
+
+	// The rendered key must come from the embedded asset, not a placeholder. The
+	// write_files content block indents the whole bootstrap by 6 spaces, so an
+	// exact-byte contains of the raw embed would miss; instead assert a distinctive
+	// base64 line of the embedded key (which survives as a substring within its
+	// indented line) is present, and that it is a non-trivial key.
+	if len(zabblyKey) < 500 {
+		t.Fatalf("embedded zabblyKey looks truncated (%d bytes)", len(zabblyKey))
+	}
+	distinctive := "mQGNBGTlYcIBDAC" // first base64 line of the Zabbly public key
+	if !strings.Contains(zabblyKey, distinctive) {
+		t.Fatalf("test fixture drift: embedded zabblyKey no longer starts with the expected line %q", distinctive)
+	}
+	if !strings.Contains(userData, distinctive) {
+		t.Errorf("user-data does not contain the embedded Zabbly key body\n---\n%s\n---", userData)
+	}
+}
+
+// TestBuildCloudInit_BreakGlassPasswordTemplated verifies the break-glass SSH
+// password is threaded from the argument into BOTH the cloud-init chpasswd module
+// AND the bootstrap chpasswd line, and that the historical hardcoded "bladerunner"
+// literal is no longer used as the password anywhere.
+func TestBuildCloudInit_BreakGlassPasswordTemplated(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+
+	userData, _ := BuildCloudInit(cfg, "", testBreakGlassPassword)
+
+	// chpasswd cloud-config module carries the per-instance password.
+	if !strings.Contains(userData, "password: "+testBreakGlassPassword) {
+		t.Errorf("chpasswd module does not use the threaded break-glass password\n---\n%s\n---", userData)
+	}
+	// Bootstrap sets SSH_BREAK_GLASS_PW to the threaded password and applies it.
+	if !strings.Contains(userData, "SSH_BREAK_GLASS_PW='"+testBreakGlassPassword+"'") {
+		t.Errorf("bootstrap does not set SSH_BREAK_GLASS_PW to the threaded password\n---\n%s\n---", userData)
+	}
+	if !strings.Contains(userData, `echo "$SSH_USER:$SSH_BREAK_GLASS_PW" | chpasswd`) {
+		t.Errorf("bootstrap does not apply the break-glass password via chpasswd\n---\n%s\n---", userData)
+	}
+
+	// The old hardcoded literal must not appear as a password anymore.
+	forbidden := []string{
+		"password: bladerunner",
+		`echo "$SSH_USER:bladerunner" | chpasswd`,
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(userData, bad) {
+			t.Errorf("user-data still hardcodes the break-glass password (%q); it must be per-instance\n---\n%s\n---", bad, userData)
+		}
+	}
+
+	// Password auth stays enabled as the break-glass fallback.
+	if !strings.Contains(userData, "PasswordAuthentication yes") {
+		t.Errorf("break-glass password auth was removed; it must remain as a fallback\n---\n%s\n---", userData)
+	}
+}
