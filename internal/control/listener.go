@@ -88,7 +88,7 @@ func NewListenerWithConfig(cfg ListenerConfig) (*Listener, error) {
 		cfg.WireFormat = DefaultWireFormat
 	}
 
-	address := filepath.Join(cfg.StateDir, SocketName)
+	address := SocketPath(cfg.StateDir)
 
 	lock, err := acquireStartLock(cfg.StateDir)
 	if err != nil {
@@ -171,7 +171,7 @@ func acquireStartLock(dir string) (*startLock, error) {
 	if dir == "" {
 		return unlockedStartLock, nil // no directory to anchor a lock file to
 	}
-	path := filepath.Join(dir, LockName)
+	path := LockPath(dir)
 	pid := os.Getpid()
 
 	for range lockAttempts {
@@ -344,12 +344,18 @@ func (l *Listener) Close() error {
 	return nil
 }
 
-// LockPath returns the start-lock path for a state directory.
+// LockPath returns the start-lock path for a state directory. It is the single
+// definition of that path: acquireStartLock builds its lock file through this
+// function rather than re-joining LockName, so an external caller reasoning
+// about the lock (a diagnostic, a cleanup) can never disagree with the code
+// that takes it.
 func LockPath(stateDir string) string {
 	return filepath.Join(stateDir, LockName)
 }
 
-// SocketPath returns the socket path for a state directory.
+// SocketPath returns the control socket path for a state directory. Like
+// LockPath it is the one source of truth: NewListenerWithConfig binds this
+// exact path and NewClient dials it.
 func SocketPath(stateDir string) string {
 	return filepath.Join(stateDir, SocketName)
 }

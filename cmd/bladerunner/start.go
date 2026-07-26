@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/boot"
 	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/ui"
 	"github.com/stuffbucket/bladerunner/internal/ui/board"
@@ -107,7 +111,71 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	defer obs.close()
 	host.SetObserver(obs)
 
-	return host.Run(ctx)
+	return explainHostError(host.Run(ctx))
+}
+
+// A Host declines to start for two reasons that are not really errors so much
+// as facts about the machine: someone else already holds this instance
+// (control.ErrInstanceLocked, taken before the socket dance) or it is already
+// running (vmhost.ErrAlreadyRunning, taken when the socket answers). Both are
+// sentinels, and until this existed nothing matched them — so the friendly path
+// they were declared for did not exist and the user got the raw wrapped text.
+//
+// explainHostError is where they are matched. It appends a hint and keeps the
+// sentinel wrapped, so `errors.Is` still works for any caller above.
+func explainHostError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, control.ErrInstanceLocked):
+		return fmt.Errorf("%w\n%s", err, instanceLockedHint(err))
+	case errors.Is(err, vmhost.ErrAlreadyRunning):
+		return fmt.Errorf("%w\n%s", err, alreadyRunningHint)
+	default:
+		return err
+	}
+}
+
+// alreadyRunningHint is what to do about an instance whose control socket
+// already answers.
+const alreadyRunningHint = "  it is already up: 'br instances' lists it, 'br shell' gets into it, 'br stop' shuts it down"
+
+// instanceLockedHint names the process holding the instance, because "another
+// bladerunner process" is not something a user can act on and a PID is: it is
+// what `br instances` shows and what a kill needs when a holder has wedged.
+func instanceLockedHint(err error) string {
+	if pid, ok := lockHolderPID(err); ok {
+		return fmt.Sprintf("  process %d holds it: 'br instances' shows what it is running, 'br stop' releases it", pid)
+	}
+	return "  'br instances' shows which process holds it, 'br stop' releases it"
+}
+
+// lockHolderPIDMarker is how internal/control names the holder when it could
+// read the lock file: "...: pid 1234 holds /path/control.lock".
+const lockHolderPIDMarker = "pid "
+
+// lockHolderPID digs the holding process's PID out of a wrapped
+// control.ErrInstanceLocked.
+//
+// It reads the message because the sentinel carries no typed field for the PID
+// (follow-up: make it a struct error and delete this). That is why it is only a
+// HINT: the contended branch names no holder at all, so a caller must cope with
+// (0, false), and a message that changes shape degrades the hint rather than
+// the error.
+func lockHolderPID(err error) (int, bool) {
+	_, digits, found := strings.Cut(err.Error(), lockHolderPIDMarker)
+	if !found {
+		return 0, false
+	}
+	end := 0
+	for end < len(digits) && digits[end] >= '0' && digits[end] <= '9' {
+		end++
+	}
+	pid, convErr := strconv.Atoi(digits[:end])
+	if convErr != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
 }
 
 // buildStartSpec turns the `start` flags — plus the disk manifest or open

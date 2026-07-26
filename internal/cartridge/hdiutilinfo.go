@@ -104,46 +104,15 @@ type attachedImage struct {
 // infoArgs builds the `hdiutil info -plist` argument vector.
 func infoArgs() []string { return []string{cmdInfo, flagPlist} }
 
-// BackingImageFor returns the disk image file backing the volume identified by
-// ref, which may be a BSD device node in either form ("/dev/disk9s1" as hdiutil
-// prints it, or "disk9s1" as DiskArbitration reports it) or a mountpoint
-// ("/Volumes/bladerunner-demo").
+// backingImageFor is the worker behind the backing-image lookup: it resolves
+// ref — a BSD device node in either form ("/dev/disk9s1" as hdiutil prints it,
+// or "disk9s1" as DiskArbitration reports it) or a mountpoint
+// ("/Volumes/bladerunner-demo") — to the disk image file behind it.
 //
-// It returns an error wrapping ErrNoBackingImage when nothing attached matches,
-// which is the normal answer for a volume that is not a mounted disk image.
-func BackingImageFor(ref string) (*ImageBacking, error) {
-	if !hostSupported() {
-		return nil, ErrUnsupported
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), infoTimeout)
-	defer cancel()
-	return backingImageFor(ctx, defaultRunner, ref)
-}
-
-// AttachedImagePaths returns the backing file of every disk image currently
-// attached, in the order hdiutil reports them. It is the cheap way to ask "is
-// this cartridge already open somewhere?" before attaching a second copy.
-func AttachedImagePaths() ([]string, error) {
-	if !hostSupported() {
-		return nil, ErrUnsupported
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), infoTimeout)
-	defer cancel()
-	images, err := listAttachedImages(ctx, defaultRunner)
-	if err != nil {
-		return nil, err
-	}
-	paths := make([]string, 0, len(images))
-	for _, img := range images {
-		if img.path != "" {
-			paths = append(paths, img.path)
-		}
-	}
-	return paths, nil
-}
-
-// backingImageFor is the platform-neutral worker behind BackingImageFor, taking
-// a commandRunner so tests drive it against captured hdiutil output.
+// It takes a commandRunner so Detect can withhold one off darwin and so tests
+// drive it against captured hdiutil output. It returns an error wrapping
+// ErrNoBackingImage when nothing attached matches, which is the normal answer
+// for a volume that is not a mounted disk image.
 func backingImageFor(ctx context.Context, r commandRunner, ref string) (*ImageBacking, error) {
 	if ref == "" {
 		return nil, ErrNoImageRef

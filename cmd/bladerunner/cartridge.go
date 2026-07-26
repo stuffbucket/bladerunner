@@ -353,8 +353,10 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 		return jsonOrError(err)
 	}
 
-	// Stash for the foreground runStart: applyBootCartridge roots cfg inside the
-	// mount, detachBootCartridge releases it after the VMM stops.
+	// Stash for the foreground runStart, which hands the open cartridge to the
+	// vmhost.Host: the Host roots cfg inside the mount as the last overlay of
+	// its config step, and detachBootCartridge is the safety net that releases
+	// the mount if the handoff never happens.
 	bootCartridge.opened = opened
 	bootCartridge.mountpoint = opened.Mountpoint()
 
@@ -380,24 +382,15 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	startFlags.noNested = false
 	startFlags.restoreFrom = ""
 
-	// bootManifest stays nil: applyBootCartridge sets the cfg paths directly.
+	// bootManifest stays nil: a cartridge boot carries its manifest inside
+	// cartridge.Opened, and the vmhost.Host applies it (paths included) when it
+	// overlays the cartridge onto the config.
 	bootManifest = nil
 
 	if !jsonOutput {
 		fmt.Printf("%s cartridge %s (%s)\n", subtle("Booting"), value(name), modeLabel(guiMode))
 	}
 	return runStart(cmd, args)
-}
-
-// applyBootCartridge roots cfg inside the mounted cartridge (root.img, state/,
-// share/). No-op for a non-cartridge boot.
-//
-// The live boot path no longer calls this: runStart hands the open cartridge to
-// the vmhost.Host, which applies it as the last overlay in its config step. It
-// remains as the CLI-side assertion that the handoff routes through
-// cartridge.Opened rather than reconstructing the rooting rules here.
-func applyBootCartridge(cfg *config.Config) {
-	bootCartridge.opened.ApplyTo(cfg)
 }
 
 // takeBootCartridge hands the open cartridge over to whoever will own it from

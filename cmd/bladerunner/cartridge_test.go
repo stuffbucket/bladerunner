@@ -8,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
-	"github.com/stuffbucket/bladerunner/internal/config"
-	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
@@ -80,46 +78,13 @@ func TestCartridgeMountpoint(t *testing.T) {
 	}
 }
 
-// TestApplyBootCartridgeDelegatesToOpenCartridge covers the CLI-side handoff:
-// the per-boot state is an *cartridge.Opened value, and applyBootCartridge
-// simply routes cfg through it. The rooting rules themselves are asserted in
-// internal/cartridge (TestOpenedApplyToRootsConfigInsideMount).
-func TestApplyBootCartridgeDelegatesToOpenCartridge(t *testing.T) {
-	t.Cleanup(func() { bootCartridge.opened = nil; bootCartridge.mountpoint = "" })
-
-	mp := "/state/mnt/demo"
-	bootCartridge.opened = &cartridge.Opened{
-		Name:     "demo",
-		Mount:    cartridge.Mount{Mountpoint: mp},
-		Layout:   cartridge.NewLayout(mp),
-		Manifest: &disk.Manifest{Share: &disk.ShareSpec{Tag: "custom-tag"}},
-	}
-	bootCartridge.mountpoint = mp
-
-	cfg := &config.Config{BaseImageURL: "https://should-be-cleared"}
-	applyBootCartridge(cfg)
-
-	if cfg.DiskPath != filepath.Join(mp, cartridge.RootImageFile) {
-		t.Errorf("DiskPath = %q", cfg.DiskPath)
-	}
-	if cfg.BaseImageURL != "" {
-		t.Errorf("BaseImageURL should be cleared, got %q", cfg.BaseImageURL)
-	}
-	if cfg.ShareTag != "custom-tag" {
-		t.Errorf("ShareTag = %q, want custom-tag", cfg.ShareTag)
-	}
-}
-
-func TestApplyBootCartridgeNoOpWhenNoCartridge(t *testing.T) {
-	t.Cleanup(func() { bootCartridge.opened = nil; bootCartridge.mountpoint = "" })
-	bootCartridge.opened = nil
-	bootCartridge.mountpoint = ""
-	cfg := &config.Config{BaseImageURL: "https://keep", ShareDir: ""}
-	applyBootCartridge(cfg)
-	if cfg.BaseImageURL != "https://keep" || cfg.ShareDir != "" {
-		t.Errorf("applyBootCartridge mutated config for non-cartridge boot: %+v", cfg)
-	}
-}
+// The rooting rules a cartridge imposes on the config (root.img, state/,
+// share/) are internal/cartridge's — TestOpenedApplyToRootsConfigInsideMount —
+// and they are applied by the vmhost.Host, which takes the open cartridge from
+// takeBootCartridge. This file used to carry a CLI-side re-assertion of the
+// same thing through an applyBootCartridge shim no production path called; the
+// shim (and its tests) are gone, and what remains asserted here is the handoff
+// itself.
 
 // TestDetachBootCartridgeNoOpWhenNoCartridge guards the plain `br start` path:
 // runStart always defers detachBootCartridge, which must do nothing (and not

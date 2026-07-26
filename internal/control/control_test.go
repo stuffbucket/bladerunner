@@ -187,6 +187,55 @@ func TestSocketPath(t *testing.T) {
 	}
 }
 
+func TestLockPath(t *testing.T) {
+	stateDir := "/test/state"
+	expected := filepath.Join(stateDir, LockName)
+	got := LockPath(stateDir)
+	if got != expected {
+		t.Errorf("LockPath() = %q, want %q", got, expected)
+	}
+}
+
+// LockPath and SocketPath are the single definitions of the two paths a state
+// directory carries, so what the accessors report must be exactly what starting
+// a listener creates. Pinning that here is what keeps an external caller (a
+// diagnostic, a cleanup) from reasoning about a path the listener never used.
+func TestLockPathAndSocketPathNameWhatTheListenerCreates(t *testing.T) {
+	// Not t.TempDir(): its test-name-derived path can push the socket past the
+	// ~104 byte sun_path limit, and this test's name is long.
+	stateDir, err := os.MkdirTemp("", "brctl")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+
+	server, err := NewServer(stateDir, func() {})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	if _, err := os.Stat(LockPath(stateDir)); err != nil {
+		t.Errorf("no lock file at LockPath(): %v", err)
+	}
+	if _, err := os.Stat(SocketPath(stateDir)); err != nil {
+		t.Errorf("no socket at SocketPath(): %v", err)
+	}
+	if LockPath(stateDir) == SocketPath(stateDir) {
+		t.Fatal("LockPath and SocketPath returned the same path")
+	}
+
+	if err := server.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// Close releases the lock it took at LockPath and cleans up the socket.
+	if _, err := os.Stat(LockPath(stateDir)); !os.IsNotExist(err) {
+		t.Errorf("lock file still present after Close(): err = %v", err)
+	}
+	if _, err := os.Stat(SocketPath(stateDir)); !os.IsNotExist(err) {
+		t.Errorf("socket still present after Close(): err = %v", err)
+	}
+}
+
 func TestServerClose(t *testing.T) {
 	tmpDir := t.TempDir()
 

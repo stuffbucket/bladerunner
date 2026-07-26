@@ -110,7 +110,11 @@ func runVMD(cmd *cobra.Command, _ []string) error {
 	defer signal.Stop(signals)
 	go vmdSignalLoop(ctx, signals, host, cancel, spec.DrainTimeout)
 
-	return host.Run(ctx)
+	// A holder that lost the race for the instance must say so in the same
+	// actionable words the foreground start uses: its log is the only place
+	// anyone will read it, and "another bladerunner process holds this
+	// instance" alone names neither the process nor the way out.
+	return explainHostError(host.Run(ctx))
 }
 
 // buildVMDSpec turns the holder flags into the serializable description of the
