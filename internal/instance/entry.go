@@ -7,15 +7,15 @@
 // cartridges can be mounted anywhere — discovery needs a durable record.
 //
 // Each instance publishes one small JSON file under <stateDir>/instances/. The
-// file is written atomically (temp + fsync + rename + dir fsync, the same
-// pattern as internal/bootstage) so a concurrent reader never observes a
-// half-written entry. Entries are advisory: they record where an instance
-// lives and who holds it, and Alive gives a cheap liveness estimate. The
-// authoritative answer is always "dial the control socket".
+// file is written atomically (temp + fsync + rename + dir fsync, via
+// util.WriteFileAtomic) so a concurrent reader never observes a half-written
+// entry. Entries are advisory: they record where an instance lives and who
+// holds it, and LivenessOf answers how alive it is by dialing its control
+// socket, falling back to a signal-0 probe of the recorded PID.
 //
-// This package is deliberately dependency-light (stdlib + internal/logging) so
-// that both the CLI and the holder process can import it without cycles; in
-// particular it must NOT import internal/control.
+// This package is deliberately dependency-light (stdlib + internal/logging +
+// internal/util) so that both the CLI and the holder process can import it
+// without cycles; in particular it must NOT import internal/control.
 package instance
 
 import (
@@ -96,8 +96,8 @@ type Entry struct {
 
 	// Ownership.
 	//
-	// PID is the holder process that owns the VM. It is the primary liveness
-	// signal; see Alive.
+	// PID is the holder process that owns the VM. It is the fallback liveness
+	// signal, used when nothing answers on the control socket; see LivenessOf.
 	PID int `json:"pid,omitempty"`
 
 	// Endpoints.

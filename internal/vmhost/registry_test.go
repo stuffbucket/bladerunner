@@ -3,6 +3,7 @@ package vmhost
 import (
 	"errors"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,9 +13,9 @@ import (
 )
 
 // deadPID is a process id that cannot be live: it is above every platform's
-// pid_max, so the signal-0 probe instance.Alive uses always reports it gone.
-// Using a synthetic number keeps the crash-leftover tests from depending on
-// spawning and reaping a real process.
+// pid_max, so the signal-0 probe instance liveness falls back on always reports
+// it gone. Using a synthetic number keeps the crash-leftover tests from
+// depending on spawning and reaping a real process.
 const deadPID = 1 << 30
 
 // missingStateDir names a directory that does not exist, which is what makes an
@@ -190,30 +191,57 @@ func TestRegistryPrunesCrashLeftovers(t *testing.T) {
 	}
 }
 
-// A crash leftover whose control socket file still exists is NOT pruned:
-// instance.Alive is deliberately conservative, because unregistering a running
-// VM is far worse than leaving a stale record for a reader to reconcile.
-func TestRegistryPruneKeepsEntriesWithASocket(t *testing.T) {
+// An entry whose control socket is actually SERVING is never pruned, whatever
+// its recorded PID says: instance liveness dials the socket, and a dial that
+// connects is the one signal that proves a holder is reachable.
+//
+// The converse — a crash leftover whose socket FILE merely exists — IS pruned.
+// A SIGKILLed holder leaves that file behind forever, so treating it as proof
+// of life made a dead instance's record immortal.
+func TestRegistryPruneKeepsEntriesWithAServingSocket(t *testing.T) {
 	root := t.TempDir()
-	stateDir := filepath.Join(root, "with-socket")
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
+
+	// Not t.TempDir(): the socket path must stay under the ~104 byte sun_path
+	// limit, which a test-name-derived temp path can exceed.
+	stateDir, err := os.MkdirTemp("", "brvmh")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
 	}
-	if err := os.WriteFile(instance.ControlSocketPath(stateDir), nil, 0o600); err != nil {
-		t.Fatalf("write socket placeholder: %v", err)
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+
+	ln, err := net.Listen("unix", instance.ControlSocketPath(stateDir))
+	if err != nil {
+		t.Fatalf("listen on control socket: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	serving := testEntry("serving")
+	serving.PID = deadPID
+	serving.StateDir = stateDir
+	if err := instance.Write(root, serving); err != nil {
+		t.Fatalf("write serving entry: %v", err)
 	}
 
-	e := testEntry("with-socket")
-	e.PID = deadPID
-	e.StateDir = stateDir
-	if err := instance.Write(root, e); err != nil {
-		t.Fatalf("write entry: %v", err)
+	crashed := testEntry("crashed")
+	crashed.PID = deadPID
+	crashed.StateDir = filepath.Join(root, "crashed")
+	if err := os.MkdirAll(crashed.StateDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(instance.ControlSocketPath(crashed.StateDir), nil, 0o600); err != nil {
+		t.Fatalf("write socket placeholder: %v", err)
+	}
+	if err := instance.Write(root, crashed); err != nil {
+		t.Fatalf("write crashed entry: %v", err)
 	}
 
 	newRegistry(root).prune()
 
-	if _, err := instance.Read(root, e.Name); err != nil {
-		t.Fatalf("entry with a live socket was pruned: %v", err)
+	if _, err := instance.Read(root, serving.Name); err != nil {
+		t.Fatalf("entry with a serving socket was pruned: %v", err)
+	}
+	if _, err := instance.Read(root, crashed.Name); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("crash leftover with only a socket file survived prune: err = %v", err)
 	}
 }
 

@@ -97,8 +97,9 @@ func (r *registry) remove() error {
 // entry is not a permanent lie, it is one that the next holder (or any reader
 // calling instance.Prune) cleans up.
 //
-// instance.Alive is deliberately conservative — a live PID or a socket file is
-// enough to keep an entry — so this can never unregister a running VM.
+// instance.Prune only reaps entries that are Dead — nothing answering on the
+// control socket AND no live holder process — so this can never unregister a
+// running VM, not even one that is still mid-boot and has yet to bind.
 func (r *registry) prune() {
 	if r == nil || r.root == "" {
 		return

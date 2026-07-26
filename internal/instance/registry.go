@@ -1,17 +1,21 @@
 package instance
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 const (
@@ -19,19 +23,23 @@ const (
 	dirName = "instances"
 	// entryExt is the extension of a registry record.
 	entryExt = ".json"
-	// tmpPattern is the os.CreateTemp pattern used for the atomic write. The
-	// per-name prefix keeps concurrent writers of different names apart, and
-	// the random suffix keeps concurrent writers of the SAME name apart.
-	tmpPattern = entryExt + ".tmp-*"
 
 	// dirPerm restricts the registry to its owner: entries expose socket paths
 	// and working-copy locations for live VMs.
 	dirPerm fs.FileMode = 0o700
+	// entryPerm matches dirPerm's intent for the records themselves.
+	entryPerm fs.FileMode = 0o600
 
 	// controlSocketName mirrors internal/control.SocketName. It is duplicated
 	// rather than imported because the control package is a consumer of this
 	// registry; importing it here would create a cycle. Keep the two in sync.
 	controlSocketName = "control.sock"
+
+	// probeTimeout bounds the control-socket dial in DefaultProbe. A unix
+	// socket connect is either accepted by the kernel immediately or refused;
+	// the timeout only covers a listener whose accept backlog is full, which is
+	// itself proof that something is serving.
+	probeTimeout = 250 * time.Millisecond
 )
 
 // Dir returns the registry directory for a state dir: <stateDir>/instances.
@@ -53,10 +61,10 @@ func entryPath(stateDir, name string) string {
 
 // Write publishes e to the registry, replacing any existing record for e.Name.
 //
-// The write is atomic and durable: the record is written to a temp file in the
-// registry directory, fsynced, renamed over the final path, and the directory
-// itself is then fsynced. A reader therefore observes either the previous
-// record or the new one, never a partial file, and the rename survives a crash.
+// The write is atomic and durable (see util.WriteFileAtomic): temp file in the
+// registry directory, fsync, rename over the final path, directory fsync. A
+// reader therefore observes either the previous record or the new one, never a
+// partial file, and the rename survives a crash.
 func Write(stateDir string, e Entry) error {
 	if err := ValidName(e.Name); err != nil {
 		return err
@@ -72,47 +80,10 @@ func Write(stateDir string, e Entry) error {
 	}
 	data = append(data, '\n')
 
-	tmp, err := os.CreateTemp(dir, e.Name+tmpPattern)
-	if err != nil {
-		return fmt.Errorf("create temp entry for %q: %w", e.Name, err)
-	}
-	tmpName := tmp.Name()
-	if err := writeAndSync(tmp, data); err != nil {
-		_ = os.Remove(tmpName)
+	if err := util.WriteFileAtomic(entryPath(stateDir, e.Name), data, entryPerm); err != nil {
 		return fmt.Errorf("write instance %q: %w", e.Name, err)
 	}
-	if err := os.Rename(tmpName, entryPath(stateDir, e.Name)); err != nil {
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("publish instance %q: %w", e.Name, err)
-	}
-	syncDir(dir)
 	return nil
-}
-
-// writeAndSync writes data to f, flushes it to stable storage and closes it.
-// f is closed exactly once on every path.
-func writeAndSync(f *os.File, data []byte) error {
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
-}
-
-// syncDir fsyncs a directory so a rename into it is durable. Best effort: some
-// filesystems refuse to open a directory for sync, and a failure here only
-// costs durability across a host crash, never correctness.
-func syncDir(dir string) {
-	d, err := os.Open(dir)
-	if err != nil {
-		return
-	}
-	_ = d.Sync()
-	_ = d.Close()
 }
 
 // Read returns the registry record for name. A missing record yields an error
@@ -190,28 +161,97 @@ func List(stateDir string) ([]Entry, error) {
 	return entries, nil
 }
 
-// Alive reports a cheap, local estimate of whether the instance is still up.
-// It is true when EITHER signal is positive:
+// Liveness is the three-value answer to "is this instance still up?".
 //
-//	(a) e.PID names a process that still exists (signal 0 probe), or
-//	(b) a control socket exists at e.StateDir.
+// The distinction matters because the two available signals prove different
+// things. Dialing the control socket proves someone is SERVING; the signal-0
+// PID probe only proves a process by that number exists, which is also true of
+// a holder that has not finished binding its socket, one that is wedged, and
+// (rarely) of a recycled PID.
 //
-// Either alone can lie: a PID can be recycled, and a socket file survives a
-// crashed holder. The disjunction is deliberately conservative — it errs
-// towards "still alive" so Prune never unregisters a running VM.
-//
-// A caller that needs an authoritative answer must additionally DIAL the
-// control socket (control.NewClient(e.StateDir).IsRunning()); that is the only
-// probe that proves someone is listening.
-func Alive(e Entry) bool {
-	if e.PID > 0 && processAlive(e.PID) {
-		return true
+// Note what is deliberately NOT a signal: the control socket FILE existing on
+// disk. A SIGKILLed holder leaves its socket behind, so stat'ing it reports
+// "alive" forever — that lie is what kept Prune from ever reaping a crashed
+// holder and made `br watch` treat a dead instance's cartridge as still held.
+// Only the dial is authoritative.
+type Liveness int
+
+const (
+	// Dead means nothing answers on the control socket and no process holds
+	// the recorded PID. This is the only state Prune reaps.
+	Dead Liveness = iota
+	// ProcessOnly means the holder process exists but nothing is serving yet
+	// (starting up) or any more (wedged, or shutting down). It must NOT be
+	// pruned: the record belongs to a process that is still running.
+	ProcessOnly
+	// Serving means the control socket accepted a connection. This is the only
+	// state that proves the instance is reachable.
+	Serving
+)
+
+// String renders a Liveness for logs and status output.
+func (l Liveness) String() string {
+	switch l {
+	case Serving:
+		return "serving"
+	case ProcessOnly:
+		return "process-only"
+	case Dead:
+		return "dead"
+	default:
+		return "unknown"
 	}
-	if e.StateDir == "" {
+}
+
+// Probe reports whether something is listening on the unix socket at
+// socketPath. It is injected so the liveness ladder stays testable and so this
+// package needs no dependency on internal/control (which imports this one).
+type Probe func(socketPath string) bool
+
+// DefaultProbe is the production Probe: a bounded unix-socket connect. A
+// successful dial is the only proof that a holder is serving; the connection is
+// closed immediately without exchanging a request, which every control listener
+// tolerates.
+func DefaultProbe(socketPath string) bool {
+	if socketPath == "" {
 		return false
 	}
-	_, err := os.Stat(ControlSocketPath(e.StateDir))
-	return err == nil
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// LivenessOf reports where e sits on the liveness ladder, dialing its control
+// socket with DefaultProbe.
+func LivenessOf(e Entry) Liveness {
+	return livenessWith(e, DefaultProbe)
+}
+
+// livenessWith is the ladder itself, with the dial injected. The strongest
+// signal is tried first so a serving instance never has to fall back on a PID
+// that could have been recycled.
+func livenessWith(e Entry, probe Probe) Liveness {
+	if e.StateDir != "" && probe(ControlSocketPath(e.StateDir)) {
+		return Serving
+	}
+	if e.PID > 0 && processAlive(e.PID) {
+		return ProcessOnly
+	}
+	return Dead
+}
+
+// Alive reports whether the instance is anything other than Dead — i.e. either
+// serving or at least still held by a live process. It is the boolean form of
+// LivenessOf for call sites that only filter; branch on LivenessOf when the
+// difference between "reachable" and "merely running" matters.
+func Alive(e Entry) bool {
+	return LivenessOf(e) != Dead
 }
 
 // processAlive reports whether pid names a live process, using the signal-0
@@ -230,9 +270,14 @@ func processAlive(pid int) bool {
 	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EPERM)
 }
 
-// Prune removes the records of instances that are no longer Alive and returns
-// the names it removed, sorted. Use it to garbage-collect entries left behind
-// by a holder process that died without unregistering itself.
+// Prune removes the records of instances that are Dead — nothing serving on
+// their control socket AND no live holder process — and returns the names it
+// removed, sorted. Use it to garbage-collect entries left behind by a holder
+// that died without unregistering itself.
+//
+// A ProcessOnly entry is deliberately kept: its holder is still running (it may
+// be mid-boot and not yet bound to its socket), and unregistering a live
+// instance is far worse than leaving a stale record for a reader to reconcile.
 func Prune(stateDir string) ([]string, error) {
 	entries, err := List(stateDir)
 	if err != nil {
@@ -241,7 +286,7 @@ func Prune(stateDir string) ([]string, error) {
 	var removed []string
 	for i := range entries {
 		e := &entries[i]
-		if Alive(*e) {
+		if LivenessOf(*e) != Dead {
 			continue
 		}
 		if err := Remove(stateDir, e.Name); err != nil {

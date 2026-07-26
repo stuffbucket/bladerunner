@@ -3,8 +3,10 @@ package instance
 import (
 	"errors"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -245,29 +247,236 @@ func TestKindValid(t *testing.T) {
 	}
 }
 
-func TestAlive(t *testing.T) {
-	socketDir := t.TempDir()
-	if err := os.WriteFile(ControlSocketPath(socketDir), nil, 0o600); err != nil {
-		t.Fatalf("create fake socket: %v", err)
+// fakeProbe builds a Probe that answers serving for exactly the socket paths
+// listed, so the ladder can be exercised without binding anything.
+func fakeProbe(serving ...string) Probe {
+	return func(socketPath string) bool {
+		return slices.Contains(serving, socketPath)
 	}
+}
+
+// shortTempDir returns a temp directory with a name short enough that a unix
+// socket bound inside it stays under the ~104 byte sun_path limit, which
+// t.TempDir's test-name-derived paths can exceed.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "brinst")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// serveControlSocket binds a real listener at stateDir's control socket path
+// and accepts (and immediately drops) connections until the test ends.
+func serveControlSocket(t *testing.T, stateDir string) {
+	t.Helper()
+	ln, err := net.Listen("unix", ControlSocketPath(stateDir))
+	if err != nil {
+		t.Fatalf("listen on control socket: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+}
+
+func TestLivenessLadder(t *testing.T) {
+	// A leftover socket FILE from a SIGKILLed holder: it stats fine but nothing
+	// is listening on it. This is the regression case — the old Alive treated
+	// the file's existence as proof of life, so a crashed holder was never
+	// reaped.
+	staleSocketDir := t.TempDir()
+	if err := os.WriteFile(ControlSocketPath(staleSocketDir), nil, 0o600); err != nil {
+		t.Fatalf("create leftover socket file: %v", err)
+	}
+
+	servingDir := t.TempDir()
 
 	tests := []struct {
 		name  string
 		entry Entry
-		want  bool
+		probe Probe
+		want  Liveness
 	}{
-		{"live pid", Entry{Name: "a", PID: os.Getpid()}, true},
-		{"dead pid, no socket", Entry{Name: "b", PID: deadPID, StateDir: t.TempDir()}, false},
-		{"no pid, socket present", Entry{Name: "c", StateDir: socketDir}, true},
-		{"dead pid, socket present", Entry{Name: "d", PID: deadPID, StateDir: socketDir}, true},
-		{"nothing at all", Entry{Name: "e"}, false},
+		{
+			name:  "socket dials",
+			entry: Entry{Name: "a", PID: deadPID, StateDir: servingDir},
+			probe: fakeProbe(ControlSocketPath(servingDir)),
+			want:  Serving,
+		},
+		{
+			name:  "socket dials and pid is live",
+			entry: Entry{Name: "b", PID: os.Getpid(), StateDir: servingDir},
+			probe: fakeProbe(ControlSocketPath(servingDir)),
+			want:  Serving,
+		},
+		{
+			name:  "live pid, nothing serving",
+			entry: Entry{Name: "c", PID: os.Getpid(), StateDir: servingDir},
+			probe: fakeProbe(),
+			want:  ProcessOnly,
+		},
+		{
+			name:  "live pid, no state dir",
+			entry: Entry{Name: "d", PID: os.Getpid()},
+			probe: fakeProbe(),
+			want:  ProcessOnly,
+		},
+		{
+			name:  "leftover socket file, dead pid",
+			entry: Entry{Name: "e", PID: deadPID, StateDir: staleSocketDir},
+			probe: fakeProbe(),
+			want:  Dead,
+		},
+		{
+			name:  "dead pid, no socket",
+			entry: Entry{Name: "f", PID: deadPID, StateDir: t.TempDir()},
+			probe: fakeProbe(),
+			want:  Dead,
+		},
+		{
+			name:  "nothing at all",
+			entry: Entry{Name: "g"},
+			probe: fakeProbe(),
+			want:  Dead,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Alive(tt.entry); got != tt.want {
-				t.Errorf("Alive(%+v) = %v, want %v", tt.entry, got, tt.want)
+			if got := livenessWith(tt.entry, tt.probe); got != tt.want {
+				t.Errorf("livenessWith(%+v) = %v, want %v", tt.entry, got, tt.want)
+			}
+			if got, want := livenessWith(tt.entry, tt.probe) != Dead, tt.want != Dead; got != want {
+				t.Errorf("Alive-equivalent = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// The regression test proper, against the REAL probe: a leftover socket file
+// belonging to a dead PID is Dead, so Prune can reap it. Before the fix
+// os.Stat succeeded on that file and the entry was reported alive forever.
+func TestLeftoverSocketFileWithDeadPIDIsDead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(ControlSocketPath(dir), nil, 0o600); err != nil {
+		t.Fatalf("create leftover socket file: %v", err)
+	}
+	e := Entry{Name: "crashed", PID: deadPID, StateDir: dir}
+	if got := LivenessOf(e); got != Dead {
+		t.Errorf("LivenessOf(leftover socket file, dead pid) = %v, want %v", got, Dead)
+	}
+	if Alive(e) {
+		t.Error("Alive(leftover socket file, dead pid) = true, want false")
+	}
+}
+
+// DefaultProbe must distinguish a bound socket from a plain file of the same
+// name — the whole point of dialing rather than stat'ing.
+func TestDefaultProbeDialsRatherThanStats(t *testing.T) {
+	live := shortTempDir(t)
+	serveControlSocket(t, live)
+	if !DefaultProbe(ControlSocketPath(live)) {
+		t.Error("DefaultProbe on a bound socket = false, want true")
+	}
+
+	stale := t.TempDir()
+	if err := os.WriteFile(ControlSocketPath(stale), nil, 0o600); err != nil {
+		t.Fatalf("create leftover socket file: %v", err)
+	}
+	if DefaultProbe(ControlSocketPath(stale)) {
+		t.Error("DefaultProbe on a leftover socket file = true, want false")
+	}
+	if DefaultProbe(ControlSocketPath(t.TempDir())) {
+		t.Error("DefaultProbe on a missing socket = true, want false")
+	}
+	if DefaultProbe("") {
+		t.Error("DefaultProbe on an empty path = true, want false")
+	}
+}
+
+func TestLivenessString(t *testing.T) {
+	tests := []struct {
+		liveness Liveness
+		want     string
+	}{
+		{Serving, "serving"},
+		{ProcessOnly, "process-only"},
+		{Dead, "dead"},
+		{Liveness(99), "unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.liveness.String(); got != tt.want {
+			t.Errorf("Liveness(%d).String() = %q, want %q", int(tt.liveness), got, tt.want)
+		}
+	}
+}
+
+// Prune reaps only Dead entries: a serving instance and a merely-running one
+// both survive, and the crash leftover that used to be immortal does not.
+func TestPruneReapsOnlyDeadEntries(t *testing.T) {
+	root := t.TempDir()
+
+	serving := sampleEntry("serving-one")
+	serving.PID = deadPID // liveness must come from the socket, not the PID
+	serving.StateDir = shortTempDir(t)
+	serveControlSocket(t, serving.StateDir)
+	if err := Write(root, serving); err != nil {
+		t.Fatalf("Write serving: %v", err)
+	}
+
+	processOnly := sampleEntry("process-only-one")
+	processOnly.PID = os.Getpid()
+	processOnly.StateDir = filepath.Join(root, "process-only") // no socket at all
+	if err := Write(root, processOnly); err != nil {
+		t.Fatalf("Write process-only: %v", err)
+	}
+
+	// A SIGKILLed holder: dead PID, socket FILE still on disk.
+	crashed := sampleEntry("crashed-one")
+	crashed.PID = deadPID
+	crashed.StateDir = filepath.Join(root, "crashed")
+	if err := os.MkdirAll(crashed.StateDir, 0o700); err != nil {
+		t.Fatalf("mkdir crashed state dir: %v", err)
+	}
+	if err := os.WriteFile(ControlSocketPath(crashed.StateDir), nil, 0o600); err != nil {
+		t.Fatalf("create leftover socket file: %v", err)
+	}
+	if err := Write(root, crashed); err != nil {
+		t.Fatalf("Write crashed: %v", err)
+	}
+
+	removed, err := Prune(root)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "crashed-one" {
+		t.Fatalf("Prune removed %v, want [crashed-one]", removed)
+	}
+
+	remaining, err := List(root)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	names := make([]string, 0, len(remaining))
+	for _, e := range remaining {
+		names = append(names, e.Name)
+	}
+	want := []string{"process-only-one", "serving-one"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("remaining = %v, want %v", names, want)
 	}
 }
 
