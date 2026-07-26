@@ -7,10 +7,13 @@ package cartridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"syscall"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
@@ -44,6 +47,11 @@ type Opened struct {
 	Metadata Metadata
 	// Layout addresses the files inside the mounted volume.
 	Layout Layout
+
+	// lock is the exclusive claim on the working copy, held for as long as this
+	// cartridge is open. It is what stops a second boot from converting over —
+	// or unlinking — an image this process is running from.
+	lock *imageLock
 }
 
 // OpenOptions configures Open.
@@ -105,8 +113,18 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 	}
 
 	o := &Opened{Name: name, SourcePath: path}
+
+	// Claim the working copy BEFORE anything touches it. materialize deletes a
+	// stale working copy and converts a fresh one over it; without this claim a
+	// second boot of the same cartridge would unlink the image a live VMM is
+	// running from, discarding every byte the first guest had written.
+	if err := o.claim(); err != nil {
+		return nil, err
+	}
+
 	bootImg, err := o.materialize(parent, r, path)
 	if err != nil {
+		o.releaseClaim()
 		return nil, err
 	}
 
@@ -119,6 +137,7 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 	})
 	if err != nil {
 		o.removeWorkingCopy()
+		o.releaseClaim()
 		return nil, fmt.Errorf("attach cartridge: %w", err)
 	}
 	o.Mount = *mount
@@ -137,6 +156,9 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 // materialize resolves the image that will actually be attached. A shipped
 // .dmg is converted to a writable working copy (recorded for Close); anything
 // else is attached as-is.
+//
+// It is only ever reached with the working copy claimed (see Opened.claim), so
+// the removal below can never unlink an image another process is booted from.
 func (o *Opened) materialize(parent context.Context, r commandRunner, path string) (string, error) {
 	// Extension matching is case-sensitive on purpose: it mirrors HasImageExt,
 	// which is what decided this path was a cartridge in the first place.
@@ -197,6 +219,10 @@ func (o *Opened) Close() error {
 
 // closeWith is the platform-neutral worker behind Close, taking the runner so
 // the unwind path (and tests) can drive detach without a real hdiutil.
+//
+// The claim on the working copy is released LAST, after the volume is gone and
+// the working copy has been removed: until then another process must still be
+// refused, or it would convert a fresh image over one this VMM is using.
 func (o *Opened) closeWith(ctx context.Context, r commandRunner) error {
 	var err error
 	if o.Mount.Mountpoint != "" {
@@ -204,6 +230,7 @@ func (o *Opened) closeWith(ctx context.Context, r commandRunner) error {
 		o.Mount = Mount{}
 	}
 	o.removeWorkingCopy()
+	o.releaseClaim()
 	return err
 }
 
@@ -277,4 +304,195 @@ func (o *Opened) ApplyTo(cfg *config.Config) {
 // GUI reports whether the cartridge's manifest asks for a GUI boot.
 func (o *Opened) GUI() bool {
 	return o != nil && o.Manifest != nil && o.Manifest.Boot.Mode == disk.BootModeGUI
+}
+
+// --- the boot claim -------------------------------------------------------
+//
+// One cartridge image must be booted by at most one process at a time, and
+// that has to hold no matter how the second boot was spelled: `br boot
+// demo.dmg` and `br boot demo.sparseimage` name the SAME working copy, as does
+// a second Finder mount of the same file under a different volume name. Nothing
+// derived from a mountpoint can see that — the mountpoint is chosen by macOS —
+// so the claim is keyed on the working-copy PATH and enforced by the kernel.
+//
+// flock(2) is used rather than an O_EXCL marker file because the kernel drops
+// the lock when the holder dies, however it died. A crashed holder therefore
+// leaves a stale lock FILE (harmless, and reused in place) but never a stale
+// LOCK, which is the failure mode an exclusive-create scheme has to paper over
+// with liveness probes it can only guess at.
+
+// ErrCartridgeBusy reports that another live process already holds the working
+// copy this cartridge would boot from. Booting anyway would convert a fresh
+// image over the running VM's disk, so it is refused.
+var ErrCartridgeBusy = errors.New("cartridge is already booted by another process")
+
+const (
+	// lockExt is appended to the (hidden) working-copy file name to form the
+	// lock file, e.g. ".demo.sparseimage.lock" beside "demo.sparseimage".
+	lockExt = ".lock"
+	// lockFilePerm keeps the claim readable only by its owner; it records a PID
+	// and an instance name.
+	lockFilePerm = 0o600
+)
+
+// Holder identifies the process holding a cartridge's working copy. It is
+// recorded inside the lock file so a refused boot can name the conflict
+// instead of reporting an anonymous failure.
+type Holder struct {
+	// PID is the process that took the claim.
+	PID int `json:"pid"`
+	// Name is the instance name that process runs the cartridge under.
+	Name string `json:"name,omitempty"`
+	// Source is the image path it was booted from.
+	Source string `json:"source,omitempty"`
+}
+
+// String renders a holder for a user-facing error.
+func (h Holder) String() string {
+	switch {
+	case h.Name != "" && h.PID > 0:
+		return fmt.Sprintf("instance %q (pid %d)", h.Name, h.PID)
+	case h.Name != "":
+		return fmt.Sprintf("instance %q", h.Name)
+	case h.PID > 0:
+		return "pid " + strconv.Itoa(h.PID)
+	default:
+		return "another process"
+	}
+}
+
+// imageLock is a held claim on one working copy. The open file descriptor IS
+// the lock, so it must stay open for as long as the cartridge is.
+type imageLock struct {
+	path string
+	file *os.File
+}
+
+// lockPathFor returns the lock file guarding image: a hidden sibling of it, so
+// the claim lives on the same filesystem as the thing it protects and needs no
+// host state directory (a cartridge can be booted from anywhere, including a
+// removable volume).
+func lockPathFor(image string) string {
+	canonical := CanonicalImagePath(image)
+	return filepath.Join(filepath.Dir(canonical), "."+filepath.Base(canonical)+lockExt)
+}
+
+// claim takes the exclusive lock on this cartridge's working copy. It is a
+// no-op when a claim is already held, so it is safe to call twice.
+func (o *Opened) claim() error {
+	if o == nil || o.lock != nil {
+		return nil
+	}
+	lock, err := acquireImageLock(WorkingCopyPath(o.SourcePath), Holder{
+		PID:    os.Getpid(),
+		Name:   o.Name,
+		Source: o.SourcePath,
+	})
+	if err != nil {
+		return err
+	}
+	o.lock = lock
+	return nil
+}
+
+// releaseClaim drops the claim, if one is held. It is idempotent.
+func (o *Opened) releaseClaim() {
+	if o == nil || o.lock == nil {
+		return
+	}
+	o.lock.release()
+	o.lock = nil
+}
+
+// acquireImageLock locks image for holder, or fails with ErrCartridgeBusy
+// naming whoever holds it.
+func acquireImageLock(image string, holder Holder) (*imageLock, error) {
+	path := lockPathFor(image)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, lockFilePerm)
+	if err != nil {
+		return nil, fmt.Errorf("claim cartridge %s: %w", image, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		other, _ := readHolder(f)
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s is held by %s", ErrCartridgeBusy, image, other)
+	}
+	writeHolder(f, holder)
+	return &imageLock{path: path, file: f}, nil
+}
+
+// release closes the descriptor, which is what drops the kernel lock. The
+// record is blanked first so a later reader never attributes the image to a
+// process that has let go of it. The lock FILE is deliberately left behind:
+// unlinking it would let a second process create and lock a different inode
+// for the same path while this one still believes it holds the claim.
+func (l *imageLock) release() {
+	if l == nil || l.file == nil {
+		return
+	}
+	_ = l.file.Truncate(0)
+	_ = l.file.Close()
+	l.file = nil
+}
+
+// writeHolder records who holds the claim. Best effort: the lock is already
+// held at this point, and an unwritable record costs a good error message
+// somewhere else, never correctness.
+func writeHolder(f *os.File, holder Holder) {
+	data, err := json.Marshal(holder)
+	if err != nil {
+		return
+	}
+	if err := f.Truncate(0); err != nil {
+		return
+	}
+	_, _ = f.WriteAt(data, 0)
+	_ = f.Sync()
+}
+
+// readHolder decodes the record from a lock file. A missing, empty or
+// unparseable record yields the zero Holder, which still renders as "another
+// process".
+func readHolder(f *os.File) (Holder, error) {
+	data := make([]byte, maxHolderRecord)
+	n, err := f.ReadAt(data, 0)
+	if n == 0 {
+		return Holder{}, err
+	}
+	var h Holder
+	if err := json.Unmarshal(data[:n], &h); err != nil {
+		return Holder{}, err
+	}
+	return h, nil
+}
+
+// maxHolderRecord bounds the lock-file read. The record is a three-field JSON
+// object; anything larger is not one of ours.
+const maxHolderRecord = 4096
+
+// Busy reports whether a live process is currently booted from the working copy
+// that booting sourcePath would use, and who that is.
+//
+// It is a PROBE, not a reservation: the answer can go stale the instant it is
+// returned, so it exists to give a friendly refusal before a destructive step
+// (unmounting a volume, converting an image), never as the protection itself.
+// The protection is the claim Open takes, which is atomic.
+func Busy(sourcePath string) (Holder, bool) {
+	if sourcePath == "" {
+		return Holder{}, false
+	}
+	// Read-only, no O_CREATE: a probe must not litter a lock file beside an
+	// image nobody ever booted. No lock file means no holder, ever.
+	f, err := os.Open(lockPathFor(WorkingCopyPath(sourcePath)))
+	if err != nil {
+		return Holder{}, false
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		holder, _ := readHolder(f)
+		return holder, true
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return Holder{}, false
 }

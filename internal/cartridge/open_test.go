@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -45,18 +46,21 @@ func privateOpen(mountpoint string) OpenOptions {
 }
 
 func TestOpenAttachesAndLoadsTheCartridge(t *testing.T) {
-	mp := filepath.Join(t.TempDir(), "mnt", "demo")
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
 	openFixture(t, mp)
+	image := filepath.Join(tmp, "demo"+SparseExt)
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	o, err := open(context.Background(), f, "/images/demo"+SparseExt, privateOpen(mp))
+	o, err := open(context.Background(), f, image, privateOpen(mp))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { o.releaseClaim() })
 	if o.Name != "demo" {
 		t.Errorf("Name = %q, want demo", o.Name)
 	}
-	if o.SourcePath != "/images/demo"+SparseExt {
+	if o.SourcePath != image {
 		t.Errorf("SourcePath = %q", o.SourcePath)
 	}
 	if o.WorkingCopy != "" {
@@ -81,14 +85,16 @@ func TestOpenAttachesAndLoadsTheCartridge(t *testing.T) {
 }
 
 func TestOpenNameOverrideWins(t *testing.T) {
-	mp := filepath.Join(t.TempDir(), "mnt", "slot")
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "slot")
 	openFixture(t, mp)
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	o, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Mountpoint: mp, Name: "slot", Policy: MountPrivate})
+	o, err := open(context.Background(), f, filepath.Join(tmp, "demo"+SparseExt), OpenOptions{Mountpoint: mp, Name: "slot", Policy: MountPrivate})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { o.releaseClaim() })
 	if o.Name != "slot" {
 		t.Fatalf("Name = %q, want slot", o.Name)
 	}
@@ -107,6 +113,7 @@ func TestOpenConvertsAShippedDMG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { o.releaseClaim() })
 	want := filepath.Join(tmp, "demo"+SparseExt)
 	if o.WorkingCopy != want {
 		t.Fatalf("WorkingCopy = %q, want %q", o.WorkingCopy, want)
@@ -131,7 +138,7 @@ func TestOpenConvertsAShippedDMG(t *testing.T) {
 // caller dictates the location, so omitting it is a caller bug. The browsable
 // default needs no mountpoint at all (see TestOpenBrowsableNeedsNoMountpoint).
 func TestOpenRequiresAMountpoint(t *testing.T) {
-	_, err := open(context.Background(), &fakeRunner{}, "/images/demo"+SparseExt, OpenOptions{Policy: MountPrivate})
+	_, err := open(context.Background(), &fakeRunner{}, filepath.Join(t.TempDir(), "demo"+SparseExt), OpenOptions{Policy: MountPrivate})
 	if !errors.Is(err, ErrNoMountpoint) {
 		t.Fatalf("err = %v, want ErrNoMountpoint", err)
 	}
@@ -141,14 +148,16 @@ func TestOpenRequiresAMountpoint(t *testing.T) {
 // mountpoint given, the cartridge still opens and reports where macOS actually
 // put it — including through a collision suffix.
 func TestOpenBrowsableNeedsNoMountpoint(t *testing.T) {
-	mounted := filepath.Join(t.TempDir(), "Volumes", "bladerunner-demo 1")
+	tmp := t.TempDir()
+	mounted := filepath.Join(tmp, "Volumes", "bladerunner-demo 1")
 	openFixture(t, mounted)
 	f := &fakeRunner{results: []fakeResult{{stdout: browsablePlist(mounted, openTestDevNode)}}}
 
-	o, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{})
+	o, err := open(context.Background(), f, filepath.Join(tmp, "demo"+SparseExt), OpenOptions{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { o.releaseClaim() })
 	if o.Mountpoint() != resolvePath(mounted) {
 		t.Errorf("Mountpoint = %q, want the plist's %q", o.Mountpoint(), resolvePath(mounted))
 	}
@@ -175,13 +184,14 @@ func TestOpenBrowsableNeedsNoMountpoint(t *testing.T) {
 // about the invariant the private one already had: a volume we refuse to boot
 // is never left mounted — and now it would be left mounted somewhere VISIBLE.
 func TestOpenBrowsableUnwindsARejectedCartridge(t *testing.T) {
-	mounted := filepath.Join(t.TempDir(), "Volumes", "bladerunner-demo")
+	tmp := t.TempDir()
+	mounted := filepath.Join(tmp, "Volumes", "bladerunner-demo")
 	if err := os.MkdirAll(mounted, layoutDirPerm); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	f := &fakeRunner{results: []fakeResult{{stdout: browsablePlist(mounted, openTestDevNode)}}}
 
-	_, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{})
+	_, err := open(context.Background(), f, filepath.Join(tmp, "demo"+SparseExt), OpenOptions{})
 	if !errors.Is(err, ErrNotCartridge) {
 		t.Fatalf("err = %v, want ErrNotCartridge", err)
 	}
@@ -192,7 +202,7 @@ func TestOpenBrowsableUnwindsARejectedCartridge(t *testing.T) {
 
 func TestOpenRejectsAnUnknownPolicy(t *testing.T) {
 	f := &fakeRunner{}
-	_, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Policy: "sideways"})
+	_, err := open(context.Background(), f, filepath.Join(t.TempDir(), "demo"+SparseExt), OpenOptions{Policy: "sideways"})
 	if err == nil || !strings.Contains(err.Error(), "sideways") {
 		t.Fatalf("err = %v, want an unknown-policy error", err)
 	}
@@ -204,13 +214,14 @@ func TestOpenRejectsAnUnknownPolicy(t *testing.T) {
 // TestOpenRejectsANonCartridgeAndUnwinds is the reason Open verifies: attaching
 // an arbitrary image must not leave it mounted once we know it is not bootable.
 func TestOpenRejectsANonCartridgeAndUnwinds(t *testing.T) {
-	mp := filepath.Join(t.TempDir(), "mnt", "demo")
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
 	if err := os.MkdirAll(mp, layoutDirPerm); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	_, err := open(context.Background(), f, "/images/demo"+SparseExt, privateOpen(mp))
+	_, err := open(context.Background(), f, filepath.Join(tmp, "demo"+SparseExt), privateOpen(mp))
 	if !errors.Is(err, ErrNotCartridge) {
 		t.Fatalf("err = %v, want ErrNotCartridge", err)
 	}
@@ -220,12 +231,13 @@ func TestOpenRejectsANonCartridgeAndUnwinds(t *testing.T) {
 }
 
 func TestOpenRejectsAFutureFormatAndUnwinds(t *testing.T) {
-	mp := filepath.Join(t.TempDir(), "mnt", "demo")
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
 	openFixture(t, mp)
 	writeFormatVersion(t, mp, FormatVersion+1)
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	_, err := open(context.Background(), f, "/images/demo"+SparseExt, privateOpen(mp))
+	_, err := open(context.Background(), f, filepath.Join(tmp, "demo"+SparseExt), privateOpen(mp))
 	if !errors.Is(err, ErrFormatTooNew) {
 		t.Fatalf("err = %v, want ErrFormatTooNew", err)
 	}
@@ -253,6 +265,170 @@ func TestOpenRemovesTheWorkingCopyWhenAttachFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(work); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("working copy %s should have been removed: %v", work, statErr)
+	}
+	// The failed open released its claim, so the cartridge is bootable again.
+	if holder, busy := Busy(dmg); busy {
+		t.Fatalf("a failed open left the cartridge claimed by %s", holder)
+	}
+}
+
+// TestOpenRefusesACartridgeAnotherProcessBooted is the data-loss regression.
+//
+// A running VM's disk IS the working copy, and materialize unlinks a stale
+// working copy before converting a fresh one over it. With the first boot
+// spelled as the .sparseimage and the second as the .dmg it came from, nothing
+// derived from a name or a mountpoint connects the two — so before the claim
+// existed the second boot silently deleted the first VM's live disk, discarding
+// every byte the guest had written.
+func TestOpenRefusesACartridgeAnotherProcessBooted(t *testing.T) {
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
+	openFixture(t, mp)
+	dmg := filepath.Join(tmp, "demo"+DMGExt)
+	work := filepath.Join(tmp, "demo"+SparseExt)
+	writeFixtureFile(t, work, "live-guest-bytes")
+
+	// First boot: `br boot demo.sparseimage`, still running.
+	first := &fakeRunner{results: []fakeResult{attachResult(mp)}}
+	running, err := open(context.Background(), first, work, privateOpen(mp))
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	t.Cleanup(func() { running.releaseClaim() })
+
+	// Second boot: `br boot demo.dmg` — the same working copy under another name.
+	second := &fakeRunner{results: []fakeResult{{}, attachResult(mp)}}
+	if _, err := open(context.Background(), second, dmg, privateOpen(mp)); !errors.Is(err, ErrCartridgeBusy) {
+		t.Fatalf("second open = %v, want ErrCartridgeBusy", err)
+	}
+	if len(second.calls) != 0 {
+		t.Fatalf("a refused boot must not run hdiutil: %v", second.calls)
+	}
+	data, err := os.ReadFile(work)
+	if err != nil || string(data) != "live-guest-bytes" {
+		t.Fatalf("the running VM's disk was destroyed: %q, %v", data, err)
+	}
+}
+
+// The refusal has to name the conflict: "it is busy" with no owner leaves the
+// user with nothing to act on.
+func TestOpenBusyErrorNamesTheHolder(t *testing.T) {
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
+	openFixture(t, mp)
+	image := filepath.Join(tmp, "demo"+SparseExt)
+
+	running, err := open(context.Background(), &fakeRunner{results: []fakeResult{attachResult(mp)}}, image, privateOpen(mp))
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	t.Cleanup(func() { running.releaseClaim() })
+
+	_, err = open(context.Background(), &fakeRunner{}, image, privateOpen(mp))
+	if err == nil {
+		t.Fatal("expected the second open to be refused")
+	}
+	for _, want := range []string{"demo", strconv.Itoa(os.Getpid())} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	holder, busy := Busy(image)
+	if !busy || holder.PID != os.Getpid() || holder.Name != "demo" {
+		t.Fatalf("Busy() = %+v, %v; want the running holder", holder, busy)
+	}
+}
+
+// Closing releases the claim, so the same cartridge boots again afterwards —
+// the AirDrop -> boot -> eject -> boot cycle.
+func TestOpenedCloseReleasesTheClaim(t *testing.T) {
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
+	openFixture(t, mp)
+	image := filepath.Join(tmp, "demo"+SparseExt)
+
+	o, err := open(context.Background(), &fakeRunner{results: []fakeResult{attachResult(mp)}}, image, privateOpen(mp))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, busy := Busy(image); !busy {
+		t.Fatal("an open cartridge must read as busy")
+	}
+	if err := o.closeWith(context.Background(), &fakeRunner{}); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if holder, busy := Busy(image); busy {
+		t.Fatalf("close left the cartridge claimed by %s", holder)
+	}
+
+	// And a fresh boot of it succeeds.
+	openFixture(t, mp)
+	again, err := open(context.Background(), &fakeRunner{results: []fakeResult{attachResult(mp)}}, image, privateOpen(mp))
+	if err != nil {
+		t.Fatalf("re-open after close: %v", err)
+	}
+	again.releaseClaim()
+}
+
+// Busy is a probe, so it must never create the lock file it looks for: a
+// cartridge nobody has booted is not busy and gains no state from being asked.
+func TestBusyIsSideEffectFree(t *testing.T) {
+	tmp := t.TempDir()
+	image := filepath.Join(tmp, "demo"+SparseExt)
+	if holder, busy := Busy(image); busy {
+		t.Fatalf("an unbooted cartridge reported busy: %+v", holder)
+	}
+	if _, busy := Busy(""); busy {
+		t.Fatal("an empty path cannot be busy")
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Busy() left files behind: %v", entries)
+	}
+}
+
+// The claim is keyed on the working copy, which is what makes the two spellings
+// of one cartridge the same cartridge.
+func TestWorkingCopyPathAndClaimIdentity(t *testing.T) {
+	tmp := t.TempDir()
+	dmg := filepath.Join(tmp, "demo"+DMGExt)
+	sparse := filepath.Join(tmp, "demo"+SparseExt)
+
+	if got := WorkingCopyPath(dmg); got != sparse {
+		t.Errorf("WorkingCopyPath(%q) = %q, want %q", dmg, got, sparse)
+	}
+	if got := WorkingCopyPath(sparse); got != sparse {
+		t.Errorf("a runnable image is its own working copy, got %q", got)
+	}
+	if lockPathFor(WorkingCopyPath(dmg)) != lockPathFor(WorkingCopyPath(sparse)) {
+		t.Error("the two spellings of one cartridge must share a claim")
+	}
+	// The lock file is a hidden sibling, so it never shows up in Finder next to
+	// the cartridge the user AirDropped.
+	if base := filepath.Base(lockPathFor(sparse)); !strings.HasPrefix(base, ".") {
+		t.Errorf("lock file %q is not hidden", base)
+	}
+}
+
+func TestCanonicalImagePath(t *testing.T) {
+	tmp := t.TempDir()
+	image := filepath.Join(tmp, "demo"+SparseExt)
+
+	// A path that does not exist still canonicalizes (its directory does).
+	if got := CanonicalImagePath(image); got != filepath.Join(resolvePath(tmp), "demo"+SparseExt) {
+		t.Errorf("CanonicalImagePath(%q) = %q", image, got)
+	}
+	// Traversal and trailing separators collapse onto the same key.
+	noisy := filepath.Join(tmp, "sub", "..", "demo"+SparseExt)
+	if CanonicalImagePath(noisy) != CanonicalImagePath(image) {
+		t.Errorf("CanonicalImagePath(%q) != CanonicalImagePath(%q)", noisy, image)
+	}
+	if CanonicalImagePath("") != "" {
+		t.Error("an empty path canonicalizes to nothing")
 	}
 }
 

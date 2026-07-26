@@ -120,6 +120,39 @@ func TrimExt(p string) string {
 	return strings.TrimSuffix(p, DMGExt)
 }
 
+// WorkingCopyPath returns the image a boot of path will actually attach: a
+// shipped read-only .dmg is converted to a writable .sparseimage next to it
+// (see Opened.materialize), and anything else is attached in place.
+//
+// It is the IDENTITY of a booted cartridge — two boots that resolve to the same
+// working copy are two boots of the same disk, however they were spelled — so
+// it is what the boot lock and the already-booted checks key on.
+func WorkingCopyPath(path string) string {
+	if filepath.Ext(path) != DMGExt {
+		return path
+	}
+	return TrimExt(path) + SparseExt
+}
+
+// CanonicalImagePath returns the comparable form of a cartridge image path:
+// absolute, with its DIRECTORY symlink-resolved (macOS spells /tmp as
+// /private/tmp) and its base name left alone.
+//
+// The directory rather than the whole path is resolved on purpose: the working
+// copy of a shipped .dmg does not exist yet when its identity has to be
+// computed, and filepath.EvalSymlinks of a missing file yields nothing. An
+// unresolvable path is returned cleaned, which is still stable.
+func CanonicalImagePath(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = filepath.Clean(p)
+	}
+	return filepath.Join(resolvePath(filepath.Dir(abs)), filepath.Base(abs))
+}
+
 // NameFromPath derives a cartridge (and mount slot) name from an image path by
 // trimming the cartridge extension from its basename. The result is not
 // validated; callers that need a legal slot name check disk.ValidName.
