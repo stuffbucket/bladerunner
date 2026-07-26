@@ -27,9 +27,9 @@
 //   - Run MUST be called from the main goroutine on the locked main thread. In
 //     GUI mode it never returns until the VM window closes, because it blocks
 //     inside vz.StartGraphicApplication.
-//   - New, Drain, Info, Config, Runner and Endpoint are safe from any
-//     goroutine. Drain in particular is called from a control-socket handler
-//     goroutine and from a DiskArbitration dispatch queue.
+//   - New, Drain, Info, Runner and Cartridge are safe from any goroutine. Drain
+//     in particular is called from a control-socket handler goroutine and from
+//     a DiskArbitration dispatch queue.
 //
 // Two Hosts can be constructed in one process — there is no package-level
 // mutable state — but only one can be Run today, because only one goroutine can
@@ -45,7 +45,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -278,6 +277,15 @@ type Host struct {
 	// non-cartridge instance, a platform without DiskArbitration, or a failed
 	// registration (which is warned about, never fatal).
 	unmountCancel func() error
+	// newUnmountSession opens the DiskArbitration session the veto registers
+	// on. It is a field only so a test can inject a constructor that fails
+	// (or a session that refuses to register) without a real framework; nil
+	// means diskarb.NewSession.
+	newUnmountSession func() (unmountSession, error)
+	// unprotected records why this instance is running WITHOUT the unmount
+	// veto, or UnprotectedNone when it is armed. Guarded by mu: it is written
+	// on the goroutine driving Run and read by whoever reports instance state.
+	unprotected UnprotectedReason
 
 	// drainOnce guarantees that however many unmount-approval callbacks fire —
 	// Finder retries, and DiskArbitration delivers one per slice — exactly one
@@ -337,15 +345,17 @@ func (h *Host) AdoptCartridge(opened *cartridge.Opened) {
 	h.adopted = true
 }
 
-// Config returns the resolved instance config. It is nil until Run has passed
-// the control step.
-func (h *Host) Config() *config.Config { return h.cfg }
+// Runner and Cartridge are the package boundary, not leftovers: the two
+// resources a front end legitimately has to reach past the Host to work with.
+// A dead-code sweep sees few callers of either because most consumers live in
+// other repos' shoes — cmd/bladerunner and the menubar — so keep them.
+//
+// The resolved config and the published endpoint are deliberately NOT exposed:
+// both are delivered to the front end through Observer.Ready, which is the one
+// point at which they are complete.
 
 // Runner returns the VM runner, or nil before the VM has been constructed.
 func (h *Host) Runner() *vm.Runner { return h.activeRunner() }
-
-// Endpoint returns the Incus API endpoint the VM published, or "" before start.
-func (h *Host) Endpoint() string { return h.endpoint }
 
 // Cartridge returns the cartridge this instance booted from, or nil.
 func (h *Host) Cartridge() *cartridge.Opened { return h.cartridge }
@@ -484,37 +494,124 @@ func (h *Host) drain(ctx context.Context, timeout time.Duration, force bool) err
 // dialog say exactly the same thing.
 const unmountDenyReason = bootstage.DetailUnmountRequested
 
-// devNodeDir is the directory the kernel exposes BSD disk devices in. A
-// cartridge records its device as a PATH ("/dev/disk9s1"); DiskArbitration
-// speaks bare BSD names ("disk9s1").
-const devNodeDir = "/dev/"
-
-// bsdNameFor reduces a device node to the bare BSD name DiskArbitration
-// addresses it by, accepting either spelling.
+// UnprotectedReason says why a cartridge instance is running WITHOUT the
+// DiskArbitration unmount veto.
 //
-// This is the whole of the unmount veto's correctness. The watcher filter is
-// compared against DiskInfo.BSDName, which is never a path, so registering with
-// "/dev/disk9s1" matched nothing: every approval callback returned "approve"
-// and the drain below was unreachable. Passing the bare name is what connects
-// a Finder eject to an orderly spin-down instead of a disk pulled out from
-// under a live VMM.
-func bsdNameFor(devNode string) string {
-	name := strings.TrimSpace(devNode)
-	if name == "" {
-		return ""
+// The veto fails OPEN on purpose — a safety net that cannot be registered must
+// never stop the VM from starting — which is exactly why the outcome has to be
+// recorded rather than merely logged at Warn. This shipped once as a silent
+// loss of protection: the watcher was armed with a filter that could not match,
+// so every eject of a running cartridge was approved and nobody could tell.
+// A value here is the difference between "protected" and "unprotected, for this
+// stated reason", and it is what lets `br instances` / `br status` say so.
+//
+// The value doubles as the human-readable clause in the warning, so the log
+// line and anything a front end renders cannot drift apart.
+type UnprotectedReason string
+
+// The reasons the veto can be off. Each corresponds to exactly one bail-out in
+// startUnmountWatch; every one of them returns nil, so the only way to observe
+// which fired is this value.
+const (
+	// UnprotectedNone means the veto is armed — or that there is nothing to
+	// protect, because the instance boots no cartridge. It is the zero value.
+	UnprotectedNone UnprotectedReason = ""
+	// UnprotectedNoCartridge means the cartridge step produced no open mount,
+	// so there is no device to watch on an instance that expected one.
+	UnprotectedNoCartridge UnprotectedReason = "no cartridge attached"
+	// UnprotectedNoDevNode means the mount recorded no device node.
+	UnprotectedNoDevNode UnprotectedReason = "no cartridge device node"
+	// UnprotectedUnreadableDevNode means the recorded device node does not name
+	// a BSD disk, so no filter can be derived from it. Registering the empty
+	// filter instead would arm the veto over every disk on the machine.
+	UnprotectedUnreadableDevNode UnprotectedReason = "cartridge device node is not a BSD disk"
+	// UnprotectedNoSession means the DiskArbitration session could not be
+	// opened.
+	UnprotectedNoSession UnprotectedReason = "DiskArbitration unavailable"
+	// UnprotectedWatchFailed means the session was opened but the approval
+	// watcher could not be registered on it.
+	UnprotectedWatchFailed UnprotectedReason = "could not watch unmount approval"
+	// UnprotectedUnsupported means the platform has no DiskArbitration at all.
+	UnprotectedUnsupported UnprotectedReason = "unmount protection is macOS-only"
+)
+
+// UnmountProtection reports why this instance's cartridge is not protected
+// against an unmount, or UnprotectedNone when the veto is armed (or when there
+// is nothing to protect). It is safe from any goroutine.
+//
+// It is exported for the front end that has to tell a user their cartridge can
+// be pulled out from under a running guest; a dead-code sweep that finds no
+// caller yet should leave it alone.
+func (h *Host) UnmountProtection() UnprotectedReason {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.unprotected
+}
+
+// setUnmountProtection records the veto's outcome.
+func (h *Host) setUnmountProtection(why UnprotectedReason) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.unprotected = why
+}
+
+// unprotect records why the veto is off, says so once at Warn, and returns nil.
+//
+// Returning nil is the fail-open contract: startUnmountWatch is a lifecycle
+// step, and a non-nil error would abort the whole start over a missing safety
+// net. args are appended to the log line as key/value pairs.
+func (h *Host) unprotect(why UnprotectedReason, args ...any) error {
+	h.setUnmountProtection(why)
+	logging.L().Warn(string(why)+"; unmount protection is off", args...)
+	return nil
+}
+
+// unmountSession is the part of a *diskarb.Session the unmount veto uses.
+//
+// It is an interface so the two ways registration can fail — the session, then
+// the watcher — are reachable from a test with no DiskArbitration anywhere.
+// Both are bail-outs that disable protection silently, which is the failure
+// mode this whole mechanism exists to prevent.
+type unmountSession interface {
+	// WatchUnmountApproval registers fn for disks matching bsdName.
+	WatchUnmountApproval(bsdName string, fn func(diskarb.DiskInfo) diskarb.Dissent) (diskarb.CancelFunc, error)
+	// Close releases the session.
+	Close() error
+}
+
+// openUnmountSession opens the session to register the veto on: the injected
+// constructor when a test supplied one, else a real DiskArbitration session.
+func (h *Host) openUnmountSession() (unmountSession, error) {
+	if h.newUnmountSession != nil {
+		return h.newUnmountSession()
 	}
-	return strings.TrimPrefix(name, devNodeDir)
+	session, err := diskarb.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("open DiskArbitration session: %w", err)
+	}
+	return session, nil
 }
 
 // unmountFilter is the BSD name the unmount-approval watcher registers for, or
-// "" when this instance has no cartridge (and so nothing to protect). It is
-// what startUnmountWatch passes to diskarb, kept here — portable, and away from
-// the cgo session — so the filter can be asserted without a Mac.
+// "" when there is nothing to protect: no cartridge, or a recorded device node
+// that does not name a BSD disk. It is what startUnmountWatch passes to diskarb,
+// kept here — portable, and away from the cgo session — so the filter can be
+// asserted without a Mac.
+//
+// The reduction is diskarb.BSDName's, and using it is the whole of the veto's
+// correctness. The watcher filter is compared against DiskInfo.BSDName, which is
+// never a path, so registering the recorded "/dev/disk9s1" verbatim matched
+// nothing: every approval callback returned "approve" and the drain below was
+// unreachable.
+//
+// "" is never registered. An empty diskarb filter matches EVERY disk, so a
+// device node this package cannot read must disable the veto (startUnmountWatch
+// records UnprotectedUnreadableDevNode) rather than veto the whole machine.
 func (h *Host) unmountFilter() string {
 	if h.cartridge == nil {
 		return ""
 	}
-	return bsdNameFor(h.cartridge.Mount.DevNode)
+	return diskarb.BSDName(h.cartridge.Mount.DevNode)
 }
 
 // unmountState is the entirety of the Host lifecycle that the unmount-approval

@@ -360,53 +360,62 @@ func TestHostInstanceNamePrecedence(t *testing.T) {
 	}
 }
 
-// bsdNameFor is the whole of the unmount veto's correctness: DiskArbitration
-// filters on the BARE BSD name, so a device PATH matches nothing and every
-// eject of a running cartridge is silently approved.
-func TestBSDNameFor(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"/dev/disk9s1", "disk9s1"},
-		{"/dev/disk9", "disk9"},
-		{"disk9s1", "disk9s1"},
-		{"  /dev/disk9s1  ", "disk9s1"},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		if got := bsdNameFor(tt.in); got != tt.want {
-			t.Errorf("bsdNameFor(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
-// The filter bsdNameFor produces must be the form DiskArbitration reports, and
-// it must survive the whole-disk/slice pairing: a cartridge records the node it
-// attached ("/dev/disk9"), while the unmount-approval request arrives for the
-// slice that carries the filesystem ("disk9s1").
-func TestBSDNameForMatchesWhatDiskArbitrationReports(t *testing.T) {
-	reported := diskarb.DiskInfo{BSDName: "disk9s1"}
-
-	for _, recorded := range []string{"/dev/disk9s1", "disk9s1"} {
-		if got := bsdNameFor(recorded); got != reported.BSDName {
-			t.Errorf("a watcher registered for %q filters on %q, but DiskArbitration reports %q",
-				recorded, got, reported.BSDName)
-		}
-	}
-	// The whole disk reduces to the unit the slice shares, which is what the
-	// diskarb matcher pairs them on.
-	if got := bsdNameFor("/dev/disk9"); !strings.HasPrefix(reported.BSDName, got) {
-		t.Errorf("whole-disk filter %q does not cover slice %q", got, reported.BSDName)
-	}
-}
-
 // The veto is registered for the BSD NAME of the cartridge's device, which is
 // the only thing DiskArbitration will match. Registering the device PATH — as
 // this did — filtered every callback out, so the approval callback never ran,
 // nothing was ever vetoed, and a Finder eject pulled the disk out from under a
 // live VMM.
-func TestUnmountFilterIsTheBareBSDName(t *testing.T) {
+//
+// The reduction itself is specified once, in internal/diskarb; what this
+// asserts is the rule at the level it broke — the filter a Host computes from
+// the device node it recorded MATCHES the name DiskArbitration will report.
+func TestUnmountFilterMatchesWhatDiskArbitrationReports(t *testing.T) {
 	t.Setenv(config.ForceHostedImageEnvVar, "")
 	t.Setenv(config.ForceDebianImageEnvVar, "")
 
+	reported := diskarb.DiskInfo{BSDName: "disk9s1"}
+
+	// Every spelling a cartridge might have recorded its device under has to
+	// arm a watcher that sees the slice the unmount request arrives for —
+	// including the whole disk, which is all a caller who attached a DMG knows.
+	for _, recorded := range []string{"/dev/disk9s1", "disk9s1", "/dev/disk9", "/dev/rdisk9s1"} {
+		h := hostWithCartridgeDevNode(t, recorded)
+		filter := h.unmountFilter()
+		if filter == "" {
+			t.Fatalf("a cartridge on %q armed no filter at all", recorded)
+		}
+		if !diskarb.MatchesFilter(filter, reported.BSDName) {
+			t.Errorf("a cartridge recorded as %q registers filter %q, which does not match the reported %q",
+				recorded, filter, reported.BSDName)
+		}
+		if strings.HasPrefix(filter, "/") {
+			t.Errorf("filter %q is a path; DiskInfo.BSDName never is, so the veto would never fire", filter)
+		}
+	}
+
+	// A device node that names no disk must arm NOTHING: an empty diskarb
+	// filter matches every disk on the machine, which would veto unmounts that
+	// are none of this instance's business.
+	for _, recorded := range []string{"", "/Volumes/bladerunner-demo"} {
+		if got := hostWithCartridgeDevNode(t, recorded).unmountFilter(); got != "" {
+			t.Errorf("a cartridge recorded as %q armed filter %q, want none", recorded, got)
+		}
+	}
+
+	// No cartridge at all: nothing to watch, and no panic.
+	h, err := New(Spec{Kind: instance.KindCartridge, Name: "demo", CartridgePath: "/tmp/demo.dmg", Mountpoint: "/Volumes/bladerunner-demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.unmountFilter(); got != "" {
+		t.Fatalf("unmountFilter() with no cartridge = %q, want empty", got)
+	}
+}
+
+// hostWithCartridgeDevNode builds a cartridge Host that has adopted a mount
+// whose device node is recorded as devNode.
+func hostWithCartridgeDevNode(t *testing.T, devNode string) *Host {
+	t.Helper()
 	h, err := New(Spec{
 		Kind:          instance.KindCartridge,
 		Name:          "demo",
@@ -416,22 +425,11 @@ func TestUnmountFilterIsTheBareBSDName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No cartridge yet: nothing to watch, and no panic.
-	if got := h.unmountFilter(); got != "" {
-		t.Fatalf("unmountFilter() with no cartridge = %q, want empty", got)
-	}
-
 	h.AdoptCartridge(&cartridge.Opened{
 		Name:  "demo",
-		Mount: cartridge.Mount{Mountpoint: "/Volumes/bladerunner-demo", DevNode: "/dev/disk9s1"},
+		Mount: cartridge.Mount{Mountpoint: "/Volumes/bladerunner-demo", DevNode: devNode},
 	})
-	got := h.unmountFilter()
-	if got != "disk9s1" {
-		t.Fatalf("unmountFilter() = %q, want %q (DiskInfo.BSDName is never a path)", got, "disk9s1")
-	}
-	if strings.HasPrefix(got, "/") {
-		t.Fatal("a device path can never match DiskInfo.BSDName, so the veto would never fire")
-	}
+	return h
 }
 
 // Drain before the VM exists must say so rather than panic.

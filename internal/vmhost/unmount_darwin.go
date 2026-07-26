@@ -3,7 +3,6 @@
 package vmhost
 
 import (
-	"github.com/stuffbucket/bladerunner/internal/diskarb"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 )
@@ -21,42 +20,45 @@ import (
 //
 // Every failure here is a warning, never fatal. Losing the veto costs the
 // user a safety net; refusing to boot because DiskArbitration was unavailable
-// would cost them the VM.
+// would cost them the VM. Each bail-out therefore returns nil — and records an
+// UnprotectedReason, so "this cartridge is running unprotected" is a fact the
+// Host carries rather than a line that scrolled past in a log.
 func (h *Host) startUnmountWatch() error {
 	if h.spec.Kind != instance.KindCartridge {
-		return nil
+		return nil // nothing to protect; UnprotectedNone stands
 	}
 	if h.cartridge == nil {
-		logging.L().Warn("no cartridge attached; unmount protection is off")
-		return nil
+		return h.unprotect(UnprotectedNoCartridge)
 	}
 	devNode := h.cartridge.Mount.DevNode
 	if devNode == "" {
-		logging.L().Warn("no cartridge device node; unmount protection is off")
-		return nil
+		return h.unprotect(UnprotectedNoDevNode)
 	}
 	// DiskArbitration matches the watcher's filter against DiskInfo.BSDName —
 	// the BARE name, never a path — so the recorded "/dev/diskNsM" has to be
 	// reduced first or the filter matches nothing and every eject is approved.
+	// A node that reduces to nothing must not be registered either: the empty
+	// filter matches every disk on the machine.
 	bsdName := h.unmountFilter()
+	if bsdName == "" {
+		return h.unprotect(UnprotectedUnreadableDevNode, "dev_node", devNode)
+	}
 
-	session, err := diskarb.NewSession()
+	session, err := h.openUnmountSession()
 	if err != nil {
-		logging.L().Warn("DiskArbitration unavailable; unmount protection is off", "error", err)
-		return nil
+		return h.unprotect(UnprotectedNoSession, "error", err)
 	}
 	cancel, err := session.WatchUnmountApproval(bsdName, h.onUnmountApproval)
 	if err != nil {
 		_ = session.Close()
-		logging.L().Warn("could not watch unmount approval; unmount protection is off",
-			"bsd_name", bsdName, "error", err)
-		return nil
+		return h.unprotect(UnprotectedWatchFailed, "bsd_name", bsdName, "error", err)
 	}
 
 	h.unmountCancel = func() error {
 		cancel()
 		return session.Close()
 	}
+	h.setUnmountProtection(UnprotectedNone)
 	logging.L().Info("watching unmount requests for the cartridge",
 		"bsd_name", bsdName, "dev_node", devNode)
 	return nil
