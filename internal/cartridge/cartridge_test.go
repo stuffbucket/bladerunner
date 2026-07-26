@@ -3,6 +3,11 @@ package cartridge
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -106,6 +111,7 @@ func TestAttachArgs(t *testing.T) {
 		"-nobrowse",
 		"-owners", "on",
 		"-noverify",
+		"-plist",
 	}
 	if !argsEqual(got, want) {
 		t.Fatalf("attachArgs mismatch\n got: %v\nwant: %v", got, want)
@@ -387,5 +393,394 @@ func TestWrapHdiutil(t *testing.T) {
 func TestErrUnsupportedMessage(t *testing.T) {
 	if !strings.Contains(ErrUnsupported.Error(), "require macOS") {
 		t.Fatalf("ErrUnsupported message = %q", ErrUnsupported.Error())
+	}
+}
+
+// --- hdiutil attach -plist parsing ---------------------------------------
+
+// sampleAttachPlist is REAL, verbatim output captured from
+//
+//	hdiutil create -type SPARSE -fs APFS -volname bladerunner-sample -size 1g \
+//	    -nospotlight -quiet /tmp/brcart.5kKPp5/sample
+//	hdiutil attach /tmp/brcart.5kKPp5/sample.sparseimage \
+//	    -mountpoint /tmp/brcart.5kKPp5/mnt -nobrowse -owners on -noverify -plist
+//
+// on macOS 15 (Darwin 25.5.0). It exercises everything the parser must survive:
+// four system-entities, three of which have NO mount-point (the GUID partition
+// scheme, the Apple_APFS container, and the synthesized APFS volume group),
+// exactly one mounted volume, <true/>/<false/> booleans, a DOCTYPE referencing
+// Apple's external DTD, and a dev node on a DIFFERENT disk (disk9) from the
+// image's own whole-disk device (disk6) — so "first entity wins" would be wrong.
+const sampleAttachPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>system-entities</key>
+	<array>
+		<dict>
+			<key>content-hint</key>
+			<string>GUID_partition_scheme</string>
+			<key>dev-entry</key>
+			<string>/dev/disk6</string>
+			<key>potentially-mountable</key>
+			<false/>
+			<key>unmapped-content-hint</key>
+			<string>GUID_partition_scheme</string>
+		</dict>
+		<dict>
+			<key>content-hint</key>
+			<string>Apple_APFS</string>
+			<key>dev-entry</key>
+			<string>/dev/disk6s1</string>
+			<key>potentially-mountable</key>
+			<false/>
+			<key>unmapped-content-hint</key>
+			<string>7C3457EF-0000-11AA-AA11-00306543ECAC</string>
+		</dict>
+		<dict>
+			<key>content-hint</key>
+			<string>41504653-0000-11AA-AA11-00306543ECAC</string>
+			<key>dev-entry</key>
+			<string>/dev/disk9s1</string>
+			<key>mount-point</key>
+			<string>/private/tmp/brcart.5kKPp5/mnt</string>
+			<key>potentially-mountable</key>
+			<true/>
+			<key>unmapped-content-hint</key>
+			<string>41504653-0000-11AA-AA11-00306543ECAC</string>
+			<key>volume-kind</key>
+			<string>apfs</string>
+		</dict>
+		<dict>
+			<key>content-hint</key>
+			<string>EF57347C-0000-11AA-AA11-00306543ECAC</string>
+			<key>dev-entry</key>
+			<string>/dev/disk9</string>
+			<key>potentially-mountable</key>
+			<false/>
+			<key>unmapped-content-hint</key>
+			<string>EF57347C-0000-11AA-AA11-00306543ECAC</string>
+		</dict>
+	</array>
+</dict>
+</plist>
+`
+
+// sampleMountPoint / sampleDevNode are the mounted volume in sampleAttachPlist.
+const (
+	sampleMountPoint = "/private/tmp/brcart.5kKPp5/mnt"
+	sampleDevNode    = "/dev/disk9s1"
+)
+
+// attachPlistFor renders a minimal two-entity plist (one unmounted whole-disk
+// entity, one mounted volume) for an arbitrary mountpoint, so tests that must
+// match a t.TempDir() path can still parse realistic input.
+func attachPlistFor(mountpoint, devNode string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>system-entities</key>
+	<array>
+		<dict>
+			<key>content-hint</key>
+			<string>GUID_partition_scheme</string>
+			<key>dev-entry</key>
+			<string>/dev/disk42</string>
+			<key>potentially-mountable</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>dev-entry</key>
+			<string>%s</string>
+			<key>mount-point</key>
+			<string>%s</string>
+			<key>potentially-mountable</key>
+			<true/>
+			<key>volume-kind</key>
+			<string>apfs</string>
+		</dict>
+	</array>
+</dict>
+</plist>
+`, devNode, mountpoint)
+}
+
+func TestParseAttachEntities(t *testing.T) {
+	entities, err := parseAttachEntities(sampleAttachPlist)
+	if err != nil {
+		t.Fatalf("parseAttachEntities: %v", err)
+	}
+	if len(entities) != 4 {
+		t.Fatalf("entities = %d, want 4: %+v", len(entities), entities)
+	}
+
+	want := []systemEntity{
+		{DevEntry: "/dev/disk6"},
+		{DevEntry: "/dev/disk6s1"},
+		{DevEntry: sampleDevNode, MountPoint: sampleMountPoint, VolumeKind: "apfs"},
+		{DevEntry: "/dev/disk9"},
+	}
+	for i, w := range want {
+		if entities[i] != w {
+			t.Errorf("entity[%d] = %+v, want %+v", i, entities[i], w)
+		}
+	}
+}
+
+func TestParseAttachEntitiesRejectsNonPlist(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"plain hdiutil text", "/dev/disk9s1\tApple_APFS\t/Volumes/x\n"},
+		{"plist without system-entities", `<?xml version="1.0"?><plist version="1.0"><dict><key>other</key><string>x</string></dict></plist>`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseAttachEntities(tc.input); err == nil {
+				t.Fatal("expected an error for non-plist input")
+			}
+		})
+	}
+}
+
+func TestSelectMountedDevNode(t *testing.T) {
+	sample, err := parseAttachEntities(sampleAttachPlist)
+	if err != nil {
+		t.Fatalf("parseAttachEntities: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		entities   []systemEntity
+		mountpoint string
+		want       string
+	}{
+		{
+			name:       "exact mountpoint match wins over earlier entities",
+			entities:   sample,
+			mountpoint: sampleMountPoint,
+			want:       sampleDevNode,
+		},
+		{
+			name:       "unresolved /tmp form still matches /private/tmp",
+			entities:   sample,
+			mountpoint: "/tmp/brcart.5kKPp5/mnt",
+			want:       sampleDevNode,
+		},
+		{
+			name:       "no match falls back to the only mounted entity",
+			entities:   sample,
+			mountpoint: "/somewhere/else",
+			want:       sampleDevNode,
+		},
+		{
+			name:       "entities with no mount-point are ignored",
+			entities:   []systemEntity{{DevEntry: "/dev/disk6"}, {DevEntry: "/dev/disk6s1"}},
+			mountpoint: "/mnt/x",
+			want:       "",
+		},
+		{
+			name:       "empty entity list",
+			entities:   nil,
+			mountpoint: "/mnt/x",
+			want:       "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := selectMountedDevNode(tc.entities, tc.mountpoint); got != tc.want {
+				t.Fatalf("selectMountedDevNode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAttachedDevNodeNeverErrors(t *testing.T) {
+	if got := attachedDevNode("not a plist at all", "/mnt/x"); got != "" {
+		t.Fatalf("attachedDevNode on garbage = %q, want empty", got)
+	}
+	if got := attachedDevNode(sampleAttachPlist, sampleMountPoint); got != sampleDevNode {
+		t.Fatalf("attachedDevNode = %q, want %q", got, sampleDevNode)
+	}
+}
+
+// TestAttachCapturesDevNode drives attach() with a fake hdiutil that returns a
+// realistic plist, asserting the Mount carries the BSD device node without
+// which DiskArbitration cannot address the volume.
+func TestAttachCapturesDevNode(t *testing.T) {
+	mp := filepath.Join(t.TempDir(), "mnt")
+	const devNode = "/dev/disk7s1"
+	// hdiutil reports the symlink-resolved mountpoint, so render the plist with
+	// the resolved form to mirror reality (macOS: /var/... -> /private/var/...).
+	f := &fakeRunner{results: []fakeResult{{stdout: attachPlistFor(resolvePath(mp), devNode)}}}
+
+	m, err := attach(context.Background(), f, "/tmp/foo.sparseimage", mp)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if m.DevNode != devNode {
+		t.Fatalf("Mount.DevNode = %q, want %q", m.DevNode, devNode)
+	}
+	if m.Mountpoint != resolvePath(mp) {
+		t.Fatalf("Mount.Mountpoint = %q, want %q", m.Mountpoint, resolvePath(mp))
+	}
+	if m.Path != "/tmp/foo.sparseimage" {
+		t.Fatalf("Mount.Path = %q", m.Path)
+	}
+}
+
+// TestAttachSucceedsWithoutPlist pins the "plist is additive" contract: an
+// hdiutil that printed nothing parseable must still yield a usable Mount.
+func TestAttachSucceedsWithoutPlist(t *testing.T) {
+	mp := filepath.Join(t.TempDir(), "mnt")
+	f := &fakeRunner{results: []fakeResult{{stdout: "/dev/disk7\tGUID_partition_scheme\t\n"}}}
+
+	m, err := attach(context.Background(), f, "/tmp/foo.sparseimage", mp)
+	if err != nil {
+		t.Fatalf("attach must not fail on an unparseable plist: %v", err)
+	}
+	// The temp dir is not a real mount, so the kernel fallback is skipped and
+	// DevNode stays empty rather than reporting the PARENT volume's device.
+	if m.DevNode != "" {
+		t.Fatalf("Mount.DevNode = %q, want empty for a non-mounted path", m.DevNode)
+	}
+}
+
+// --- mount identity ------------------------------------------------------
+
+// TestIsAttachedRejectsPlainDirectory covers the regression the st.Dev check
+// alone could not: an ordinary directory (or a missing one) is never a mounted
+// cartridge.
+func TestIsAttachedRejectsPlainDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if IsAttached(dir) {
+		t.Fatalf("IsAttached(%q) = true for a plain directory", dir)
+	}
+	if IsAttached(filepath.Join(dir, "does-not-exist")) {
+		t.Fatal("IsAttached = true for a missing path")
+	}
+	// A regular file is not a mountpoint either.
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if IsAttached(file) {
+		t.Fatal("IsAttached = true for a regular file")
+	}
+}
+
+func TestIsAttachedFromRequiresDevNode(t *testing.T) {
+	// An empty dev node asserts nothing and must never pass.
+	if IsAttachedFrom(t.TempDir(), "") {
+		t.Fatal("IsAttachedFrom with an empty dev node = true")
+	}
+	if IsAttachedFrom(t.TempDir(), "/dev/disk99s1") {
+		t.Fatal("IsAttachedFrom on a plain directory = true")
+	}
+}
+
+func TestLookupMountOnRoot(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		if _, err := LookupMount("/"); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("LookupMount off darwin = %v, want ErrUnsupported", err)
+		}
+		return
+	}
+	info, err := LookupMount("/")
+	if err != nil {
+		t.Fatalf("LookupMount(/): %v", err)
+	}
+	if info.Mountpoint != "/" {
+		t.Errorf("Mountpoint = %q, want /", info.Mountpoint)
+	}
+	if !strings.HasPrefix(info.DevNode, devNodePrefix) {
+		t.Errorf("DevNode = %q, want a %s* node", info.DevNode, devNodePrefix)
+	}
+	dev, err := DevNodeAt("/")
+	if err != nil {
+		t.Fatalf("DevNodeAt(/): %v", err)
+	}
+	if dev != info.DevNode {
+		t.Errorf("DevNodeAt = %q, want %q", dev, info.DevNode)
+	}
+}
+
+// TestAttachRealImageCapturesDevNode is the end-to-end proof that the -plist
+// dev node we parse is the one the kernel reports for the mounted volume, and
+// that IsAttached/IsAttachedFrom flip correctly across a detach.
+//
+// It attaches a REAL disk image, so it is gated three ways: skipped in -short
+// mode, skipped off darwin, and (matching the sibling hdiutil integration test)
+// opt-in via BLADERUNNER_CARTRIDGE_IT=1 so `make test` never mounts anything on
+// a developer's machine by surprise.
+func TestAttachRealImageCapturesDevNode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-image attach in -short mode")
+	}
+	if runtime.GOOS != "darwin" {
+		t.Skip("cartridge images require macOS")
+	}
+	if os.Getenv("BLADERUNNER_CARTRIDGE_IT") != "1" {
+		t.Skip("set BLADERUNNER_CARTRIDGE_IT=1 to run the hdiutil integration test")
+	}
+	if _, err := exec.LookPath(hdiutil); err != nil {
+		t.Skip("hdiutil not found in PATH")
+	}
+
+	dir := t.TempDir()
+	imgPath, err := Create(filepath.Join(dir, "devnode"), "devnode", MinSizeGiB)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(imgPath) })
+
+	mp := filepath.Join(dir, "mnt")
+	m, err := Attach(imgPath, mp)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	detached := false
+	t.Cleanup(func() {
+		if !detached {
+			_ = Detach(m.Mountpoint)
+		}
+	})
+
+	if !strings.HasPrefix(m.DevNode, devNodePrefix) {
+		t.Fatalf("Mount.DevNode = %q, want a %s* node", m.DevNode, devNodePrefix)
+	}
+	// The plist's dev-entry must agree with what the kernel says backs the mount.
+	info, err := LookupMount(m.Mountpoint)
+	if err != nil {
+		t.Fatalf("LookupMount(%q): %v", m.Mountpoint, err)
+	}
+	if info.DevNode != m.DevNode {
+		t.Errorf("plist dev node %q != kernel dev node %q", m.DevNode, info.DevNode)
+	}
+	if info.Mountpoint != m.Mountpoint {
+		t.Errorf("kernel mountpoint %q != Mount.Mountpoint %q", info.Mountpoint, m.Mountpoint)
+	}
+	if !IsAttached(m.Mountpoint) {
+		t.Error("IsAttached = false for a freshly attached image")
+	}
+	if !IsAttachedFrom(m.Mountpoint, m.DevNode) {
+		t.Error("IsAttachedFrom = false for its own dev node")
+	}
+	if IsAttachedFrom(m.Mountpoint, "/dev/disk999s9") {
+		t.Error("IsAttachedFrom = true for a foreign dev node")
+	}
+
+	if err := Detach(m.Mountpoint); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	detached = true
+	if IsAttached(m.Mountpoint) {
+		t.Error("IsAttached = true after Detach")
+	}
+	if IsAttachedFrom(m.Mountpoint, m.DevNode) {
+		t.Error("IsAttachedFrom = true after Detach")
 	}
 }
