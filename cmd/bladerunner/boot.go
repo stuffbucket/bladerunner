@@ -114,7 +114,7 @@ func classifyBootArg(arg string, fileExists func(string) bool) bootTarget {
 // (.sparseimage runnable form or .dmg ship form). A non-existent path with such
 // an extension still falls through to the catalog lookup in classifyBootArg.
 func isCartridgeArg(arg string) bool {
-	return strings.HasSuffix(arg, cartridge.SparseExt) || strings.HasSuffix(arg, cartridge.DMGExt)
+	return cartridge.HasImageExt(arg)
 }
 
 // slotNameFromURL derives a sanitized disk/slot name from a URL's basename by
