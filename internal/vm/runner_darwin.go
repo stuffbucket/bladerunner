@@ -761,34 +761,38 @@ func (r *Runner) startForwarders() error {
 		return device.Connect(port)
 	}
 
-	sshForward := newPortForwarder(
-		"ssh",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalSSHPort),
-		r.cfg.VsockSSHPort,
-		dial,
-	)
+	sshForward := r.hostForwarder("ssh", config.PortNameSSH, r.cfg.LocalSSHPort, r.cfg.VsockSSHPort, dial)
 	if err := sshForward.Start(); err != nil {
 		return fmt.Errorf("start ssh forwarder: %w", err)
 	}
 
-	apiForward := newPortForwarder(
-		"incus-api",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalAPIPort),
-		r.cfg.VsockAPIPort,
-		dial,
-	)
+	apiForward := r.hostForwarder("incus-api", config.PortNameAPI, r.cfg.LocalAPIPort, r.cfg.VsockAPIPort, dial)
 	if err := apiForward.Start(); err != nil {
 		_ = sshForward.Close()
 		return fmt.Errorf("start api forwarder: %w", err)
 	}
 
 	r.forwarders = []*portForwarder{sshForward, apiForward}
-	logging.L().Info("forwarders active", "ssh", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalSSHPort), "api", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalAPIPort))
+	logging.L().Info("forwarders active", "ssh", config.LoopbackAddr(r.cfg.LocalSSHPort), "api", config.LoopbackAddr(r.cfg.LocalAPIPort))
 
 	r.startOIDCReverseForwarder(device)
 	r.startNTPReverseForwarder(device)
 
 	return nil
+}
+
+// hostForwarder builds the forwarder for one host loopback service, preferring
+// a listener the caller already bound for that port (parked on the config by
+// whoever reserved the instance's port set) over binding the address here.
+// Taking the pre-bound listener is what removes the window in which another
+// instance could steal the port between reservation and bind; falling back to
+// listenAddr keeps every existing caller — which reserves nothing — working
+// exactly as before.
+func (r *Runner) hostForwarder(name, portName string, hostPort int, guestPort uint32, dial func(uint32) (net.Conn, error)) *portForwarder {
+	if ln := r.cfg.TakeHostListener(portName); ln != nil {
+		return newPortForwarderWithListener(name, ln, guestPort, dial)
+	}
+	return newPortForwarder(name, config.LoopbackAddr(hostPort), guestPort, dial)
 }
 
 // startOIDCReverseForwarder wires the host-side OIDC provider so it is reachable
@@ -805,7 +809,7 @@ func (r *Runner) startOIDCReverseForwarder(device *vz.VirtioSocketDevice) {
 	}
 	oidcReverse := newReversePortForwarder(
 		"oidc",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalOIDCPort),
+		config.LoopbackAddr(r.cfg.LocalOIDCPort),
 		vsockLn,
 	)
 	if err := oidcReverse.Start(); err != nil {
@@ -830,7 +834,7 @@ func (r *Runner) startNTPReverseForwarder(device *vz.VirtioSocketDevice) {
 	}
 	ntpReverse := newReversePortForwarder(
 		"ntp",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalNTPPort),
+		config.LoopbackAddr(r.cfg.LocalNTPPort),
 		vsockLn,
 	)
 	if err := ntpReverse.Start(); err != nil {
@@ -849,14 +853,19 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 	var sshCommand string
 	var sshConfigPath string
 	if r.cfg.SSHPrivateKeyPath != "" {
-		configPath, err := ssh.WriteSSHConfig(r.cfg.LocalSSHPort, r.cfg.SSHUser, r.cfg.SSHPrivateKeyPath)
+		// Per-instance: the default instance rewrites the shared aggregator (its
+		// legacy "Host bladerunner" block), any other instance writes its own
+		// config.d/<name> fragment. Before this split, a second instance's report
+		// overwrote the first's ssh config with its own port.
+		instance := r.cfg.InstanceName()
+		configPath, err := ssh.WriteConfigFor(instance, r.cfg.LocalSSHPort, r.cfg.SSHUser, r.cfg.SSHPrivateKeyPath)
 		if err != nil {
 			logging.L().Warn("failed to write SSH config", "err", err)
 			sshCommand = fmt.Sprintf("ssh -p %d -i %s %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHPrivateKeyPath, r.cfg.SSHUser)
 		} else {
 			sshConfigPath = configPath
 			r.cfg.SSHConfigPath = configPath
-			sshCommand = ssh.Command(configPath)
+			sshCommand = ssh.CommandFor(configPath, instance)
 		}
 	} else {
 		sshCommand = fmt.Sprintf("ssh -p %d %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHUser)

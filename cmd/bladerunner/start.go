@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/oidc"
+	"github.com/stuffbucket/bladerunner/internal/portalloc"
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 	"github.com/stuffbucket/bladerunner/internal/timesource"
 	"github.com/stuffbucket/bladerunner/internal/ui"
@@ -349,6 +351,24 @@ func runStart(cmd *cobra.Command, args []string) error {
 		logging.L().Warn("ignoring invalid settings; using defaults", "err", settingsErr)
 	}
 
+	// Reserve this instance's host loopback ports before anything binds one.
+	// The default instance still PREFERS 6022 / 18443 / 18444 / 15556 / 15557 so
+	// documented URLs, muscle memory, and hand-written ssh configs keep working;
+	// only an additional instance — which finds those taken — falls back to
+	// ephemeral ports. The reservations stay BOUND and are handed to the
+	// services that serve them, so nothing can steal a port in between.
+	if set, perr := reserveInstancePorts(cfg); perr != nil {
+		logging.L().Warn("port reservation failed; using the well-known ports directly", "err", perr)
+	} else {
+		cfgHandler.Lock()
+		cfg.AssignPortsFrom(set)
+		cfgHandler.Unlock()
+		parkHostListeners(cfg, set)
+	}
+	// Anything not taken by a service (start failed, or that service is
+	// disabled) is released here rather than leaked for the process lifetime.
+	defer func() { _ = cfg.CloseHostListeners() }()
+
 	// Ensure SSH keys
 	keyPair, err := ssh.EnsureKeyPair()
 	if err != nil {
@@ -376,7 +396,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// responder serves the HOST clock as a stratum-1 source; the guest coheres to
 	// the host (not UTC) and works offline over vsock. Non-fatal: chrony retries.
 	if cfg.LocalNTPPort != 0 && cfg.VsockNTPPort != 0 {
-		ntpResponder, nerr := timesource.NewResponder(fmt.Sprintf("127.0.0.1:%d", cfg.LocalNTPPort))
+		ntpResponder, nerr := startNTPResponder(cfg)
 		if nerr != nil {
 			logging.L().Warn("ntp responder not started", "err", nerr)
 		} else {
@@ -462,8 +482,11 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cfg.NestedVirt = runner.NestedVirtState()
 	cfgHandler.Unlock()
 
-	// Write SSH config after VM starts
-	sshConfigPath, err := ssh.WriteSSHConfig(cfg.LocalSSHPort, cfg.SSHUser, cfg.SSHPrivateKeyPath)
+	// Write SSH config after VM starts. The default instance rewrites the shared
+	// aggregator (its legacy "Host bladerunner" block); every other instance
+	// writes its own config.d/<name> fragment, so two instances no longer
+	// clobber each other's O_TRUNC write.
+	sshConfigPath, err := ssh.WriteConfigFor(cfg.InstanceName(), cfg.LocalSSHPort, cfg.SSHUser, cfg.SSHPrivateKeyPath)
 	if err != nil {
 		logging.L().Warn("ssh config", "error", err)
 	} else {
@@ -478,9 +501,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// — so Incus authenticates the browser via OIDC. `br web` points the browser
 	// here (LocalWebPort) instead of straight at Incus. Non-fatal: a failure just
 	// means `br web` falls back to the direct Incus URL (with the cert prompt).
+	//
+	// The proxy binds its own listener, so the reservation held for it is
+	// released here — as late as possible, which keeps a concurrently starting
+	// instance off this port until the moment the proxy takes it. It is the one
+	// remaining reserve-then-rebind window; closing it needs a Listener option
+	// on webproxy.Options (follow-up).
+	releaseHostListener(cfg, config.PortNameWeb)
 	if webProxy, werr := webproxy.New(webproxy.Options{
-		ListenAddr:   fmt.Sprintf("127.0.0.1:%d", cfg.LocalWebPort),
-		UpstreamAddr: fmt.Sprintf("127.0.0.1:%d", cfg.LocalAPIPort),
+		ListenAddr:   config.LoopbackAddr(cfg.LocalWebPort),
+		UpstreamAddr: config.LoopbackAddr(cfg.LocalAPIPort),
 		CertPath:     filepath.Join(cfg.VMDir, "webproxy.crt"),
 		KeyPath:      filepath.Join(cfg.VMDir, "webproxy.key"),
 	}); werr != nil {
@@ -800,18 +830,107 @@ func startOIDCProvider(ctx context.Context, cfg *config.Config, hostPublicKey st
 		}
 	}
 
+	// Serve on the listener reserved for this instance when there is one; the
+	// provider binds ListenAddr itself otherwise. IssuerURL is read from the
+	// config, which AssignPorts re-derived from the port actually reserved —
+	// formatting it from the port constant here is what used to break OIDC
+	// silently at login time.
+	ln := cfg.TakeHostListener(config.PortNameOIDC)
 	provider, err := oidc.NewProvider(oidc.Config{
-		ListenAddr: fmt.Sprintf("127.0.0.1:%d", cfg.LocalOIDCPort),
+		ListenAddr: config.LoopbackAddr(cfg.LocalOIDCPort),
+		Listener:   ln,
 		IssuerURL:  cfg.OIDCIssuerURL,
 		Audience:   cfg.OIDCAudience,
 		SigningKey: signingKey,
 		Store:      store,
 	})
 	if err != nil {
+		closeListener(config.PortNameOIDC, ln)
 		return nil, err
 	}
 	if err := provider.Start(ctx); err != nil {
+		closeListener(config.PortNameOIDC, ln)
 		return nil, err
 	}
 	return provider, nil
+}
+
+// reserveInstancePorts binds this instance's host loopback ports as a set,
+// preferring whatever the config currently asks for (the well-known constants
+// for the default instance, a Settings/manifest override otherwise) and falling
+// back to ephemeral ports when a preferred one is taken. Reservation is
+// all-or-nothing: a partial failure rolls back every port it had bound.
+//
+// A zero OIDC or NTP port means that service is disabled, so no port is
+// reserved for it and AssignPortsFrom leaves the zero in place.
+func reserveInstancePorts(cfg *config.Config) (*portalloc.Set, error) {
+	specs := []portalloc.Spec{
+		{Name: config.PortNameSSH, Preferred: cfg.LocalSSHPort},
+		{Name: config.PortNameAPI, Preferred: cfg.LocalAPIPort},
+		{Name: config.PortNameWeb, Preferred: cfg.LocalWebPort},
+	}
+	if cfg.LocalOIDCPort != 0 {
+		specs = append(specs, portalloc.Spec{Name: config.PortNameOIDC, Preferred: cfg.LocalOIDCPort})
+	}
+	if cfg.LocalNTPPort != 0 {
+		specs = append(specs, portalloc.Spec{Name: config.PortNameNTP, Preferred: cfg.LocalNTPPort})
+	}
+	set, err := portalloc.ReserveSet(specs...)
+	if err != nil {
+		return nil, fmt.Errorf("reserve instance ports: %w", err)
+	}
+	logging.L().Info("reserved instance ports",
+		"instance", cfg.InstanceName(),
+		"ssh", set.Port(config.PortNameSSH),
+		"api", set.Port(config.PortNameAPI),
+		"web", set.Port(config.PortNameWeb),
+		"oidc", set.Port(config.PortNameOIDC),
+		"ntp", set.Port(config.PortNameNTP),
+	)
+	return set, nil
+}
+
+// parkHostListeners moves every bound listener out of the reservation set and
+// onto the config, where each service takes the one it serves. Handing over the
+// live listener — instead of a port number to re-bind — is what removes the
+// window in which a second instance could steal the port.
+func parkHostListeners(cfg *config.Config, set *portalloc.Set) {
+	for _, name := range set.Names() {
+		ln, err := set.Detach(name)
+		if err != nil {
+			logging.L().Warn("could not hand over reserved listener", "port_name", name, "err", err)
+			continue
+		}
+		cfg.SetHostListener(name, ln)
+	}
+}
+
+// releaseHostListener closes a reserved listener whose service binds the
+// address itself, immediately before that service binds.
+func releaseHostListener(cfg *config.Config, name string) {
+	closeListener(name, cfg.TakeHostListener(name))
+}
+
+// closeListener closes a reserved listener that will not be served, logging
+// rather than failing the start.
+func closeListener(name string, ln net.Listener) {
+	if ln == nil {
+		return
+	}
+	if err := ln.Close(); err != nil {
+		logging.L().Warn("could not release reserved listener", "port_name", name, "err", err)
+	}
+}
+
+// startNTPResponder builds the host SNTP responder on the listener reserved for
+// it, or binds the configured address when no reservation was made.
+func startNTPResponder(cfg *config.Config) (*timesource.Responder, error) {
+	if ln := cfg.TakeHostListener(config.PortNameNTP); ln != nil {
+		return timesource.NewResponderWithListener(ln), nil
+	}
+	responder, err := timesource.NewResponder(config.LoopbackAddr(cfg.LocalNTPPort))
+	if err != nil {
+		return nil, fmt.Errorf("bind sntp responder: %w", err)
+	}
+	return responder, nil
 }

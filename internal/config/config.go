@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,11 @@ const (
 	// bootstrap (apt install incus + admin init) can exceed 5m on stock M-series
 	// hardware; 10m absorbs that. Dial back with --timeout. (#52)
 	DefaultTimeout = 10 * time.Minute
+
+	// LoopbackHost is the only interface bladerunner binds host-side services
+	// on. Every per-instance port is host-private; the guest reaches them over
+	// vsock forwarders, never over IP.
+	LoopbackHost = "127.0.0.1"
 
 	// Port assignments (avoid conflicts with common services)
 	DefaultLocalSSHPort  = 6022
@@ -73,6 +79,12 @@ const (
 	xdgLocalDir    = ".local"
 	xdgStateSubdir = "state"
 	appName        = "bladerunner"
+
+	// DefaultInstanceName names the single flat instance that lives directly in
+	// the default state dir. It is the instance that keeps the well-known ports
+	// and the legacy "Host bladerunner" ssh alias; every other instance is named
+	// after its own state directory (see Config.InstanceName).
+	DefaultInstanceName = appName
 
 	// File names
 	diskFileName         = "disk.raw"
@@ -137,7 +149,8 @@ type Config struct {
 	// the host provider's loopback port (LocalOIDCPort) so it resolves identically
 	// from inside the VM (Incus, via the guest→host vsock bridge) and on the host
 	// (the browser, direct) — which the browser authorization-code redirect needs.
-	// Defaults to http://127.0.0.1:<LocalOIDCPort>.
+	// Defaults to http://127.0.0.1:<LocalOIDCPort>. It is DERIVED: never format it
+	// from a port constant, always let AssignPorts re-derive it.
 	OIDCIssuerURL string
 	// OIDCClientID is the OAuth2 client_id Incus uses (and that this provider expects).
 	OIDCClientID string
@@ -183,6 +196,10 @@ type Config struct {
 	// cartridge manifest's Share.GuestPath so a non-default path actually mounts
 	// there (not just reported).
 	ShareGuestPath string
+	// HostListeners holds loopback listeners bound ahead of the services that
+	// use them (see the HostListeners type). Nil on a plain config, in which
+	// case every service binds its own address exactly as before.
+	HostListeners HostListeners
 }
 
 // DefaultBaseImageURL returns the default base image URL for the given GOARCH.
@@ -341,40 +358,37 @@ func Default(baseDir string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Name:                appName,
-		Hostname:            appName,
-		StateDir:            baseDir,
-		VMDir:               baseDir,
-		DiskPath:            filepath.Join(baseDir, diskFileName),
-		SavedStatePath:      filepath.Join(baseDir, savedStateFileName),
-		DiskSizeGiB:         DefaultDiskSizeGiB,
-		BaseImageURL:        imageURL,
-		BaseImageSHA512:     baseImageSHA512,
-		BaseImagePath:       "",
-		MachineIDPath:       filepath.Join(baseDir, machineIDFileName),
-		EFIVarsPath:         filepath.Join(baseDir, efiVarsFileName),
-		CloudInitISO:        filepath.Join(baseDir, cloudInitISOFileName),
-		CloudInitDir:        filepath.Join(baseDir, cloudInitDirName),
-		ConsoleLogPath:      filepath.Join(baseDir, consoleLogFileName),
-		LogPath:             filepath.Join(baseDir, logFileName),
-		ReportPath:          filepath.Join(baseDir, reportFileName),
-		MetadataPath:        filepath.Join(baseDir, metadataFileName),
-		SSHUser:             "bladerunner",
-		SSHPublicKey:        "", // Set by EnsureSSHKeys
-		SSHPrivateKeyPath:   "", // Set by EnsureSSHKeys
-		SSHConfigPath:       "", // Set after VM starts
-		ClientCertPath:      filepath.Join(baseDir, clientCertFileName),
-		ClientKeyPath:       filepath.Join(baseDir, clientKeyFileName),
-		LocalSSHPort:        DefaultLocalSSHPort,
-		LocalAPIPort:        DefaultLocalAPIPort,
-		LocalWebPort:        DefaultLocalWebPort,
-		LocalOIDCPort:       DefaultLocalOIDCPort,
+		Name:              appName,
+		Hostname:          appName,
+		StateDir:          baseDir,
+		VMDir:             baseDir,
+		DiskPath:          filepath.Join(baseDir, diskFileName),
+		SavedStatePath:    filepath.Join(baseDir, savedStateFileName),
+		DiskSizeGiB:       DefaultDiskSizeGiB,
+		BaseImageURL:      imageURL,
+		BaseImageSHA512:   baseImageSHA512,
+		BaseImagePath:     "",
+		MachineIDPath:     filepath.Join(baseDir, machineIDFileName),
+		EFIVarsPath:       filepath.Join(baseDir, efiVarsFileName),
+		CloudInitISO:      filepath.Join(baseDir, cloudInitISOFileName),
+		CloudInitDir:      filepath.Join(baseDir, cloudInitDirName),
+		ConsoleLogPath:    filepath.Join(baseDir, consoleLogFileName),
+		LogPath:           filepath.Join(baseDir, logFileName),
+		ReportPath:        filepath.Join(baseDir, reportFileName),
+		MetadataPath:      filepath.Join(baseDir, metadataFileName),
+		SSHUser:           "bladerunner",
+		SSHPublicKey:      "", // Set by EnsureSSHKeys
+		SSHPrivateKeyPath: "", // Set by EnsureSSHKeys
+		SSHConfigPath:     "", // Set after VM starts
+		ClientCertPath:    filepath.Join(baseDir, clientCertFileName),
+		ClientKeyPath:     filepath.Join(baseDir, clientKeyFileName),
+		// Host loopback ports (and everything derived from them) are assigned
+		// below via AssignPorts; the vsock ports are per-VM namespaced and stay
+		// constant.
 		VsockSSHPort:        DefaultVsockSSHPort,
 		VsockAPIPort:        DefaultVsockAPIPort,
 		VsockOIDCPort:       DefaultVsockOIDCPort,
-		LocalNTPPort:        DefaultLocalNTPPort,
 		VsockNTPPort:        DefaultVsockNTPPort,
-		OIDCIssuerURL:       fmt.Sprintf("http://127.0.0.1:%d", DefaultLocalOIDCPort),
 		OIDCClientID:        DefaultOIDCClientID,
 		OIDCAudience:        DefaultOIDCAudience,
 		OIDCStateDir:        filepath.Join(baseDir, "oidc"),
@@ -390,7 +404,199 @@ func Default(baseDir string) (*Config, error) {
 		DashboardPath:       "/ui/",
 	}
 
+	// The default instance keeps the well-known ports. Routing them through
+	// AssignPorts (rather than assigning OIDCIssuerURL from a constant here)
+	// means the derived URLs are produced by exactly one code path, whether the
+	// ports came from these constants or from a runtime reservation.
+	cfg.AssignPorts(DefaultPortAssignment())
+
 	return cfg, nil
+}
+
+// Port reservation names. They label the members of an instance's port set
+// (see internal/portalloc) and key the pre-bound listener hand-off below, so
+// the allocator, the config, and the services that bind agree on one vocabulary.
+const (
+	// PortNameSSH is the loopback SSH forwarder port.
+	PortNameSSH = "ssh"
+	// PortNameAPI is the loopback Incus API forwarder port.
+	PortNameAPI = "api"
+	// PortNameWeb is the loopback web-UI proxy port.
+	PortNameWeb = "web"
+	// PortNameOIDC is the loopback OIDC provider port.
+	PortNameOIDC = "oidc"
+	// PortNameNTP is the loopback SNTP responder port.
+	PortNameNTP = "ntp"
+)
+
+// PortAssignment is one instance's resolved set of host loopback ports.
+//
+// A zero OIDC or NTP port means that service is disabled (the existing
+// convention); a zero SSH or API port is invalid and is rejected by Validate.
+type PortAssignment struct {
+	SSH  int
+	API  int
+	Web  int
+	OIDC int
+	NTP  int
+}
+
+// DefaultPortAssignment returns the well-known ports the flat default instance
+// keeps, so existing docs, muscle memory, and hand-written ssh configs continue
+// to work. Additional instances take whatever portalloc gives them.
+func DefaultPortAssignment() PortAssignment {
+	return PortAssignment{
+		SSH:  DefaultLocalSSHPort,
+		API:  DefaultLocalAPIPort,
+		Web:  DefaultLocalWebPort,
+		OIDC: DefaultLocalOIDCPort,
+		NTP:  DefaultLocalNTPPort,
+	}
+}
+
+// Ports returns the currently assigned host loopback ports.
+func (c *Config) Ports() PortAssignment {
+	return PortAssignment{
+		SSH:  c.LocalSSHPort,
+		API:  c.LocalAPIPort,
+		Web:  c.LocalWebPort,
+		OIDC: c.LocalOIDCPort,
+		NTP:  c.LocalNTPPort,
+	}
+}
+
+// AssignPorts writes a resolved port set onto c and re-derives every value
+// built from those ports.
+//
+// The re-derivation is the point of this method. OIDCIssuerURL used to be
+// formatted from the DefaultLocalOIDCPort constant rather than from the field,
+// so moving the provider to another port produced a config that looked healthy
+// and only failed at login time, long after boot reported success. Anything
+// derived from a port must be recomputed here, never at the point of use.
+func (c *Config) AssignPorts(p PortAssignment) {
+	c.LocalSSHPort = p.SSH
+	c.LocalAPIPort = p.API
+	c.LocalWebPort = p.Web
+	c.LocalOIDCPort = p.OIDC
+	c.LocalNTPPort = p.NTP
+	c.derivePortURLs()
+}
+
+// PortSource supplies resolved ports by reservation name. *portalloc.Set
+// satisfies it structurally, which keeps package config free of a dependency on
+// the allocator.
+type PortSource interface {
+	Port(name string) int
+}
+
+// AssignPortsFrom writes the ports named by src (PortNameSSH and friends) onto
+// c and re-derives the values built from them, exactly as AssignPorts does.
+//
+// Names the source does not know — its Port returns 0 — leave the corresponding
+// field untouched, so a caller that deliberately disabled OIDC or SNTP by not
+// reserving a port keeps its 0, and a caller that only reserved a subset does
+// not silently zero the rest. Use AssignPorts to set a port to 0 on purpose.
+func (c *Config) AssignPortsFrom(src PortSource) {
+	if src == nil {
+		return
+	}
+	ports := c.Ports()
+	assign := func(name string, dst *int) {
+		if p := src.Port(name); p != 0 {
+			*dst = p
+		}
+	}
+	assign(PortNameSSH, &ports.SSH)
+	assign(PortNameAPI, &ports.API)
+	assign(PortNameWeb, &ports.Web)
+	assign(PortNameOIDC, &ports.OIDC)
+	assign(PortNameNTP, &ports.NTP)
+	c.AssignPorts(ports)
+}
+
+// derivePortURLs recomputes every URL built from a host loopback port. It is
+// the single place those URLs are formatted; Default and AssignPorts both go
+// through it so the two can never disagree.
+func (c *Config) derivePortURLs() {
+	c.OIDCIssuerURL = OIDCIssuerURLForPort(c.LocalOIDCPort)
+}
+
+// OIDCIssuerURLForPort returns the issuer URL for a provider listening on the
+// given host loopback port. The URL must resolve identically inside the guest
+// (Incus, via the guest->host vsock bridge) and on the host (the browser
+// following the authorization-code redirect), which is why it is loopback.
+func OIDCIssuerURLForPort(port int) string {
+	return fmt.Sprintf("http://%s:%d", LoopbackHost, port)
+}
+
+// LoopbackAddr formats a host loopback listen/dial address for a port.
+func LoopbackAddr(port int) string {
+	return fmt.Sprintf("%s:%d", LoopbackHost, port)
+}
+
+// InstanceName returns the name this instance is known by: the flat default
+// instance (whose state lives directly in the default state dir) is
+// DefaultInstanceName; every other instance is named after its own state
+// directory — a disk slot (<state>/disks/<name>), a cartridge mountpoint, or a
+// custom --state-dir. It is the ssh alias suffix and the registry key.
+func (c *Config) InstanceName() string {
+	dir := c.VMDir
+	if dir == "" {
+		dir = c.StateDir
+	}
+	if dir == "" || filepath.Clean(dir) == filepath.Clean(DefaultStateDir()) {
+		return DefaultInstanceName
+	}
+	return filepath.Base(dir)
+}
+
+// HostListeners carries loopback listeners that were bound before the services
+// that use them were constructed, keyed by port name.
+//
+// This is a runtime hand-off, not configuration: reserving a port and then
+// closing it so the real service can re-bind leaves a window in which another
+// process takes the port. Callers reserve with internal/portalloc, park the
+// detached listeners here, and each service takes the one it needs. A missing
+// entry simply means "bind the address yourself", which is what every caller
+// did before per-instance ports existed.
+type HostListeners map[string]net.Listener
+
+// SetHostListener parks a pre-bound listener for the named port. It must be
+// called before the VM is started; the map is not safe for concurrent use.
+func (c *Config) SetHostListener(name string, ln net.Listener) {
+	if ln == nil {
+		return
+	}
+	if c.HostListeners == nil {
+		c.HostListeners = make(HostListeners)
+	}
+	c.HostListeners[name] = ln
+}
+
+// TakeHostListener hands the named pre-bound listener to the caller, which
+// becomes responsible for closing it, and removes it from the config so it can
+// only be consumed once. It returns nil when no listener was parked.
+func (c *Config) TakeHostListener(name string) net.Listener {
+	ln, ok := c.HostListeners[name]
+	if !ok {
+		return nil
+	}
+	delete(c.HostListeners, name)
+	return ln
+}
+
+// CloseHostListeners releases every listener still parked (i.e. never taken by
+// a service, because start failed or that service was disabled), joining any
+// close errors. Safe to call more than once.
+func (c *Config) CloseHostListeners() error {
+	var errs []error
+	for name, ln := range c.HostListeners {
+		if err := ln.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close %s listener: %w", name, err))
+		}
+		delete(c.HostListeners, name)
+	}
+	return errors.Join(errs...)
 }
 
 func (c *Config) Validate() error {
