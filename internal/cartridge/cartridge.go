@@ -115,6 +115,11 @@ type Mount struct {
 	// eject/unmount-request handling needs it. Best-effort: empty when hdiutil
 	// emitted no parseable plist and the kernel could not be asked either.
 	DevNode string
+	// Policy is the mount policy the volume was attached under. It is what
+	// tells a holder whether the user can Finder-eject this cartridge (and so
+	// whether an unmount-approval veto is worth registering) or whether the
+	// mount is private and can only go away because we said so.
+	Policy MountPolicy
 }
 
 // MountInfo is the kernel's own view of a mounted volume, obtained from statfs.
@@ -187,22 +192,6 @@ func createArgs(path, name string, sizeGiB int) []string {
 	}
 }
 
-// attachArgs builds the `hdiutil attach` argument vector mounting at a known
-// mountpoint. -mountpoint keeps the mount location under our control (so no
-// caller depends on parsing output to find it); -plist is purely additive and
-// makes hdiutil describe every device node it created, which is how we learn
-// the volume's BSD dev-entry.
-func attachArgs(path, mountpoint string) []string {
-	return []string{
-		cmdAttach, path,
-		"-mountpoint", mountpoint,
-		"-nobrowse",
-		"-owners", "on",
-		"-noverify",
-		flagPlist,
-	}
-}
-
 // detachArgs builds the `hdiutil detach` argument vector for a mountpoint. When
 // force is true the -force flag is appended.
 func detachArgs(mountpoint string, force bool) []string {
@@ -235,30 +224,15 @@ func create(ctx context.Context, r commandRunner, path, name string, sizeGiB int
 	return resolveOutputPath(out, path, SparseExt), nil
 }
 
-// attach mounts the image at mountpoint (creating the dir first) and returns a
-// Mount whose Mountpoint is symlink-resolved for reliable later comparison and
-// whose DevNode names the BSD device backing the volume. DevNode is best-effort:
-// a cartridge that mounted successfully is still usable if hdiutil's plist was
-// unparseable, so a lookup failure never fails the attach.
-func attach(ctx context.Context, r commandRunner, path, mountpoint string) (*Mount, error) {
-	if err := os.MkdirAll(mountpoint, mountpointDirPerm); err != nil {
-		return nil, fmt.Errorf("create mountpoint %q: %w", mountpoint, err)
+// attach mounts the image according to req's policy and returns the resulting
+// Mount. Under MountPrivate the mountpoint is dictated by the caller; under
+// MountBrowsable macOS chooses and the real location is read back out of
+// hdiutil's plist (see mountpolicy.go).
+func attach(ctx context.Context, r commandRunner, req attachRequest) (*Mount, error) {
+	if req.policy.Private() {
+		return attachPrivate(ctx, r, req)
 	}
-	out, errOut, err := r.run(ctx, hdiutil, attachArgs(path, mountpoint)...)
-	if err != nil {
-		return nil, wrapHdiutil(cmdAttach, err, errOut)
-	}
-	resolved := resolvePath(mountpoint)
-	m := &Mount{Path: path, Mountpoint: resolved, DevNode: attachedDevNode(out, mountpoint)}
-	if m.DevNode == "" && isMountpoint(resolved) {
-		// hdiutil's plist is advisory; ask the kernel which device backs the
-		// volume we just mounted. Guarded by isMountpoint so we never report
-		// the *parent* filesystem's device for a directory with nothing on it.
-		if info, lookupErr := lookupMount(resolved); lookupErr == nil {
-			m.DevNode = info.DevNode
-		}
-	}
-	return m, nil
+	return attachBrowsable(ctx, r, req)
 }
 
 // detach unmounts the cartridge at mountpoint using the production backoff.
@@ -659,13 +633,23 @@ func Create(path, name string, sizeGiB int) (string, error) {
 
 // Attach mounts the cartridge image privately at mountpoint (-nobrowse) and
 // returns a Mount with the symlink-resolved mountpoint.
+//
+// This entry point is deliberately pinned to MountPrivate: it serves the
+// build-side flows (`br disk pack`, layout inspection) that need a
+// deterministic location and must never contend with a booted cartridge, which
+// lands under /Volumes. Use Open with a MountPolicy to attach a cartridge for
+// booting.
 func Attach(path, mountpoint string) (*Mount, error) {
 	if !hostSupported() {
 		return nil, ErrUnsupported
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), attachTimeout)
 	defer cancel()
-	return attach(ctx, defaultRunner, path, mountpoint)
+	return attach(ctx, defaultRunner, attachRequest{
+		path:       path,
+		mountpoint: mountpoint,
+		policy:     MountPrivate,
+	})
 }
 
 // Detach unmounts the cartridge at mountpoint, retrying on "Resource busy" and

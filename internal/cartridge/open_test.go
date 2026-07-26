@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -37,12 +38,18 @@ func attachResult(mountpoint string) fakeResult {
 	return fakeResult{stdout: attachPlistFor(resolvePath(mountpoint), openTestDevNode)}
 }
 
+// privateOpen is the option set every legacy test uses: the pre-inversion
+// behavior, where the caller dictates the mountpoint.
+func privateOpen(mountpoint string) OpenOptions {
+	return OpenOptions{Mountpoint: mountpoint, Policy: MountPrivate}
+}
+
 func TestOpenAttachesAndLoadsTheCartridge(t *testing.T) {
 	mp := filepath.Join(t.TempDir(), "mnt", "demo")
 	openFixture(t, mp)
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	o, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Mountpoint: mp})
+	o, err := open(context.Background(), f, "/images/demo"+SparseExt, privateOpen(mp))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -78,7 +85,7 @@ func TestOpenNameOverrideWins(t *testing.T) {
 	openFixture(t, mp)
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	o, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Mountpoint: mp, Name: "slot"})
+	o, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Mountpoint: mp, Name: "slot", Policy: MountPrivate})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -96,7 +103,7 @@ func TestOpenConvertsAShippedDMG(t *testing.T) {
 	dmg := filepath.Join(tmp, "demo"+DMGExt)
 	f := &fakeRunner{results: []fakeResult{{}, attachResult(mp)}}
 
-	o, err := open(context.Background(), f, dmg, OpenOptions{Mountpoint: mp})
+	o, err := open(context.Background(), f, dmg, privateOpen(mp))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -120,10 +127,77 @@ func TestOpenConvertsAShippedDMG(t *testing.T) {
 	}
 }
 
+// TestOpenRequiresAMountpoint applies to the PRIVATE policy only: there the
+// caller dictates the location, so omitting it is a caller bug. The browsable
+// default needs no mountpoint at all (see TestOpenBrowsableNeedsNoMountpoint).
 func TestOpenRequiresAMountpoint(t *testing.T) {
-	_, err := open(context.Background(), &fakeRunner{}, "/images/demo"+SparseExt, OpenOptions{})
+	_, err := open(context.Background(), &fakeRunner{}, "/images/demo"+SparseExt, OpenOptions{Policy: MountPrivate})
 	if !errors.Is(err, ErrNoMountpoint) {
 		t.Fatalf("err = %v, want ErrNoMountpoint", err)
+	}
+}
+
+// TestOpenBrowsableNeedsNoMountpoint is the inversion at the Open level: with no
+// mountpoint given, the cartridge still opens and reports where macOS actually
+// put it — including through a collision suffix.
+func TestOpenBrowsableNeedsNoMountpoint(t *testing.T) {
+	mounted := filepath.Join(t.TempDir(), "Volumes", "bladerunner-demo 1")
+	openFixture(t, mounted)
+	f := &fakeRunner{results: []fakeResult{{stdout: browsablePlist(mounted, openTestDevNode)}}}
+
+	o, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if o.Mountpoint() != resolvePath(mounted) {
+		t.Errorf("Mountpoint = %q, want the plist's %q", o.Mountpoint(), resolvePath(mounted))
+	}
+	if o.Layout.Mountpoint != resolvePath(mounted) {
+		t.Errorf("Layout.Mountpoint = %q, want the real mountpoint", o.Layout.Mountpoint)
+	}
+	if !o.Browsable() {
+		t.Error("a default Open must produce a browsable (Finder-ejectable) mount")
+	}
+	if o.Mount.DevNode != openTestDevNode {
+		t.Errorf("Mount.DevNode = %q, want %q", o.Mount.DevNode, openTestDevNode)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("hdiutil calls = %v, want a single attach", f.calls)
+	}
+	for _, arg := range f.calls[0] {
+		if arg == flagMountpoint || arg == flagNoBrowse {
+			t.Fatalf("default Open dictated the mount: %v", f.calls[0])
+		}
+	}
+}
+
+// TestOpenBrowsableUnwindsARejectedCartridge keeps the browsable path honest
+// about the invariant the private one already had: a volume we refuse to boot
+// is never left mounted — and now it would be left mounted somewhere VISIBLE.
+func TestOpenBrowsableUnwindsARejectedCartridge(t *testing.T) {
+	mounted := filepath.Join(t.TempDir(), "Volumes", "bladerunner-demo")
+	if err := os.MkdirAll(mounted, layoutDirPerm); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	f := &fakeRunner{results: []fakeResult{{stdout: browsablePlist(mounted, openTestDevNode)}}}
+
+	_, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{})
+	if !errors.Is(err, ErrNotCartridge) {
+		t.Fatalf("err = %v, want ErrNotCartridge", err)
+	}
+	if len(f.calls) != 2 || f.calls[1][1] != cmdDetach || f.calls[1][2] != resolvePath(mounted) {
+		t.Fatalf("hdiutil calls = %v, want a detach of the real mountpoint", f.calls)
+	}
+}
+
+func TestOpenRejectsAnUnknownPolicy(t *testing.T) {
+	f := &fakeRunner{}
+	_, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Policy: "sideways"})
+	if err == nil || !strings.Contains(err.Error(), "sideways") {
+		t.Fatalf("err = %v, want an unknown-policy error", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("an invalid policy must not reach hdiutil: %v", f.calls)
 	}
 }
 
@@ -136,7 +210,7 @@ func TestOpenRejectsANonCartridgeAndUnwinds(t *testing.T) {
 	}
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	_, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Mountpoint: mp})
+	_, err := open(context.Background(), f, "/images/demo"+SparseExt, privateOpen(mp))
 	if !errors.Is(err, ErrNotCartridge) {
 		t.Fatalf("err = %v, want ErrNotCartridge", err)
 	}
@@ -151,7 +225,7 @@ func TestOpenRejectsAFutureFormatAndUnwinds(t *testing.T) {
 	writeFormatVersion(t, mp, FormatVersion+1)
 	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
 
-	_, err := open(context.Background(), f, "/images/demo"+SparseExt, OpenOptions{Mountpoint: mp})
+	_, err := open(context.Background(), f, "/images/demo"+SparseExt, privateOpen(mp))
 	if !errors.Is(err, ErrFormatTooNew) {
 		t.Fatalf("err = %v, want ErrFormatTooNew", err)
 	}
@@ -173,7 +247,7 @@ func TestOpenRemovesTheWorkingCopyWhenAttachFails(t *testing.T) {
 		{stderr: "hdiutil: attach failed", err: errors.New("exit 1")},
 	}}
 
-	_, err := open(context.Background(), f, dmg, OpenOptions{Mountpoint: filepath.Join(tmp, "mnt")})
+	_, err := open(context.Background(), f, dmg, privateOpen(filepath.Join(tmp, "mnt")))
 	if err == nil {
 		t.Fatal("expected an attach error")
 	}

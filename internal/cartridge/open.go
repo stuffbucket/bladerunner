@@ -16,9 +16,11 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/disk"
 )
 
-// ErrNoMountpoint is returned by Open when no mountpoint was supplied. A
-// cartridge is always attached at a caller-chosen location (per-instance state
-// lives inside it), so there is no sane default to fall back to.
+// ErrNoMountpoint is returned when a mountpoint was required but not supplied.
+// Under MountPrivate the cartridge is attached at a caller-chosen location
+// (per-instance state lives inside it), so there is no sane default to fall
+// back to. Under MountBrowsable no mountpoint is needed at all: macOS picks
+// one and we read it back.
 var ErrNoMountpoint = errors.New("cartridge: no mountpoint given")
 
 // Opened is a mounted, verified cartridge together with everything Open
@@ -46,20 +48,36 @@ type Opened struct {
 
 // OpenOptions configures Open.
 type OpenOptions struct {
-	// Mountpoint is where the cartridge image is attached. Required: use
-	// MountpointFor(stateDir, name) for the conventional private location.
+	// Mountpoint is where the cartridge image is attached under MountPrivate;
+	// use MountpointFor(stateDir, name) for the conventional private location.
+	//
+	// It is REQUIRED under MountPrivate and IGNORED under MountBrowsable, where
+	// macOS chooses the location (and appends a collision suffix when a volume
+	// of that name is already mounted). Read Opened.Mountpoint() for the
+	// location that was actually used — never assume this field.
 	Mountpoint string
-	// Name overrides the cartridge name derived from the image path.
+	// Name overrides the cartridge name derived from the image path. It does
+	// not rename the volume: the APFS volume name is baked in at pack time
+	// (see VolumeName), which is what the mount-detection prefilter matches on.
 	Name string
+	// Policy selects the mount policy. The zero value is DefaultMountPolicy —
+	// browsable, so the user can eject the cartridge in Finder and get an
+	// orderly drain. Set MountPrivate for scripted or headless use that needs a
+	// deterministic mountpoint.
+	Policy MountPolicy
 }
 
 // Open makes a cartridge image bootable and returns it as an owned value.
 //
 // A shipped read-only .dmg is first converted to a writable working
 // .sparseimage next to it (the AirDrop artifact stays pristine), then the image
-// is attached at opts.Mountpoint, its layout verified, and its packed manifest
+// is attached under opts.Policy, its layout verified, and its packed manifest
 // loaded. Any failure after a step succeeded unwinds that step, so a failed
 // Open leaves nothing attached and no stray working copy.
+//
+// Under the default browsable policy the volume lands under /Volumes where the
+// user can see and eject it; the mountpoint it actually got is
+// Opened.Mountpoint(), which callers must use rather than predicting it.
 //
 // The caller owns the result and MUST Close it once whatever is using the
 // cartridge (the VMM holding root.img) has stopped.
@@ -75,7 +93,10 @@ func Open(path string, opts OpenOptions) (*Opened, error) {
 // gets its own timeout derived from parent, matching the per-operation budgets
 // the standalone wrappers use.
 func open(parent context.Context, r commandRunner, path string, opts OpenOptions) (*Opened, error) {
-	if opts.Mountpoint == "" {
+	if !opts.Policy.Valid() {
+		return nil, fmt.Errorf("cartridge: unknown mount policy %q", string(opts.Policy))
+	}
+	if opts.Policy.Private() && opts.Mountpoint == "" {
 		return nil, ErrNoMountpoint
 	}
 	name := opts.Name
@@ -91,7 +112,11 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 
 	attachCtx, cancelAttach := context.WithTimeout(parent, attachTimeout)
 	defer cancelAttach()
-	mount, err := attach(attachCtx, r, bootImg, opts.Mountpoint)
+	mount, err := attach(attachCtx, r, attachRequest{
+		path:       bootImg,
+		mountpoint: opts.Mountpoint,
+		policy:     opts.Policy,
+	})
 	if err != nil {
 		o.removeWorkingCopy()
 		return nil, fmt.Errorf("attach cartridge: %w", err)
@@ -197,6 +222,14 @@ func (o *Opened) Mountpoint() string {
 		return ""
 	}
 	return o.Mount.Mountpoint
+}
+
+// Browsable reports whether the cartridge is mounted where the user can see and
+// eject it in Finder. A holder uses this to decide whether a user-initiated
+// unmount is even possible, and therefore whether registering an
+// unmount-approval veto is worth doing.
+func (o *Opened) Browsable() bool {
+	return o != nil && o.Mount.Mountpoint != "" && o.Mount.Policy.Browsable()
 }
 
 // StillAttached reports whether this exact cartridge is still mounted where

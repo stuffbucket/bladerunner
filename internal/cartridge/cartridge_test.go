@@ -86,6 +86,40 @@ func TestVolumeName(t *testing.T) {
 	}
 }
 
+// TestVolumeNameIsAlwaysACandidate ties pack time to detection time: a browsable
+// cartridge is only ever noticed because its VOLUME name carries the
+// bladerunner- prefix, so the name `hdiutil create -volname` bakes in must
+// satisfy the IsCandidate prefilter for every legal cartridge name. If these two
+// ever drift, cartridges mount and are silently never offered for boot.
+func TestVolumeNameIsAlwaysACandidate(t *testing.T) {
+	for _, name := range []string{"demo", "a", "smoke-cartridge", "debian-trixie-gui"} {
+		vol := VolumeName(name)
+		if !IsCandidate(vol) {
+			t.Errorf("IsCandidate(VolumeName(%q)) = false for volume %q", name, vol)
+		}
+		if got := NameFromVolume(vol); got != name {
+			t.Errorf("NameFromVolume(%q) = %q, want %q", vol, got, name)
+		}
+		// The volume macOS actually creates when the name collides must still
+		// round-trip: browsable mounts make this the common case, not the edge.
+		if suffixed := vol + " 1"; !IsCandidate(suffixed) || NameFromVolume(suffixed) != name {
+			t.Errorf("collision-suffixed volume %q did not round-trip", suffixed)
+		}
+	}
+	// createArgs is the single place the volume name is written; assert it uses
+	// VolumeName rather than a hand-rolled prefix.
+	args := createArgs("/tmp/demo"+SparseExt, "demo", MinSizeGiB)
+	found := ""
+	for i, a := range args {
+		if a == "-volname" && i+1 < len(args) {
+			found = args[i+1]
+		}
+	}
+	if found != VolumeName("demo") {
+		t.Fatalf("createArgs -volname = %q, want %q", found, VolumeName("demo"))
+	}
+}
+
 func TestCreateArgs(t *testing.T) {
 	got := createArgs("/tmp/foo.sparseimage", "foo", 28)
 	want := []string{
@@ -103,8 +137,11 @@ func TestCreateArgs(t *testing.T) {
 	}
 }
 
+// TestAttachArgs pins the private policy's argument vector byte-for-byte: it is
+// the behavior every scripted and headless caller has always depended on, and
+// the browsable inversion must not have disturbed it.
 func TestAttachArgs(t *testing.T) {
-	got := attachArgs("/tmp/foo.sparseimage", "/mnt/foo")
+	got := attachArgs(attachRequest{path: "/tmp/foo.sparseimage", mountpoint: "/mnt/foo", policy: MountPrivate})
 	want := []string{
 		"attach", "/tmp/foo.sparseimage",
 		"-mountpoint", "/mnt/foo",
@@ -617,7 +654,11 @@ func TestAttachCapturesDevNode(t *testing.T) {
 	// the resolved form to mirror reality (macOS: /var/... -> /private/var/...).
 	f := &fakeRunner{results: []fakeResult{{stdout: attachPlistFor(resolvePath(mp), devNode)}}}
 
-	m, err := attach(context.Background(), f, "/tmp/foo.sparseimage", mp)
+	m, err := attach(context.Background(), f, attachRequest{
+		path:       "/tmp/foo.sparseimage",
+		mountpoint: mp,
+		policy:     MountPrivate,
+	})
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -630,6 +671,9 @@ func TestAttachCapturesDevNode(t *testing.T) {
 	if m.Path != "/tmp/foo.sparseimage" {
 		t.Fatalf("Mount.Path = %q", m.Path)
 	}
+	if m.Policy != MountPrivate {
+		t.Fatalf("Mount.Policy = %q, want %q", m.Policy, MountPrivate)
+	}
 }
 
 // TestAttachSucceedsWithoutPlist pins the "plist is additive" contract: an
@@ -638,7 +682,11 @@ func TestAttachSucceedsWithoutPlist(t *testing.T) {
 	mp := filepath.Join(t.TempDir(), "mnt")
 	f := &fakeRunner{results: []fakeResult{{stdout: "/dev/disk7\tGUID_partition_scheme\t\n"}}}
 
-	m, err := attach(context.Background(), f, "/tmp/foo.sparseimage", mp)
+	m, err := attach(context.Background(), f, attachRequest{
+		path:       "/tmp/foo.sparseimage",
+		mountpoint: mp,
+		policy:     MountPrivate,
+	})
 	if err != nil {
 		t.Fatalf("attach must not fail on an unparseable plist: %v", err)
 	}
