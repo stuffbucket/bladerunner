@@ -506,7 +506,7 @@ func deliverDisk(disk C.DADiskRef, ctx unsafe.Pointer, mediaGone bool) {
 	if !ok {
 		return
 	}
-	if !bsdNameMatches(w.bsdFilter, info.BSDName) {
+	if !MatchesFilter(w.bsdFilter, info.BSDName) {
 		return
 	}
 	fn, out := w.observe(info, info.Mounted() && !mediaGone)
@@ -527,7 +527,7 @@ func brDiskarbUnmountApproval(disk C.DADiskRef, ctx unsafe.Pointer) C.DADissente
 		return nil
 	}
 	info, ok := diskInfoFromDisk(disk)
-	if !ok || !bsdNameMatches(w.bsdFilter, info.BSDName) {
+	if !ok || !MatchesFilter(w.bsdFilter, info.BSDName) {
 		return nil
 	}
 	d := fn(info)

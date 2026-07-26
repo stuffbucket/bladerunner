@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
@@ -135,7 +134,7 @@ func decideForVolume(d diskarb.DiskInfo, detect detectFunc, held heldFunc) watch
 		Verdict:    verdictIgnore,
 		Volume:     d.VolumeName,
 		Mountpoint: d.VolumePath,
-		DevNode:    devNodePath(d.BSDName),
+		DevNode:    diskarb.DevPath(d.BSDName),
 	}
 	switch {
 	case !d.Mounted():
@@ -273,45 +272,11 @@ func candidateName(d diskarb.DiskInfo) string {
 	return d.VolumePath
 }
 
-// bsdDiskPrefix is the prefix of every BSD disk device name, and devDir is the
-// directory the kernel exposes them in.
-const (
-	bsdDiskPrefix = "disk"
-	devDir        = "/dev/"
-)
-
-// devNodePath renders a BSD name ("disk4s1") as the device path other parts of
-// the tree record ("/dev/disk4s1"). An empty or already-absolute name is
-// returned unchanged.
-func devNodePath(bsdName string) string {
-	if bsdName == "" || strings.HasPrefix(bsdName, "/") {
-		return bsdName
-	}
-	return devDir + bsdName
-}
-
-// wholeDiskUnit reduces a device node to its whole-disk unit: "/dev/disk4s1",
-// "disk4s1s2" and "/dev/rdisk4" all reduce to "disk4". Anything that does not
-// look like a BSD disk device reduces to "".
-//
-// Matching on the unit rather than the exact node is what makes the
-// already-running check work: a holder records the whole disk it attached
-// ("/dev/disk4") while DiskArbitration reports the slice that carries the
-// filesystem ("disk4s1").
-func wholeDiskUnit(devNode string) string {
-	name := strings.TrimPrefix(filepath.Base(strings.TrimSpace(devNode)), "r")
-	if !strings.HasPrefix(name, bsdDiskPrefix) {
-		return ""
-	}
-	i := len(bsdDiskPrefix)
-	for i < len(name) && name[i] >= '0' && name[i] <= '9' {
-		i++
-	}
-	if i == len(bsdDiskPrefix) {
-		return ""
-	}
-	return name[:i]
-}
+// The BSD-name reductions this file needs — the /dev path form for a reported
+// bare name, and the whole-disk unit that pairs a holder's recorded device with
+// the slice DiskArbitration reports — live in internal/diskarb
+// (diskarb.DevPath, diskarb.WholeDiskName). They used to be reimplemented here,
+// which is how four packages ended up with four subtly different answers.
 
 // lookupHeld consults a possibly-nil heldFunc.
 func lookupHeld(held heldFunc, v heldVolume) (string, bool) {
@@ -353,7 +318,7 @@ func heldVolumes(root string) heldFunc {
 			// A cartridge instance is rooted AT its mountpoint.
 			addPathKeys(mounts, e.StateDir, e.Name)
 		}
-		if unit := wholeDiskUnit(e.DevNode); unit != "" {
+		if unit := diskarb.WholeDiskName(e.DevNode); unit != "" {
 			devs[unit] = e.Name
 		}
 		for _, image := range []string{e.SourcePath, e.WorkingCopy} {
@@ -368,7 +333,7 @@ func heldVolumes(root string) heldFunc {
 				return name, true
 			}
 		}
-		if unit := wholeDiskUnit(v.DevNode); unit != "" {
+		if unit := diskarb.WholeDiskName(v.DevNode); unit != "" {
 			if name, ok := devs[unit]; ok {
 				return name, true
 			}
@@ -512,7 +477,7 @@ func (w *cartridgeWatcher) handled(key string) bool {
 // mount can be reported for the whole disk and for its slice; the mountpoint is
 // the fallback for a disk with no usable BSD name.
 func volumeKey(d diskarb.DiskInfo) string {
-	if unit := wholeDiskUnit(d.BSDName); unit != "" {
+	if unit := diskarb.WholeDiskName(d.BSDName); unit != "" {
 		return unit
 	}
 	if d.VolumePath != "" {

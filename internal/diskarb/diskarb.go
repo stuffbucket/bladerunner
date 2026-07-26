@@ -43,7 +43,6 @@ package diskarb
 import (
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // ErrUnsupported is returned by every entry point on non-darwin platforms.
@@ -229,43 +228,6 @@ func Approve() Dissent { return Dissent{} }
 // orderly VM drain and stop denying (or unmount itself) once the drain is done.
 func Deny(reason string) Dissent { return Dissent{Deny: true, Reason: reason} }
 
-// bsdDevicePrefix is the prefix every BSD disk device name carries.
-const bsdDevicePrefix = "disk"
-
-// wholeDiskName reduces a BSD device name to its whole-disk form: "disk4s1"
-// and "disk4s1s2" both reduce to "disk4". Names that do not look like BSD disk
-// devices are returned unchanged.
-func wholeDiskName(bsdName string) string {
-	if !strings.HasPrefix(bsdName, bsdDevicePrefix) {
-		return bsdName
-	}
-	i := len(bsdDevicePrefix)
-	for i < len(bsdName) && bsdName[i] >= '0' && bsdName[i] <= '9' {
-		i++
-	}
-	if i == len(bsdDevicePrefix) {
-		return bsdName // "disk" with no unit number: not a real device name
-	}
-	return bsdName[:i]
-}
-
-// bsdNameMatches reports whether a disk with BSD name got should be delivered
-// to a watcher that asked for want.
-//
-// An empty want matches everything. Otherwise the match is on the whole-disk
-// unit, so a watcher registered for the whole disk "disk4" also sees its slices
-// ("disk4s1"), and vice versa — which is what callers want, because an
-// unmount-approval request arrives for the *slice* that holds the filesystem
-// while a caller who attached a DMG usually only knows the whole disk.
-func bsdNameMatches(want, got string) bool {
-	if want == "" {
-		return true
-	}
-	if want == got {
-		return true
-	}
-	if got == "" {
-		return false
-	}
-	return wholeDiskName(want) == wholeDiskName(got)
-}
+// The watcher filter rule — which disks a watcher registered for one name is
+// delivered — is MatchesFilter, in bsdname.go with the rest of the BSD-name
+// domain.

@@ -414,24 +414,11 @@ func TestWatcherDoesNotRememberIgnoredVolumes(t *testing.T) {
 	}
 }
 
-func TestWholeDiskUnit(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"/dev/disk4s1", "disk4"},
-		{"/dev/disk4s1s2", "disk4"},
-		{"disk12", "disk12"},
-		{"/dev/rdisk4", "disk4"},
-		{"  /dev/disk4  ", "disk4"},
-		{"", ""},
-		{"/dev/null", ""},
-		{"disk", ""},
-	}
-	for _, tt := range tests {
-		if got := wholeDiskUnit(tt.in); got != tt.want {
-			t.Errorf("wholeDiskUnit(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
+// The BSD-name reductions themselves are specified once, in
+// internal/diskarb (TestBSDNameRuleOverEverySpelling). What this file still owns
+// is that the watcher applies them where it must: the key it dedupes volumes on
+// is the whole-disk unit, so the same mount reported for the whole disk and for
+// its slice is one volume.
 func TestVolumeKey(t *testing.T) {
 	tests := []struct {
 		name string
@@ -439,6 +426,7 @@ func TestVolumeKey(t *testing.T) {
 		want string
 	}{
 		{"prefers the whole-disk unit", diskarb.DiskInfo{BSDName: "disk9s1", VolumePath: "/Volumes/x"}, "disk9"},
+		{"pairs a slice with its whole disk", diskarb.DiskInfo{BSDName: "disk9", VolumePath: "/Volumes/x"}, "disk9"},
 		{"falls back to the mountpoint", diskarb.DiskInfo{VolumePath: "/Volumes/x/"}, "/Volumes/x"},
 		{"falls back to the volume name", diskarb.DiskInfo{VolumeName: "x"}, "x"},
 	}
@@ -451,16 +439,16 @@ func TestVolumeKey(t *testing.T) {
 	}
 }
 
-func TestDevNodePath(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"disk4s1", "/dev/disk4s1"},
-		{"/dev/disk4s1", "/dev/disk4s1"},
-		{"", ""},
+// A decided volume carries the device in the /dev form the instance registry
+// records, whatever spelling DiskArbitration reported it under — that is what
+// makes the held-by-device lookup line up.
+func TestDecidedVolumeCarriesTheDevicePath(t *testing.T) {
+	got := decideForVolume(diskarb.DiskInfo{BSDName: "disk9s1"}, nil, nil)
+	if got.DevNode != "/dev/disk9s1" {
+		t.Errorf("DevNode = %q, want /dev/disk9s1", got.DevNode)
 	}
-	for _, tt := range tests {
-		if got := devNodePath(tt.in); got != tt.want {
-			t.Errorf("devNodePath(%q) = %q, want %q", tt.in, got, tt.want)
-		}
+	if unnamed := decideForVolume(diskarb.DiskInfo{}, nil, nil); unnamed.DevNode != "" {
+		t.Errorf("DevNode for a disk with no BSD name = %q, want empty", unnamed.DevNode)
 	}
 }
 

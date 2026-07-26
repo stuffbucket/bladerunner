@@ -7,35 +7,7 @@ import (
 	"testing"
 )
 
-func TestWholeDiskName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "whole disk unchanged", in: "disk4", want: "disk4"},
-		{name: "slice reduced", in: "disk4s1", want: "disk4"},
-		{name: "nested slice reduced", in: "disk4s1s2", want: "disk4"},
-		{name: "multi digit unit", in: "disk12s3", want: "disk12"},
-		{name: "different unit kept apart", in: "disk40s1", want: "disk40"},
-		{name: "empty", in: "", want: ""},
-		{name: "prefix only", in: "disk", want: "disk"},
-		{name: "not a disk device", in: "cdrom0", want: "cdrom0"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := wholeDiskName(tt.in); got != tt.want {
-				t.Errorf("wholeDiskName(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestBSDNameMatches(t *testing.T) {
+func TestMatchesFilter(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -53,13 +25,23 @@ func TestBSDNameMatches(t *testing.T) {
 		{name: "different unit does not match", want: "disk4", got: "disk5s1", ok: false},
 		{name: "prefix collision does not match", want: "disk4", got: "disk40s1", ok: false},
 		{name: "unnamed disk does not match a filter", want: "disk4", got: "", ok: false},
+		// The regression: a filter registered with the recorded device PATH has
+		// to match the bare name DiskArbitration reports, or the unmount veto
+		// never fires.
+		{name: "device path filter matches the reported bare name", want: "/dev/disk4s1", got: "disk4s1", ok: true},
+		{name: "whole disk path filter matches the slice", want: "/dev/disk4", got: "disk4s1", ok: true},
+		{name: "raw device path filter matches the slice", want: "/dev/rdisk4", got: "disk4s1", ok: true},
+		{name: "device path filter still keeps units apart", want: "/dev/disk4", got: "disk5s1", ok: false},
+		// A filter that names no device at all must not degenerate into
+		// "match everything": only "" means that.
+		{name: "non device filter does not match", want: "/Volumes/demo", got: "disk4s1", ok: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := bsdNameMatches(tt.want, tt.got); got != tt.ok {
-				t.Errorf("bsdNameMatches(%q, %q) = %v, want %v", tt.want, tt.got, got, tt.ok)
+			if got := MatchesFilter(tt.want, tt.got); got != tt.ok {
+				t.Errorf("MatchesFilter(%q, %q) = %v, want %v", tt.want, tt.got, got, tt.ok)
 			}
 		})
 	}
