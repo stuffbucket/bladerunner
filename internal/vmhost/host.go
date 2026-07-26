@@ -46,12 +46,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/bootstage"
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/diskarb"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/oidc"
@@ -69,10 +71,17 @@ const (
 	// because every other path — including the control socket — lives inside
 	// the mount, and it is torn down last for the same reason.
 	StepCartridge = "cartridge"
+	// StepUnmountVeto registers the DiskArbitration unmount-approval callback
+	// for the cartridge's own device node. It runs directly after the mount
+	// exists and is unregistered directly before the mount goes away.
+	StepUnmountVeto = "unmountveto"
 	// StepControl resolves the base config and binds the control socket.
 	StepControl = "control"
 	// StepServe starts answering on the bound control socket.
 	StepServe = "serve"
+	// StepRegistry publishes this instance's registry entry, so a process that
+	// did not start the VM can find it.
+	StepRegistry = "registry"
 	// StepConfig overlays Settings, the disk manifest, the CLI overrides and
 	// the cartridge onto the config, then brings logging up.
 	StepConfig = "config"
@@ -115,6 +124,11 @@ const guestProbeTimeout = 2 * time.Second
 // package's own default, which is declared in a darwin-only file and so cannot
 // be referenced from portable code (follow-up: lift it to a shared file).
 const DefaultDrainTimeout = 60 * time.Second
+
+// unmountDrainGrace is the slack added to the drain budget when bounding the
+// context of an unmount-triggered drain, so the context deadline never fires
+// before the drain's own escalation has had a chance to run.
+const unmountDrainGrace = 15 * time.Second
 
 // Observer receives the lifecycle notifications a front end renders. Every
 // method is called from the goroutine driving Run, in the documented order, so
@@ -256,6 +270,29 @@ type Host struct {
 	ntp      *timesource.Responder
 	webProxy *webproxy.Proxy
 	bootPub  *bootStagePublisher
+	reg      *registry
+
+	// unmountCancel unregisters the DiskArbitration unmount-approval watcher
+	// and closes its session. It is nil when no watcher was registered — a
+	// non-cartridge instance, a platform without DiskArbitration, or a failed
+	// registration (which is warned about, never fatal).
+	unmountCancel func() error
+
+	// drainOnce guarantees that however many unmount-approval callbacks fire —
+	// Finder retries, and DiskArbitration delivers one per slice — exactly one
+	// drain is started.
+	drainOnce sync.Once
+	// drainKick is what a vetoed unmount runs, on its own goroutine, to spin
+	// the guest down. It is a field only so tests can substitute a fake; nil
+	// means drainForUnmount.
+	drainKick func()
+	// draining records that a drain is in flight, and guestStopped that the
+	// guest has reached a stopped state (or that teardown has begun, which
+	// implies it). Together they are the whole input to the unmount-approval
+	// decision, and they are atomics because that decision is made on the
+	// DiskArbitration dispatch queue.
+	draining     atomic.Bool
+	guestStopped atomic.Bool
 
 	// hostPublicKey is the host's own SSH public key, kept separately from the
 	// config because SetSSHKeys does not overwrite a key the config already
@@ -359,12 +396,20 @@ func (h *Host) Run(ctx context.Context) error {
 	h.mu.Unlock()
 
 	h.startedAt = time.Now()
-	defer h.stack.teardown(h.onStopErr)
+	defer h.teardown()
 
 	if err := h.stack.run(ctx, h.steps(), h.onStopErr); err != nil {
 		return err
 	}
 	return h.block(ctx)
+}
+
+// teardown unwinds every started step. It marks the guest stopped first, so an
+// unmount-approval callback that fires while the steps are unwinding approves
+// (there is nothing left to protect) instead of vetoing our own detach.
+func (h *Host) teardown() {
+	h.guestStopped.Store(true)
+	h.stack.teardown(h.onStopErr)
 }
 
 // Drain performs the orderly spin-down: an ACPI power request, a genuine wait
@@ -380,9 +425,14 @@ func (h *Host) Drain(ctx context.Context, timeout time.Duration) error {
 
 // drain is the shared body of Drain and the control-plane eject handler; force
 // skips straight to the destructive stop.
+//
+// It maintains the two flags the unmount-approval decision reads: draining for
+// the whole call, and guestStopped once the guest is genuinely down (including
+// the "there was never a VM" case, where there is nothing left to protect).
 func (h *Host) drain(ctx context.Context, timeout time.Duration, force bool) error {
 	r := h.activeRunner()
 	if r == nil {
+		h.guestStopped.Store(true)
 		return ErrNotStarted
 	}
 	if timeout <= 0 {
@@ -391,11 +441,161 @@ func (h *Host) drain(ctx context.Context, timeout time.Duration, force bool) err
 	if timeout <= 0 {
 		timeout = DefaultDrainTimeout
 	}
+
+	h.draining.Store(true)
+	defer h.draining.Store(false)
+
 	if err := r.Eject(ctx, timeout, force); err != nil {
 		return err
 	}
+	h.guestStopped.Store(true)
 	h.stop()
 	return nil
+}
+
+// unmountDenyReason is the string DiskArbitration hands back to whoever asked
+// for the unmount; Finder shows it verbatim in its "could not eject" dialog. It
+// is shared with the bootstage detail so the menubar notice and the Finder
+// dialog say exactly the same thing.
+const unmountDenyReason = bootstage.DetailUnmountRequested
+
+// unmountState is the entirety of the Host lifecycle that the unmount-approval
+// decision depends on. Isolating it is what makes decideUnmount a pure function
+// that can be tested exhaustively without a disk, a VM or a Mac.
+type unmountState struct {
+	// Stopped reports that the guest is down — it drained successfully, it was
+	// never started, or teardown has begun. Nothing is writing to the volume.
+	Stopped bool
+	// Draining reports that a drain is already in flight, so a second one must
+	// not be started.
+	Draining bool
+}
+
+// unmountDecision is the answer to one unmount-approval callback: what to tell
+// DiskArbitration, and whether this callback is the one that must start the
+// drain.
+type unmountDecision struct {
+	// Dissent is returned to DiskArbitration immediately.
+	Dissent diskarb.Dissent
+	// StartDrain asks the caller to kick the orderly spin-down off on a
+	// background goroutine. It is never true when Dissent approves.
+	StartDrain bool
+}
+
+// decideUnmount answers an unmount-approval request.
+//
+// The rule is small and total: once the guest is stopped there is nothing left
+// to protect, so approve; otherwise veto and — unless one is already running —
+// start the drain. It never blocks and never touches I/O, because it is called
+// on the DiskArbitration serial dispatch queue, where the requester (Finder,
+// diskutil, hdiutil) is blocked until it returns.
+func decideUnmount(st unmountState) unmountDecision {
+	if st.Stopped {
+		return unmountDecision{Dissent: diskarb.Approve()}
+	}
+	return unmountDecision{
+		Dissent:    diskarb.Deny(unmountDenyReason),
+		StartDrain: !st.Draining,
+	}
+}
+
+// unmountState samples the flags decideUnmount reads. Both are atomics, so it
+// is safe on the DiskArbitration queue.
+func (h *Host) unmountState() unmountState {
+	return unmountState{
+		Stopped:  h.guestStopped.Load(),
+		Draining: h.draining.Load(),
+	}
+}
+
+// onUnmountApproval is the DiskArbitration unmount-approval callback.
+//
+// # It must return promptly and it does
+//
+// It runs on the diskarb session's serial dispatch queue with the requester
+// blocked, so it does exactly two things: compute a decision, and (at most
+// once, guarded by drainOnce) spawn the drain on a goroutine. It never waits
+// for the drain, which can take the full 60-second budget. The user's eject
+// fails with the reason string; when the drain finishes, the Host completes
+// teardown — unregistering this very callback, detaching the cartridge and
+// retracting the registry entry — so the volume goes away by itself and a
+// second eject click is not usually even needed.
+//
+// # Honest limitation: DADissenter is ADVISORY
+//
+// A dissenter delays a polite unmount; it does not prevent an impolite one.
+// Finder's "Force Eject", `diskutil unmount force` and
+// DADiskUnmount(kDADiskUnmountOptionForce) all bypass registered dissenters
+// outright, and a direct umount(2) never consults DiskArbitration at all. This
+// veto therefore narrows the window in which a running VM's disk can be pulled
+// out from under it; it does not close it. The real protection is the
+// wait-for-stopped drain (internal/vm.drainGuest) and the cache/sync disk
+// attachment, both of which hold regardless of who asked for the unmount.
+func (h *Host) onUnmountApproval(disk diskarb.DiskInfo) diskarb.Dissent {
+	decision := decideUnmount(h.unmountState())
+	if decision.StartDrain {
+		h.drainOnce.Do(func() {
+			logging.L().Info("unmount requested for a running cartridge; draining the VM",
+				"bsd_name", disk.BSDName, "volume", disk.VolumePath)
+			h.kickUnmountDrain()
+		})
+	}
+	return decision.Dissent
+}
+
+// kickUnmountDrain starts the drain on its own goroutine so the approval
+// callback can return at once.
+func (h *Host) kickUnmountDrain() {
+	run := h.drainKick
+	if run == nil {
+		run = h.drainForUnmount
+	}
+	go run()
+}
+
+// drainForUnmount performs the orderly spin-down a vetoed eject asked for and
+// then releases Run so teardown detaches the cartridge.
+//
+// The context is deliberately Background-rooted with its own budget: the drain
+// must outlive the DiskArbitration callback that triggered it, and it must
+// still be bounded if the guest never powers off.
+func (h *Host) drainForUnmount() {
+	reporter := h.shutdownReporter()
+	_ = reporter.Draining(bootstage.DetailUnmountRequested)
+
+	timeout := h.drainTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+unmountDrainGrace)
+	defer cancel()
+
+	switch err := h.Drain(ctx, timeout); {
+	case err == nil, errors.Is(err, ErrNotStarted):
+		_ = reporter.Ejecting("")
+	default:
+		logging.L().Warn("drain after an unmount request failed; forcing teardown", "error", err)
+		_ = reporter.Forced(bootstage.DetailForced)
+	}
+	// Drain releases Run itself on success. Do it unconditionally so a failed
+	// or never-started drain still ends in teardown rather than a wedged host
+	// holding a volume the user asked to eject.
+	h.stop()
+}
+
+// drainTimeout resolves the budget an unmount-triggered drain runs under.
+func (h *Host) drainTimeout() time.Duration {
+	if h.spec.DrainTimeout > 0 {
+		return h.spec.DrainTimeout
+	}
+	return DefaultDrainTimeout
+}
+
+// shutdownReporter returns the bootstage reporter for the drain/eject stages,
+// or nil before the config is resolved. A nil *bootstage.Reporter is usable and
+// does nothing, so callers need not branch.
+func (h *Host) shutdownReporter() *bootstage.Reporter {
+	if h.cfg == nil || h.cfg.VMDir == "" {
+		return nil
+	}
+	return bootstage.NewReporter(h.cfg.VMDir)
 }
 
 // block waits for the instance to finish. In GUI mode it surrenders the main
@@ -482,8 +682,10 @@ func (h *Host) lockedConfig(mutate func()) {
 func (h *Host) steps() []step {
 	return []step{
 		{name: StepCartridge, start: noCtx(h.startCartridge), stop: h.stopCartridge},
+		{name: StepUnmountVeto, start: noCtx(h.startUnmountWatch), stop: h.stopUnmountWatch},
 		{name: StepControl, start: noCtx(h.startControl), stop: h.stopControl},
 		{name: StepServe, start: h.startServe},
+		{name: StepRegistry, start: noCtx(h.startRegistry), stop: h.stopRegistry},
 		{name: StepConfig, start: noCtx(h.startConfig)},
 		{name: StepPorts, start: noCtx(h.startPorts), stop: h.stopPorts},
 		{name: StepSSHKeys, start: noCtx(h.startSSHKeys)},
@@ -652,6 +854,9 @@ func (h *Host) startPorts() error {
 	}
 	h.lockedConfig(func() { h.cfg.AssignPortsFrom(set) })
 	h.parkHostListeners(set)
+	// The published ports just changed from "whatever the config asked for" to
+	// "what we actually bound"; a reader must not be told the stale set.
+	h.republishRegistry()
 	return nil
 }
 
@@ -811,9 +1016,12 @@ func (h *Host) startVM(ctx context.Context) error {
 	sshConfigPath, err := ssh.WriteConfigFor(h.cfg.InstanceName(), h.cfg.LocalSSHPort, h.cfg.SSHUser, h.cfg.SSHPrivateKeyPath)
 	if err != nil {
 		logging.L().Warn("ssh config", "error", err)
+		h.republishRegistry()
 		return nil
 	}
 	h.lockedConfig(func() { h.cfg.SSHConfigPath = sshConfigPath })
+	// Everything a reader needs — ports, mountpoint, nested-virt — is final now.
+	h.republishRegistry()
 	return nil
 }
 

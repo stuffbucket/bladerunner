@@ -174,8 +174,10 @@ func TestStepStackReportsStopErrors(t *testing.T) {
 }
 
 // The real Host's step list is what the ordering guarantee applies to, so pin
-// its order: the cartridge is attached first and detached last, and the VM
-// stops before the ports it bound are released.
+// its order: the cartridge is attached first and detached last, the unmount
+// veto is registered just after the mount exists and unregistered just before
+// it goes away, the registry entry is published as soon as the control socket
+// answers, and the VM stops before the ports it bound are released.
 func TestHostStepOrder(t *testing.T) {
 	t.Setenv(config.ForceHostedImageEnvVar, "")
 	t.Setenv(config.ForceDebianImageEnvVar, "")
@@ -189,7 +191,8 @@ func TestHostStepOrder(t *testing.T) {
 		got = append(got, s.name)
 	}
 	want := []string{
-		StepCartridge, StepControl, StepServe, StepConfig, StepPorts, StepSSHKeys,
+		StepCartridge, StepUnmountVeto, StepControl, StepServe, StepRegistry,
+		StepConfig, StepPorts, StepSSHKeys,
 		StepOIDC, StepNTP, StepRunner, StepBootStage, StepVM, StepWebProxy,
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
