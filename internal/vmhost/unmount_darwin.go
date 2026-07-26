@@ -35,17 +35,21 @@ func (h *Host) startUnmountWatch() error {
 		logging.L().Warn("no cartridge device node; unmount protection is off")
 		return nil
 	}
+	// DiskArbitration matches the watcher's filter against DiskInfo.BSDName —
+	// the BARE name, never a path — so the recorded "/dev/diskNsM" has to be
+	// reduced first or the filter matches nothing and every eject is approved.
+	bsdName := h.unmountFilter()
 
 	session, err := diskarb.NewSession()
 	if err != nil {
 		logging.L().Warn("DiskArbitration unavailable; unmount protection is off", "error", err)
 		return nil
 	}
-	cancel, err := session.WatchUnmountApproval(devNode, h.onUnmountApproval)
+	cancel, err := session.WatchUnmountApproval(bsdName, h.onUnmountApproval)
 	if err != nil {
 		_ = session.Close()
 		logging.L().Warn("could not watch unmount approval; unmount protection is off",
-			"dev_node", devNode, "error", err)
+			"bsd_name", bsdName, "error", err)
 		return nil
 	}
 
@@ -53,7 +57,8 @@ func (h *Host) startUnmountWatch() error {
 		cancel()
 		return session.Close()
 	}
-	logging.L().Info("watching unmount requests for the cartridge", "dev_node", devNode)
+	logging.L().Info("watching unmount requests for the cartridge",
+		"bsd_name", bsdName, "dev_node", devNode)
 	return nil
 }
 

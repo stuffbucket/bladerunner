@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/diskarb"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
@@ -258,6 +260,177 @@ func TestHostInfoBeforeStart(t *testing.T) {
 	}
 	if e.PID == 0 {
 		t.Error("PID = 0, want this process")
+	}
+}
+
+// A cartridge instance is published under the cartridge's OWN name, not the
+// basename of the directory it happens to be mounted at.
+//
+// This is the browsable-mount regression: macOS roots a cartridge's state dir
+// at /Volumes/bladerunner-demo, so the old fallback (filepath.Base of the state
+// dir) registered the instance as "bladerunner-demo" — and `br eject demo`,
+// `--instance demo` and the ssh alias all missed it.
+func TestHostInfoUsesTheCartridgeNameNotTheMountpointBasename(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
+
+	mount := "/Volumes/" + cartridge.VolumeName("demo")
+	h, err := New(Spec{
+		Kind:          instance.KindCartridge,
+		CartridgePath: "/Users/someone/Downloads/demo.dmg",
+		Mountpoint:    mount,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.AdoptCartridge(&cartridge.Opened{
+		Name:        "demo",
+		SourcePath:  "/Users/someone/Downloads/demo.dmg",
+		WorkingCopy: "/Users/someone/Downloads/demo.sparseimage",
+		Mount:       cartridge.Mount{Mountpoint: mount, DevNode: "/dev/disk9s1"},
+	})
+	// The config the Host resolves for a cartridge is rooted at the mountpoint,
+	// which is exactly what used to supply the wrong name.
+	h.cfg = &config.Config{VMDir: mount}
+
+	if got := h.instanceName(); got != "demo" {
+		t.Fatalf("instanceName() = %q, want %q", got, "demo")
+	}
+	e := h.Info()
+	if e.Name != "demo" {
+		t.Errorf("Info().Name = %q, want demo (the name the user typed)", e.Name)
+	}
+	if err := instance.ValidName(e.Name); err != nil {
+		t.Errorf("published name is not registrable: %v", err)
+	}
+	if e.StateDir != mount || e.Mountpoint != mount {
+		t.Errorf("StateDir = %q, Mountpoint = %q, want %q", e.StateDir, e.Mountpoint, mount)
+	}
+	if e.WorkingCopy != "/Users/someone/Downloads/demo.sparseimage" {
+		t.Errorf("WorkingCopy = %q", e.WorkingCopy)
+	}
+}
+
+// The name resolution order, and its fallbacks.
+func TestHostInstanceNamePrecedence(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
+
+	withCartridge := func(spec Spec, name string, cfg *config.Config) *Host {
+		t.Helper()
+		h, err := New(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != "" {
+			h.AdoptCartridge(&cartridge.Opened{Name: name, Mount: cartridge.Mount{Mountpoint: "/Volumes/x"}})
+		}
+		h.cfg = cfg
+		return h
+	}
+	cartSpec := Spec{Kind: instance.KindCartridge, CartridgePath: "/tmp/demo.dmg", Mountpoint: "/Volumes/bladerunner-demo"}
+
+	// An explicit Spec.Name always wins.
+	named := cartSpec
+	named.Name = "slot"
+	if got := withCartridge(named, "demo", &config.Config{VMDir: "/Volumes/bladerunner-demo"}).instanceName(); got != "slot" {
+		t.Errorf("explicit spec name = %q, want slot", got)
+	}
+	// An unusable cartridge name falls through to the derived one rather than
+	// producing an entry the registry has to refuse.
+	if got := withCartridge(cartSpec, "Demo Cartridge", &config.Config{VMDir: "/state/disks/fallback"}).instanceName(); got != "fallback" {
+		t.Errorf("fallback name = %q, want fallback", got)
+	}
+	// No cartridge at all: the state dir basename, as before.
+	flat, err := New(Spec{Kind: instance.KindDisk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat.cfg = &config.Config{VMDir: "/state/disks/incus"}
+	if got := flat.instanceName(); got != "incus" {
+		t.Errorf("disk slot name = %q, want incus", got)
+	}
+	// Before the config is resolved there is simply no name yet.
+	bare, err := New(Spec{Kind: instance.KindFlat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bare.instanceName(); got != "" {
+		t.Errorf("instanceName() before the config resolves = %q, want empty", got)
+	}
+}
+
+// bsdNameFor is the whole of the unmount veto's correctness: DiskArbitration
+// filters on the BARE BSD name, so a device PATH matches nothing and every
+// eject of a running cartridge is silently approved.
+func TestBSDNameFor(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"/dev/disk9s1", "disk9s1"},
+		{"/dev/disk9", "disk9"},
+		{"disk9s1", "disk9s1"},
+		{"  /dev/disk9s1  ", "disk9s1"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := bsdNameFor(tt.in); got != tt.want {
+			t.Errorf("bsdNameFor(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// The filter bsdNameFor produces must be the form DiskArbitration reports, and
+// it must survive the whole-disk/slice pairing: a cartridge records the node it
+// attached ("/dev/disk9"), while the unmount-approval request arrives for the
+// slice that carries the filesystem ("disk9s1").
+func TestBSDNameForMatchesWhatDiskArbitrationReports(t *testing.T) {
+	reported := diskarb.DiskInfo{BSDName: "disk9s1"}
+
+	for _, recorded := range []string{"/dev/disk9s1", "disk9s1"} {
+		if got := bsdNameFor(recorded); got != reported.BSDName {
+			t.Errorf("a watcher registered for %q filters on %q, but DiskArbitration reports %q",
+				recorded, got, reported.BSDName)
+		}
+	}
+	// The whole disk reduces to the unit the slice shares, which is what the
+	// diskarb matcher pairs them on.
+	if got := bsdNameFor("/dev/disk9"); !strings.HasPrefix(reported.BSDName, got) {
+		t.Errorf("whole-disk filter %q does not cover slice %q", got, reported.BSDName)
+	}
+}
+
+// The veto is registered for the BSD NAME of the cartridge's device, which is
+// the only thing DiskArbitration will match. Registering the device PATH — as
+// this did — filtered every callback out, so the approval callback never ran,
+// nothing was ever vetoed, and a Finder eject pulled the disk out from under a
+// live VMM.
+func TestUnmountFilterIsTheBareBSDName(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
+
+	h, err := New(Spec{
+		Kind:          instance.KindCartridge,
+		Name:          "demo",
+		CartridgePath: "/tmp/demo.dmg",
+		Mountpoint:    "/Volumes/bladerunner-demo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No cartridge yet: nothing to watch, and no panic.
+	if got := h.unmountFilter(); got != "" {
+		t.Fatalf("unmountFilter() with no cartridge = %q, want empty", got)
+	}
+
+	h.AdoptCartridge(&cartridge.Opened{
+		Name:  "demo",
+		Mount: cartridge.Mount{Mountpoint: "/Volumes/bladerunner-demo", DevNode: "/dev/disk9s1"},
+	})
+	got := h.unmountFilter()
+	if got != "disk9s1" {
+		t.Fatalf("unmountFilter() = %q, want %q (DiskInfo.BSDName is never a path)", got, "disk9s1")
+	}
+	if strings.HasPrefix(got, "/") {
+		t.Fatal("a device path can never match DiskInfo.BSDName, so the veto would never fire")
 	}
 }
 

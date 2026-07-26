@@ -45,6 +45,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -349,11 +350,38 @@ func (h *Host) Endpoint() string { return h.endpoint }
 // Cartridge returns the cartridge this instance booted from, or nil.
 func (h *Host) Cartridge() *cartridge.Opened { return h.cartridge }
 
+// instanceName is the one name this instance is known by: the registry key, the
+// ssh config fragment, and therefore what `--instance <name>` and `br eject
+// <name>` address it as.
+//
+// The cartridge's OWN name is preferred over the state directory's basename,
+// and that ordering is the fix for a real bug. A cartridge is mounted browsably
+// now, so macOS roots its state dir at /Volumes/bladerunner-<name> and
+// config.InstanceName — which is just filepath.Base — yields
+// "bladerunner-demo". Everything that addresses the instance by name then has
+// to know about a prefix the user never typed. Opened.Name already carries the
+// user-facing name ("demo"); this consults it.
+//
+// A cartridge name that is not a legal instance name falls through to the
+// derived one rather than producing an entry the registry must refuse.
+func (h *Host) instanceName() string {
+	if h.spec.Name != "" {
+		return h.spec.Name
+	}
+	if h.cartridge != nil && instance.ValidName(h.cartridge.Name) == nil {
+		return h.cartridge.Name
+	}
+	if h.cfg != nil {
+		return h.cfg.InstanceName()
+	}
+	return ""
+}
+
 // Info describes the running instance in the form the registry records. It is
 // safe to call at any point; fields that are not known yet are zero.
 func (h *Host) Info() instance.Entry {
 	e := instance.Entry{
-		Name:            h.spec.Name,
+		Name:            h.instanceName(),
 		Kind:            h.spec.Kind,
 		SourcePath:      h.spec.CartridgePath,
 		PID:             os.Getpid(),
@@ -362,9 +390,6 @@ func (h *Host) Info() instance.Entry {
 		StartedAt:       h.startedAt,
 	}
 	if h.cfg != nil {
-		if e.Name == "" {
-			e.Name = h.cfg.InstanceName()
-		}
 		e.StateDir = h.cfg.VMDir
 		e.GUI = h.cfg.GUI
 		p := h.cfg.Ports()
@@ -458,6 +483,39 @@ func (h *Host) drain(ctx context.Context, timeout time.Duration, force bool) err
 // is shared with the bootstage detail so the menubar notice and the Finder
 // dialog say exactly the same thing.
 const unmountDenyReason = bootstage.DetailUnmountRequested
+
+// devNodeDir is the directory the kernel exposes BSD disk devices in. A
+// cartridge records its device as a PATH ("/dev/disk9s1"); DiskArbitration
+// speaks bare BSD names ("disk9s1").
+const devNodeDir = "/dev/"
+
+// bsdNameFor reduces a device node to the bare BSD name DiskArbitration
+// addresses it by, accepting either spelling.
+//
+// This is the whole of the unmount veto's correctness. The watcher filter is
+// compared against DiskInfo.BSDName, which is never a path, so registering with
+// "/dev/disk9s1" matched nothing: every approval callback returned "approve"
+// and the drain below was unreachable. Passing the bare name is what connects
+// a Finder eject to an orderly spin-down instead of a disk pulled out from
+// under a live VMM.
+func bsdNameFor(devNode string) string {
+	name := strings.TrimSpace(devNode)
+	if name == "" {
+		return ""
+	}
+	return strings.TrimPrefix(name, devNodeDir)
+}
+
+// unmountFilter is the BSD name the unmount-approval watcher registers for, or
+// "" when this instance has no cartridge (and so nothing to protect). It is
+// what startUnmountWatch passes to diskarb, kept here — portable, and away from
+// the cgo session — so the filter can be asserted without a Mac.
+func (h *Host) unmountFilter() string {
+	if h.cartridge == nil {
+		return ""
+	}
+	return bsdNameFor(h.cartridge.Mount.DevNode)
+}
 
 // unmountState is the entirety of the Host lifecycle that the unmount-approval
 // decision depends on. Isolating it is what makes decideUnmount a pure function
@@ -1012,8 +1070,10 @@ func (h *Host) startVM(ctx context.Context) error {
 	// Write SSH config after VM starts. The default instance rewrites the shared
 	// aggregator (its legacy "Host bladerunner" block); every other instance
 	// writes its own config.d/<name> fragment, so two instances no longer
-	// clobber each other's O_TRUNC write.
-	sshConfigPath, err := ssh.WriteConfigFor(h.cfg.InstanceName(), h.cfg.LocalSSHPort, h.cfg.SSHUser, h.cfg.SSHPrivateKeyPath)
+	// clobber each other's O_TRUNC write. The fragment is named with the same
+	// instanceName the registry entry carries — for a cartridge that is "demo",
+	// not the "bladerunner-demo" its /Volumes mountpoint is called.
+	sshConfigPath, err := ssh.WriteConfigFor(h.instanceName(), h.cfg.LocalSSHPort, h.cfg.SSHUser, h.cfg.SSHPrivateKeyPath)
 	if err != nil {
 		logging.L().Warn("ssh config", "error", err)
 		h.republishRegistry()
