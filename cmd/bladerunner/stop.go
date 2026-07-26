@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 )
 
@@ -65,7 +64,10 @@ func init() {
 }
 
 func runStop(_ *cobra.Command, _ []string) error {
-	stateDir := config.DefaultStateDir()
+	stateDir, err := targetStateDir()
+	if err != nil {
+		return err
+	}
 
 	client := control.NewClient(stateDir)
 

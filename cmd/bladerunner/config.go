@@ -136,7 +136,10 @@ func runConfigGet(args []string) error {
 		return err
 	}
 
-	stateDir := config.DefaultStateDir()
+	stateDir, err := targetStateDir()
+	if err != nil {
+		return err
+	}
 	client := control.NewClient(stateDir)
 	vmRunning := client.IsRunning()
 
@@ -162,7 +165,7 @@ func runConfigGet(args []string) error {
 	}
 
 	// Fall back to default config
-	cfg, err := config.Default("")
+	cfg, err := config.Default(stateDir)
 	if err != nil {
 		err = fmt.Errorf("load defaults: %w", err)
 		if jsonOutput {
@@ -208,7 +211,10 @@ func runConfigSet(args []string) error {
 		return err
 	}
 
-	stateDir := config.DefaultStateDir()
+	stateDir, err := targetStateDir()
+	if err != nil {
+		return err
+	}
 	client := control.NewClient(stateDir)
 
 	if !client.IsRunning() {
@@ -257,12 +263,16 @@ func runConfigKeys() error {
 		return emitJSON(keys)
 	}
 
-	cfg, err := config.Default("")
+	stateDir, err := targetStateDir()
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Default(stateDir)
 	if err != nil {
 		return fmt.Errorf("load defaults: %w", err)
 	}
 
-	stateDir := config.DefaultStateDir()
 	client := control.NewClient(stateDir)
 	vmRunning := client.IsRunning()
 

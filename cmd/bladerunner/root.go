@@ -51,6 +51,13 @@ func init() {
 	// Global --json flag: commands emit machine-readable JSON for agents.
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format (for scripting/agents)")
 
+	// Global --instance flag: which VM a verb acts on when several are running.
+	// With a single running VM it can be omitted and nothing changes; see
+	// resolveInstanceTarget. BLADERUNNER_INSTANCE (or BR_INSTANCE) is the
+	// environment equivalent.
+	rootCmd.PersistentFlags().StringVar(&instanceFlag, "instance", "",
+		"Which VM instance to act on (default: the single running one; env "+instanceEnvVar+")")
+
 	// Titled command buckets for `br --help`. Order here is the display order.
 	rootCmd.AddGroup(
 		&cobra.Group{ID: groupLifecycle, Title: "Lifecycle:"},
@@ -84,7 +91,7 @@ func init() {
 		webCmd, menubarCmd,
 	)
 	addToGroup(groupConfig,
-		statusCmd, configCmd, userCmd, noticeCmd,
+		statusCmd, instancesCmd, configCmd, userCmd, noticeCmd,
 	)
 
 	// With groups defined, the built-in help/completion commands would otherwise
