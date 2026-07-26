@@ -96,6 +96,119 @@ type DiskInfo struct {
 // Mounted reports whether the disk currently carries a mounted volume.
 func (d DiskInfo) Mounted() bool { return d.VolumePath != "" }
 
+// trackingKey identifies a volume across the appeared/description-changed/
+// disappeared events that describe the same disk. The BSD device name is stable
+// for the life of an attachment; the mount point is only a fallback for the
+// synthesized descriptions (APFS snapshots) that carry no device name.
+func (d DiskInfo) trackingKey() string {
+	if d.BSDName != "" {
+		return d.BSDName
+	}
+	return d.VolumePath
+}
+
+// maxTrackedVolumes caps how many volumes a single watcher remembers as
+// mounted. Entries are removed as volumes unmount, so the map normally tracks
+// no more than the number of volumes attached to the machine; the cap only
+// exists so a pathological event stream cannot grow it without bound. Past the
+// cap, mounts are still announced but no longer remembered, which costs a
+// possible duplicate announcement and a missed unmount for the excess volumes.
+const maxTrackedVolumes = 512
+
+// mountState is the transition a single DiskArbitration event represents for
+// one watcher.
+type mountState int
+
+const (
+	// mountUnchanged means the event told the tracker nothing new: a
+	// description change that did not cross the mounted/unmounted line, or a
+	// repeat of a transition already reported.
+	mountUnchanged mountState = iota
+	// mountAppeared means a volume that was not mounted now is.
+	mountAppeared
+	// mountVanished means a volume that was mounted no longer is, either
+	// because it was unmounted or because its media went away.
+	mountVanished
+)
+
+// String makes a failing assertion on a transition readable.
+func (s mountState) String() string {
+	switch s {
+	case mountAppeared:
+		return "mountAppeared"
+	case mountVanished:
+		return "mountVanished"
+	case mountUnchanged:
+		return "mountUnchanged"
+	default:
+		return fmt.Sprintf("mountState(%d)", int(s))
+	}
+}
+
+// volumeTracker folds the DiskArbitration event stream into mount transitions.
+//
+// It exists because DiskArbitration reports *media*, not filesystems: the
+// appeared callback fires when the device node shows up, which is before
+// diskarbitrationd has mounted anything, so the appeared description has no
+// volume path. The mount point arrives milliseconds later on a
+// description-changed callback, and an unmount is likewise a description change
+// rather than a disappearance. Watching both and running them through this
+// tracker turns "media appeared", "description changed" and "media
+// disappeared" into "a mounted volume became available / went away", reported
+// exactly once each.
+//
+// A volumeTracker is not safe for concurrent use; callers serialize it.
+type volumeTracker struct {
+	mounted map[string]DiskInfo
+}
+
+// newVolumeTracker returns a tracker that has not yet seen any volume.
+func newVolumeTracker() *volumeTracker {
+	return &volumeTracker{mounted: make(map[string]DiskInfo)}
+}
+
+// observe folds one event into the tracker and reports the transition it
+// caused, along with the description to hand to the watcher.
+//
+// mountedNow is whether the disk carries a mounted volume *after* this event;
+// callers must pass false for a media-disappeared event even though the
+// retained description still names a mount point. For mountVanished the
+// returned description is the one recorded while the volume was mounted, so a
+// caller keyed on VolumePath can still tell which volume went away.
+func (t *volumeTracker) observe(info DiskInfo, mountedNow bool) (mountState, DiskInfo) {
+	key := info.trackingKey()
+	if key == "" || t.mounted == nil {
+		return mountUnchanged, DiskInfo{}
+	}
+	prev, known := t.mounted[key]
+
+	switch {
+	case mountedNow && !known:
+		if len(t.mounted) < maxTrackedVolumes {
+			t.mounted[key] = info
+		}
+		return mountAppeared, info
+	case !mountedNow && known:
+		delete(t.mounted, key)
+		return mountVanished, prev
+	case mountedNow && known:
+		// Still mounted, but the description may have moved on — renaming a
+		// volume changes its mount point in place. Keep the freshest one so a
+		// later unmount reports where the volume actually was.
+		t.mounted[key] = info
+		return mountUnchanged, DiskInfo{}
+	default:
+		return mountUnchanged, DiskInfo{}
+	}
+}
+
+// forget drops every remembered volume, releasing the tracker's memory once the
+// watcher it belongs to has been canceled. A forgotten tracker reports
+// mountUnchanged for everything, so a late event cannot resurrect it.
+func (t *volumeTracker) forget() {
+	t.mounted = nil
+}
+
 // Dissent is the answer to an unmount-approval request. The zero value
 // approves; see Approve and Deny.
 type Dissent struct {

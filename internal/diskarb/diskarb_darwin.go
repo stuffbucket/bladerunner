@@ -21,6 +21,7 @@ package diskarb //nolint:gocritic // dupImport false-positives on the cgo `impor
 // dispatch_release available, both of which ARC takes away.
 extern void brDiskarbAppeared(DADiskRef disk, void *ctx);
 extern void brDiskarbDisappeared(DADiskRef disk, void *ctx);
+extern void brDiskarbChanged(DADiskRef disk, CFArrayRef keys, void *ctx);
 extern DADissenterRef brDiskarbUnmountApproval(DADiskRef disk, void *ctx);
 extern void brDiskarbBarrier(void *ctx);
 */
@@ -66,8 +67,8 @@ var (
 	keyDeviceModel    = cfStringToGo(C.kDADiskDescriptionDeviceModelKey)
 )
 
-// watcherKind selects which DiskArbitration callback a watcher is registered
-// for, and therefore which C trampoline was handed to the framework.
+// watcherKind selects which DiskArbitration callbacks a watcher is registered
+// for, and therefore which C trampolines were handed to the framework.
 type watcherKind int
 
 const (
@@ -76,20 +77,28 @@ const (
 	kindUnmountApproval
 )
 
-// callbackPtr returns the C function pointer registered for this kind. The same
-// pointer must be passed back to DAUnregisterCallback, which matches
+// watchesVolumes reports whether this kind tracks mounted volumes, and so
+// registers the appeared/disappeared/description-changed trio rather than the
+// single unmount-approval callback.
+func (k watcherKind) watchesVolumes() bool {
+	return k == kindAppeared || k == kindDisappeared
+}
+
+// callbackPtrs returns every C function pointer registered for this kind. The
+// same pointers must be passed back to DAUnregisterCallback, which matches
 // registrations on the (callback, context) pair.
-func (k watcherKind) callbackPtr() unsafe.Pointer {
-	switch k {
-	case kindAppeared:
-		return unsafe.Pointer((*[0]byte)(C.brDiskarbAppeared))
-	case kindDisappeared:
-		return unsafe.Pointer((*[0]byte)(C.brDiskarbDisappeared))
-	case kindUnmountApproval:
-		return unsafe.Pointer((*[0]byte)(C.brDiskarbUnmountApproval))
-	default:
-		return nil
+func (k watcherKind) callbackPtrs() []unsafe.Pointer {
+	if k.watchesVolumes() {
+		return []unsafe.Pointer{
+			unsafe.Pointer((*[0]byte)(C.brDiskarbAppeared)),
+			unsafe.Pointer((*[0]byte)(C.brDiskarbDisappeared)),
+			unsafe.Pointer((*[0]byte)(C.brDiskarbChanged)),
+		}
 	}
+	if k == kindUnmountApproval {
+		return []unsafe.Pointer{unsafe.Pointer((*[0]byte)(C.brDiskarbUnmountApproval))}
+	}
+	return nil
 }
 
 // Session owns a DASessionRef and the private serial dispatch queue its
@@ -121,6 +130,9 @@ type watcher struct {
 	canceled  bool
 	onDisk    func(DiskInfo)
 	onApprove func(DiskInfo) Dissent
+	// volumes folds the raw event stream into mount transitions; nil for the
+	// unmount-approval kind, which is stateless.
+	volumes *volumeTracker
 
 	cancelOnce sync.Once
 }
@@ -183,7 +195,9 @@ func (s *Session) Close() error {
 
 	for _, w := range watchers {
 		w.markCanceled()
-		C.DAUnregisterCallback(session, w.kind.callbackPtr(), w.ctx)
+		for _, ptr := range w.kind.callbackPtrs() {
+			C.DAUnregisterCallback(session, ptr, w.ctx)
+		}
 	}
 	// Stop delivery entirely, then wait for anything already dispatched.
 	C.DASessionSetDispatchQueue(session, nil)
@@ -199,20 +213,35 @@ func (s *Session) Close() error {
 	return nil
 }
 
-// WatchAppeared calls fn whenever a disk with a mounted volume appears.
+// WatchAppeared calls fn once for every volume that becomes mounted.
+//
+// "Appeared" here means "a mounted volume became available", not "a device node
+// showed up". DiskArbitration reports media, and fires its disk-appeared
+// callback before diskarbitrationd has mounted anything, so an appeared
+// description for a freshly attached disk carries no volume path at all; the
+// mount point turns up milliseconds later as a description change. This package
+// therefore watches disk-appeared, disk-disappeared and changes to
+// kDADiskDescriptionVolumePathKey together, and delivers the first event that
+// finds a volume mounted — exactly once per mount, whether it came from the
+// insertion or from the replay described below.
 //
 // DiskArbitration also replays the disks that are already present at
 // registration time, so a caller that only cares about "is my cartridge here"
-// usually does not need CurrentDisks as well. Disks with no mounted volume
-// (bare media, containers) are filtered out.
+// usually does not need CurrentDisks as well. Media with no mounted filesystem
+// (bare disks, APFS containers) is never delivered.
 func (s *Session) WatchAppeared(fn func(DiskInfo)) (CancelFunc, error) {
 	return s.registerDisk(kindAppeared, fn)
 }
 
-// WatchDisappeared calls fn whenever a disk with a mounted volume goes away.
+// WatchDisappeared calls fn once for every volume that stops being mounted.
 //
-// The description handed to fn is the one DiskArbitration retained for the
-// vanishing disk, so VolumePath still reports where it used to be mounted.
+// It covers both ways a volume can go away: an unmount that leaves the media
+// attached (which DiskArbitration reports as a description change dropping the
+// volume path, not as a disappearance) and the media itself vanishing. Only
+// volumes that were seen mounted are reported, and each is reported once.
+//
+// The description handed to fn is the one recorded while the volume was
+// mounted, so VolumePath still reports where it used to be.
 func (s *Session) WatchDisappeared(fn func(DiskInfo)) (CancelFunc, error) {
 	return s.registerDisk(kindDisappeared, fn)
 }
@@ -244,7 +273,13 @@ func (s *Session) registerDisk(kind watcherKind, fn func(DiskInfo)) (CancelFunc,
 }
 
 // register creates the watcher, publishes it through a cgo.Handle and hands the
-// matching C trampoline to DiskArbitration.
+// matching C trampolines to DiskArbitration.
+//
+// A volume-watching kind registers three callbacks against the same context
+// pointer: disk-appeared and disk-disappeared for the media, and
+// description-changed for the mount and unmount that happen in between. All
+// three feed the watcher's volumeTracker, which decides what the caller
+// actually sees.
 func (s *Session) register(kind watcherKind, bsdFilter string, onDisk func(DiskInfo), onApprove func(DiskInfo) Dissent) (CancelFunc, error) {
 	w := &watcher{
 		sess:      s,
@@ -252,6 +287,9 @@ func (s *Session) register(kind watcherKind, bsdFilter string, onDisk func(DiskI
 		bsdFilter: bsdFilter,
 		onDisk:    onDisk,
 		onApprove: onApprove,
+	}
+	if kind.watchesVolumes() {
+		w.volumes = newVolumeTracker()
 	}
 
 	s.mu.Lock()
@@ -270,17 +308,51 @@ func (s *Session) register(kind watcherKind, bsdFilter string, onDisk func(DiskI
 	*(*C.uintptr_t)(ctx) = C.uintptr_t(w.handle)
 	s.watchers[w] = struct{}{}
 
-	switch kind {
-	case kindAppeared:
+	if kind.watchesVolumes() {
 		C.DARegisterDiskAppearedCallback(s.session, 0, C.DADiskAppearedCallback((*[0]byte)(C.brDiskarbAppeared)), ctx)
-	case kindDisappeared:
 		C.DARegisterDiskDisappearedCallback(s.session, 0, C.DADiskDisappearedCallback((*[0]byte)(C.brDiskarbDisappeared)), ctx)
-	case kindUnmountApproval:
+		watchKeys := volumePathWatchKeys()
+		C.DARegisterDiskDescriptionChangedCallback(s.session, 0, watchKeys,
+			C.DADiskDescriptionChangedCallback((*[0]byte)(C.brDiskarbChanged)), ctx)
+		// DiskArbitration retains the key array for the life of the
+		// registration, so this drops our own reference rather than the
+		// framework's.
+		if watchKeys != 0 {
+			C.CFRelease(C.CFTypeRef(watchKeys))
+		}
+	}
+	if kind == kindUnmountApproval {
 		C.DARegisterDiskUnmountApprovalCallback(s.session, 0, C.DADiskUnmountApprovalCallback((*[0]byte)(C.brDiskarbUnmountApproval)), ctx)
 	}
 	s.mu.Unlock()
 
 	return func() { w.cancel() }, nil
+}
+
+// volumePathWatchKeys builds the +1 CFArray of description keys the
+// description-changed callback is filtered on: just the volume path, because
+// that is the key whose arrival and departure mean "mounted" and "unmounted".
+//
+// The single element is staged through a malloc'd cell rather than a Go array
+// so that a CFStringRef — which cgo models as an integer — never has to be
+// converted into an unsafe.Pointer, which go vet rightly rejects. This is the
+// same trick register uses to hand a cgo.Handle to C.
+//
+// A zero return means "could not build the filter"; the caller then registers
+// for every description change instead, which is noisier but still correct
+// because the volumeTracker discards changes that alter nothing it cares about.
+func volumePathWatchKeys() C.CFArrayRef {
+	cell := C.malloc(C.size_t(unsafe.Sizeof(C.uintptr_t(0))))
+	if cell == nil {
+		return 0
+	}
+	defer C.free(cell)
+	*(*C.uintptr_t)(cell) = C.uintptr_t(C.kDADiskDescriptionVolumePathKey)
+	// CFArrayCreate copies the element out of cell, so freeing it is safe.
+	// kCFTypeArrayCallBacks makes the array retain the key, matching what
+	// DiskArbitration expects of the filter it is handed.
+	callbacks := &C.kCFTypeArrayCallBacks
+	return C.CFArrayCreate(C.kCFAllocatorDefault, (*unsafe.Pointer)(cell), 1, callbacks)
 }
 
 // cancel unregisters one watcher.
@@ -313,7 +385,9 @@ func (w *watcher) cancel() {
 		}
 		delete(s.watchers, w)
 		w.markCanceled()
-		C.DAUnregisterCallback(s.session, w.kind.callbackPtr(), w.ctx)
+		for _, ptr := range w.kind.callbackPtrs() {
+			C.DAUnregisterCallback(s.session, ptr, w.ctx)
+		}
 		queue := s.queue
 		retainQueue(queue)
 		s.mu.Unlock()
@@ -326,23 +400,48 @@ func (w *watcher) cancel() {
 	})
 }
 
-// markCanceled stops any further delivery into Go for this watcher.
+// markCanceled stops any further delivery into Go for this watcher and drops
+// the volumes it was remembering.
 func (w *watcher) markCanceled() {
 	w.mu.Lock()
 	w.canceled = true
+	if w.volumes != nil {
+		w.volumes.forget()
+	}
 	w.mu.Unlock()
 }
 
-// diskFunc returns the disk callback, or nil once canceled. The closure is
-// copied out under the lock and invoked without it, so user code never runs
-// while a lock is held.
-func (w *watcher) diskFunc() func(DiskInfo) {
+// observe folds one event into the watcher's view of which volumes are mounted
+// and returns the callback to run together with the description to hand it, or
+// a nil callback when this event changes nothing the caller asked about.
+//
+// The tracker is consulted for every kind of volume event, including the ones
+// this watcher does not report: a WatchAppeared watcher still has to see
+// unmounts so a re-inserted cartridge is announced again, and a WatchDisappeared
+// watcher still has to see mounts so it knows there is anything to report.
+//
+// The closure is copied out under the lock and invoked without it, so user code
+// never runs while a lock is held.
+func (w *watcher) observe(info DiskInfo, mountedNow bool) (func(DiskInfo), DiskInfo) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.canceled {
-		return nil
+	if w.canceled || w.volumes == nil {
+		return nil, DiskInfo{}
 	}
-	return w.onDisk
+	state, out := w.volumes.observe(info, mountedNow)
+	switch state {
+	case mountAppeared:
+		if w.kind != kindAppeared {
+			return nil, DiskInfo{}
+		}
+	case mountVanished:
+		if w.kind != kindDisappeared {
+			return nil, DiskInfo{}
+		}
+	case mountUnchanged:
+		return nil, DiskInfo{}
+	}
+	return w.onDisk, out
 }
 
 // approvalFunc returns the approval callback, or nil once canceled.
@@ -371,34 +470,50 @@ func watcherFromContext(ctx unsafe.Pointer) *watcher {
 
 //export brDiskarbAppeared
 func brDiskarbAppeared(disk C.DADiskRef, ctx unsafe.Pointer) {
-	deliverDisk(disk, ctx)
+	// The media is here; whether a filesystem is mounted on it is whatever the
+	// description says, which for a fresh attachment is "not yet".
+	deliverDisk(disk, ctx, false)
 }
 
 //export brDiskarbDisappeared
 func brDiskarbDisappeared(disk C.DADiskRef, ctx unsafe.Pointer) {
-	deliverDisk(disk, ctx)
+	// The media is gone, so nothing is mounted on it any more, whatever the
+	// description DiskArbitration retained still claims.
+	deliverDisk(disk, ctx, true)
 }
 
-// deliverDisk is the shared body of the appeared/disappeared trampolines. Disks
-// without a mounted volume are dropped: callers of this package care about
-// volumes they can look at, not about bare media or APFS containers.
-func deliverDisk(disk C.DADiskRef, ctx unsafe.Pointer) {
+//export brDiskarbChanged
+func brDiskarbChanged(disk C.DADiskRef, _ C.CFArrayRef, ctx unsafe.Pointer) {
+	// The volume path was added or removed: this is the callback that actually
+	// reports mounts and unmounts. The changed keys are ignored because the
+	// registration already filters on kDADiskDescriptionVolumePathKey, and the
+	// volumeTracker discards anything that changes nothing.
+	deliverDisk(disk, ctx, false)
+}
+
+// deliverDisk is the shared body of the appeared/disappeared/changed
+// trampolines. It turns one raw DiskArbitration event into at most one call
+// into the watcher's Go callback; see watcher.observe for which events survive.
+//
+// mediaGone marks the events that mean the device itself has vanished, whose
+// retained description still names the mount point the volume used to have.
+func deliverDisk(disk C.DADiskRef, ctx unsafe.Pointer, mediaGone bool) {
 	w := watcherFromContext(ctx)
 	if w == nil {
 		return
 	}
-	fn := w.diskFunc()
-	if fn == nil {
-		return
-	}
 	info, ok := diskInfoFromDisk(disk)
-	if !ok || !info.Mounted() {
+	if !ok {
 		return
 	}
 	if !bsdNameMatches(w.bsdFilter, info.BSDName) {
 		return
 	}
-	fn(info)
+	fn, out := w.observe(info, info.Mounted() && !mediaGone)
+	if fn == nil {
+		return
+	}
+	fn(out)
 }
 
 //export brDiskarbUnmountApproval
