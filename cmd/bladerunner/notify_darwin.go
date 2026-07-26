@@ -3,7 +3,10 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -295,4 +298,111 @@ func transitionBody(prev, cur vmState) (body string, notify bool) {
 	default:
 		return "", false
 	}
+}
+
+// --- cartridge insertion --------------------------------------------------
+//
+// Goal 4 needs something the banner machinery above does not do: a QUESTION.
+// A banner is one-way, and "a cartridge appeared, shall I boot it?" cannot be
+// answered by one. So the notifier is reused verbatim for the two one-way
+// messages (a cartridge that cannot be booted, and a boot that has started) and
+// the question itself is a native dialog — the same osascript route the menubar
+// already uses to open Terminal.
+
+// Copy for the cartridge messages, kept beside the other bodies so one file
+// holds everything the menubar says.
+const (
+	bodyCartridgeUnbootableFmt = "Cartridge “%s” cannot be booted: %s"
+	bodyCartridgeBootingFmt    = "Booting cartridge “%s”…"
+	promptCartridgeFmt         = "Cartridge “%s” was inserted.\n\nBoot it now?\n\n%s"
+)
+
+// Dialog tuning. The dialog dismisses itself so an unattended Mac is not left
+// with a modal on screen forever, and the exec budget is comfortably larger
+// than that so the timeout is the dialog's decision and not a killed process.
+const (
+	cartridgeDialogGiveUpSecs = 120
+	cartridgeDialogBudget     = 5 * time.Minute
+	// cartridgeBootButton is the accept button's title; the reply is matched
+	// against it, so the two must not drift.
+	cartridgeBootButton    = "Boot"
+	cartridgeDeclineButton = "Not now"
+)
+
+// cartridgePrompter is what the mount watcher needs from the UI: two
+// announcements and one question. It is an interface so the watcher can be
+// driven by a fake, and so the menubar's notifier stays the only thing that
+// knows how a message is delivered.
+type cartridgePrompter interface {
+	// warnCartridge reports a cartridge that was inserted but cannot be booted.
+	warnCartridge(name, reason string)
+	// confirmBootCartridge asks whether to boot a bootable cartridge. It blocks
+	// until the user answers, so callers must not run it on a callback queue.
+	confirmBootCartridge(name, source string) bool
+	// announceCartridgeBoot reports that a holder is starting.
+	announceCartridgeBoot(name string)
+}
+
+// notifierPrompter implements cartridgePrompter over the menubar's existing
+// notifier plus a native dialog for the question.
+type notifierPrompter struct {
+	n notifier
+	// ask is the dialog, injectable so the wiring can be exercised without
+	// putting a modal on screen. Nil means the real one.
+	ask func(name, source string) bool
+}
+
+// newCartridgePrompter wraps the menubar's notifier as a cartridge prompter.
+func newCartridgePrompter(n notifier) cartridgePrompter {
+	return notifierPrompter{n: n}
+}
+
+func (p notifierPrompter) warnCartridge(name, reason string) {
+	p.n.notify(notifyTitle, fmt.Sprintf(bodyCartridgeUnbootableFmt, name, reason))
+}
+
+func (p notifierPrompter) announceCartridgeBoot(name string) {
+	p.n.notify(notifyTitle, fmt.Sprintf(bodyCartridgeBootingFmt, name))
+}
+
+func (p notifierPrompter) confirmBootCartridge(name, source string) bool {
+	if p.ask != nil {
+		return p.ask(name, source)
+	}
+	return askBootCartridge(name, source)
+}
+
+// askBootCartridge shows the native "boot this cartridge?" dialog and reports
+// whether the user accepted.
+//
+// Anything other than an explicit click on the accept button is a decline:
+// pressing Escape (the cancel button) exits non-zero, and the self-dismiss
+// returns an empty button. Defaulting to "no" matters because booting a
+// cartridge commits a whole VM's worth of RAM.
+func askBootCartridge(name, source string) bool {
+	script := fmt.Sprintf(
+		"display dialog %s with title %s buttons {%s, %s} default button %s cancel button %s with icon note giving up after %d",
+		appleScriptString(fmt.Sprintf(promptCartridgeFmt, name, source)),
+		appleScriptString(notifyTitle),
+		appleScriptString(cartridgeDeclineButton),
+		appleScriptString(cartridgeBootButton),
+		appleScriptString(cartridgeBootButton),
+		appleScriptString(cartridgeDeclineButton),
+		cartridgeDialogGiveUpSecs,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), cartridgeDialogBudget)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "osascript", "-e", script).Output()
+	if err != nil {
+		return false // cancel button, or osascript could not run at all
+	}
+	return strings.Contains(string(out), "button returned:"+cartridgeBootButton)
+}
+
+// appleScriptString renders s as an AppleScript string literal. Cartridge names
+// and paths come off a mounted volume, i.e. from outside this machine, so they
+// are never pasted into the script unquoted.
+func appleScriptString(s string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s)
+	return `"` + escaped + `"`
 }
