@@ -1,6 +1,9 @@
 # Design: standalone cartridge runtime
 
 > **Status (2026-07-26):** In progress on `refactor/cartridge-standalone-runtime`.
+> W1–W8 have landed; W9 has landed in part (the CLI, plus cartridge detection in
+> the menubar) and W10 is outstanding. Per-workstream detail is in §9; the
+> practical guide to what exists today is [usage.md](usage.md).
 > This document is the architecture of record for the refactor; it supersedes the
 > deferred DiskArbitration recommendation in `docs/instance-floppies/prd.md` §8.D.
 
@@ -170,6 +173,13 @@ volume at `/Volumes/bladerunner-<name>`, and capture the real mountpoint *and BS
 device node* by parsing `hdiutil attach -plist`. A `--private-mount` flag retains
 today's behaviour for CI, `scripts/smoke-cartridge.sh`, and headless use.
 
+*As landed:* the policy is a value, `cartridge.MountPolicy`, whose zero value
+resolves to `MountBrowsable`; `MountPrivate` keeps the old dictated-mountpoint
+behaviour and is what `br disk pack` (and `cartridge.Attach`) use. It is not
+surfaced as a `--private-mount` CLI flag — no boot path needed one, and pack
+being pinned to the private policy is what removes the pack-vs-boot mountpoint
+collision listed in §10.
+
 Reading the mountpoint back instead of dictating it also handles name-collision
 suffixing (`bladerunner-demo 1`) for free.
 
@@ -238,40 +248,82 @@ silently see nothing.
 
 ## 9. Workstreams
 
-| ID | Title | Depends on |
-|---|---|---|
-| W1 | Orderly drain on every shutdown path | — |
-| W2 | Lift cartridge semantics; capture dev node; format version | — |
-| W3 | Per-instance ports, derived OIDC issuer, per-instance ssh config | — |
-| W4 | Extract VM lifecycle into `internal/vmhost` | W1, W2, W3 |
-| W5 | `br vmd` holder mode + instance registry | W4 |
-| W6 | `internal/diskarb` cgo bridge | — |
-| W7 | Unmount veto in the holder + browsable mounts | W5, W6 |
-| W8 | Mount detection and boot prompt in the manager | W5, W6 |
-| W9 | Instance-aware CLI and menubar | W3, W5 |
-| W10 | Cartridge self-containment and persistence | W2, W7 |
+| ID | Title | Depends on | Status |
+|---|---|---|---|
+| W1 | Orderly drain on every shutdown path | — | **done** — `vm.drainGuest` + `StopOutcome`; `br stop` now carries a drain budget and waits for `Stopped`, forcing only on expiry |
+| W2 | Lift cartridge semantics; capture dev node; format version | — | **done** — `internal/cartridge` owns open/verify/detect; `Mount.DevNode`, `cartridge.json`, `FormatVersion` |
+| W3 | Per-instance ports, derived OIDC issuer, per-instance ssh config | — | **done** — `internal/portalloc`, `config.AssignPorts` re-derives `OIDCIssuerURL`, `ssh/config.d/<name>` fragments |
+| W4 | Extract VM lifecycle into `internal/vmhost` | W1, W2, W3 | **done** — `Spec`/`Host`/`Observer`, ordered steps with reverse teardown |
+| W5 | `br vmd` holder mode + instance registry | W4 | **done** — hidden `br vmd`, `internal/instance` registry, `spawnHolder` detached launcher. Its production caller is the mount watcher (W8); `br start` and `br boot` still run a `Host` in the foreground |
+| W6 | `internal/diskarb` cgo bridge | — | **done** — dispatch-queue session, appear/disappear/unmount-approval watches, `_other.go` stub |
+| W7 | Unmount veto in the holder + browsable mounts | W5, W6 | **done** — `StepUnmountVeto` + `decideUnmount` + background drain; `cartridge.MountPolicy` with `MountBrowsable` as the default and the real mountpoint read back from `hdiutil attach -plist`. `br disk pack` stays on `MountPrivate`, which is what keeps pack and boot off one mountpoint. No CLI flag exposes the private policy for a boot |
+| W8 | Mount detection and boot prompt in the manager | W5, W6 | **done** — `decideForVolume` (pure, name-filter → held-check → `cartridge.Detect`), `br watch` (`--yes`/`--auto`, `--once`, `--json`) and the menubar prompt; accept unmounts the read-only view and spawns a holder on the source file. The TCC risk is handled by *reporting* a permission failure, not by `Info.plist` keys — see below |
+| W9 | Instance-aware CLI and menubar | W3, W5 | **partial** — CLI done (`--instance`, `br instances`, instance-aware `status`/`stop`/`eject`/`shell`/`ssh`/`config`/incus targeting), and the menubar now offers detected cartridges. The rest of the menubar still assumes a single VM |
+| W10 | Cartridge self-containment and persistence | W2, W7 | **outstanding** — beyond the `cartridge.json` metadata W2 added |
 
 **Natural cut line:** W1 + W2 + W4 + W5 alone deliver a detached, orderly-shutdown
 cartridge holder with no cgo at all. W6/W7/W8 (DiskArbitration) is what buys goals
 4 and 5; cutting it leaves the product where PR #72 left it.
 
+All five goals in §1 are now met end to end. What is left is polish and hardening
+rather than architecture: the menubar's remaining single-VM assumptions (W9),
+cartridge self-containment (W10), the TCC entitlement keys §8 calls for (today a
+permission failure is reported to the user rather than pre-empted), and the
+unmitigated risks below.
+
 ---
 
 ## 10. Risks
 
+Annotated with what happened to each one. A risk that was retired is kept, not
+deleted: the reasoning is why the mitigation exists.
+
 - **W4 is the highest-regression item.** Lifting `runStart` (285 lines) is a wide,
   mechanical refactor of the most important and least-directly-tested function in
   the tree. Budget for it landing in two passes.
+  *Retired.* It landed as `internal/vmhost`, with the lifecycle expressed as an
+  ordered list of named steps so that "teardown is the exact reverse of startup,
+  skips steps that never started, and is idempotent" is unit-tested without a VM.
+  The residual regression surface is the front ends (`br start`, `br boot`) that
+  used to own the code, not the sequence itself.
 - **Advisory-only veto** (§7) — mitigated by, not replaced by, crash consistency.
+  *Live, and now user-visible.* The veto is in (`StepUnmountVeto`), and so is the
+  crash-consistency work it leans on: `Stop`/`Eject` genuinely wait for
+  `VirtualMachineStateStopped` before the VMM is released. Force-eject still
+  wins, and `docs/cartridge-runtime/usage.md` says so in as many words.
 - **cgo + DiskArbitration is new surface** in an otherwise pure-Go + hdiutil-exec
   repo. `cgo.Handle` lifetime vs `DAUnregisterCallback` ordering is the classic bug.
+  *Addressed, not eliminated.* `internal/diskarb` cancels in a fixed order — mark
+  canceled, `DAUnregisterCallback`, drain the serial queue with a
+  `dispatch_sync` barrier, and only then `Handle.Delete()` — with the session
+  lock released before the barrier so a callback canceling itself cannot
+  deadlock. This remains the part of the tree where a mistake is a crash rather
+  than an error.
 - **Browsable mounts invert a documented decision** and expose users to accidental
   Finder ejects — each of which now costs a full VM shutdown.
+  *Realized, deliberately.* `MountBrowsable` is the default for a boot and there
+  is no CLI flag to opt out; `MountPrivate` survives for `br disk pack` and for
+  callers that need a deterministic mountpoint. The accidental-eject cost is
+  exactly what the veto in §7 exists to convert from "corruption" into "a
+  shutdown you did not mean to start".
 - **No admission control.** N holders means N VZ VMs and N guests' worth of
   committed RAM. A user who AirDrops four cartridges and boots them all can wedge
   the machine.
+  *Realized.* Per-instance ports (W3) removed the accidental limit of one VM at a
+  time, and nothing replaced it with a deliberate one. Documented as a
+  limitation; unmitigated in code.
 - **Two holders racing one cartridge.** Today the only mutual exclusion is a
   control-socket liveness probe, and `br disk pack` attaches at the same mountpoint
   `boot` uses. User-initiated mounts make this reachable.
+  *Narrowed, not closed.* Three things helped: the control listener now takes an
+  `O_EXCL` lock file before the dial-then-bind (removing the TOCTOU hole between
+  two racing starts on one state dir); `br disk pack` and `br boot` no longer
+  share a mountpoint (§6); and the mount watcher skips a volume an instance
+  already holds. Two *different* processes attaching the same image file
+  remains possible.
 - **GUI mode constrains holder threading** — the design depends on
   `DASessionSetDispatchQueue`, not `DASessionScheduleWithRunLoop`.
+  *Retired.* `internal/diskarb` uses a serial dispatch queue and never touches a
+  `CFRunLoop`, so the veto works in a headless holder and in one that has
+  surrendered its main thread to `vz.StartGraphicApplication`.
+

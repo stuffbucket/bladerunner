@@ -97,6 +97,9 @@ sign: build ## Codesign binary with virtualization entitlements
 smoke-cartridge: ## Live end-to-end cartridge smoke (pack -> boot -> RW share -> ACPI eject); needs codesign+network, ~5-10min
 	@./scripts/smoke-cartridge.sh
 
+smoke-holder: ## Live end-to-end holder smoke (spawn -> kill the spawner -> VM survives -> drain); needs codesign+network, ~5-15min
+	@./scripts/smoke-holder.sh
+
 check: fmt-check vet lint test ## Run fast checks (format, vet, lint, test)
 
 lint: ## Run golangci-lint

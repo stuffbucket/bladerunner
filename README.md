@@ -232,11 +232,13 @@ image sized to the disk plus headroom (override with `--size`), attaches it, wri
 the output path; `--ship` additionally produces a compressed read-only `.dmg`
 (the AirDrop artifact). `--arch` selects the root image's architecture.
 
-`br boot <cartridge>` mounts the image privately at
-`~/.local/state/bladerunner/mnt/<name>/`, roots the VM inside it
-(`root.img`, state under `state/`, the RW share at `share/`), and **owns** the
-mount — detaching it on exit. A `.dmg` is first converted to a working
-`.sparseimage` so the shipped read-only artifact stays pristine.
+`br boot <cartridge>` attaches the image browsably — macOS places the volume at
+`/Volumes/bladerunner-<name>`, where you can see and eject it — roots the VM
+inside it (`root.img`, state under `state/`, the RW share at `share/`), and
+**owns** the mount, detaching it on exit. A `.dmg` is first converted to a
+working `.sparseimage` so the shipped read-only artifact stays pristine.
+(`br disk pack` still attaches privately under the state dir, so packing and
+booting never contend for the same mountpoint.)
 
 The **RW share** is exposed to the guest over VirtioFS (tag `bladerunner-share`)
 and mounted at `/mnt/share` by a generated systemd `.mount` unit (with an fstab
@@ -256,6 +258,48 @@ share/               RW host↔guest VirtioFS folder
 
 Cartridges require macOS (they are backed by `hdiutil` + APFS sparse images);
 packing also needs `qemu-img`.
+
+## Instances
+
+Every running VM is owned by exactly one process: `br start`, or the minimal
+holder `br vmd` — an internal command, spawned detached (by `br watch` or the
+menubar, when a cartridge is inserted) so the VM survives the CLI and the
+menubar exiting. Either way that process binds the instance's control socket and
+publishes a registry entry under
+`~/.local/state/bladerunner/instances/<name>.json`, so any later `br` can find
+it — including a cartridge mounted somewhere the old directory scan never
+looked.
+
+```bash
+runner instances                  # list running VMs with their ports and holder PIDs
+runner status --instance <name>   # every verb takes --instance (env BLADERUNNER_INSTANCE)
+runner stop --instance <name>     # orderly drain of one specific VM
+runner watch                      # notice inserted cartridges and offer to boot them
+```
+
+With a single VM running there is nothing to choose and `--instance` can be
+omitted, so the single-VM workflow is unchanged. The default instance keeps the
+well-known ports (`6022` / `18443` / `18444` / `15556` / `15557`); every
+*additional* instance takes ephemeral ports instead of failing to bind, which is
+what lets several cartridges run side by side. `br instances` reports what each
+one actually got.
+
+A booted cartridge is mounted **browsably**, under `/Volumes`, precisely so it
+can be ejected by hand — because ejecting it is the gesture that spins the VM
+down. `br watch` (and the menubar) do the other half: a cartridge you AirDrop in
+and double-click is noticed, checked, and offered as a boot.
+
+Shutdown is a real drain on every path: the guest is asked to power itself off
+(ACPI), the host waits for it to genuinely reach the stopped state, and only
+when `--timeout` expires does it escalate to a forced stop — and say so. On a
+cartridge the holder additionally registers a DiskArbitration unmount-approval
+callback for its own volume, so asking macOS to eject the cartridge is answered
+with *"bladerunner is shutting down the VM on this cartridge"* and starts that
+same drain in the background; the volume unmounts once the guest is stopped.
+
+See [docs/cartridge-runtime/usage.md](docs/cartridge-runtime/usage.md) for the
+full workflow — pack, ship, boot several at once, eject safely — and for the
+limitations that come with it.
 
 ## Notes
 
