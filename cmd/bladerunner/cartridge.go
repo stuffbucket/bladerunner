@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/disk"
+	"github.com/stuffbucket/bladerunner/internal/instance"
+	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
 
@@ -254,29 +257,98 @@ var bootCartridge struct {
 }
 
 // cartridgeMountpoint returns the private mountpoint for a cartridge name:
-// <DefaultStateDir>/mnt/<name>. Not under /Volumes so the cartridge is invisible
-// in Finder and isolated per name.
+// <DefaultStateDir>/mnt/<name>. It is the mount target for the BUILD-side flows
+// (`br disk pack`), which need a deterministic location and must never contend
+// with a booted cartridge — a booted one is attached browsably, so macOS puts
+// it under /Volumes where the user can eject it.
 func cartridgeMountpoint(name string) string {
 	return cartridge.MountpointFor(config.DefaultStateDir(), name)
 }
 
+// cartridgeImageKey reduces a cartridge image path to the identity two boots of
+// the same cartridge share: the canonical path of the WORKING COPY they would
+// both attach. It is what makes "demo.dmg" and "demo.sparseimage" — and the
+// same file reached through a symlinked directory — one cartridge.
+func cartridgeImageKey(path string) string {
+	if path == "" {
+		return ""
+	}
+	return cartridge.CanonicalImagePath(cartridge.WorkingCopyPath(path))
+}
+
+// bootedCartridgeInstance returns the live instance already booted from the same
+// cartridge image as path, if any.
+//
+// It matches on the IMAGE, never on a mountpoint. A booted cartridge is mounted
+// wherever macOS chose to put it, so "is <state>/mnt/<name> live?" — which is
+// what this used to ask — is always false now, and every already-booted check
+// built on it silently passed.
+func bootedCartridgeInstance(path string) (instance.Entry, bool) {
+	want := cartridgeImageKey(path)
+	if want == "" {
+		return instance.Entry{}, false
+	}
+	entries, err := instance.List(config.DefaultStateDir())
+	if err != nil {
+		logging.L().Debug("list instance registry for boot", "err", err)
+	}
+	for i := range entries {
+		e := &entries[i]
+		if !instance.Alive(*e) {
+			continue
+		}
+		if cartridgeImageKey(e.SourcePath) == want || cartridgeImageKey(e.WorkingCopy) == want {
+			return *e, true
+		}
+	}
+	return instance.Entry{}, false
+}
+
+// errCartridgeAlreadyBooted is the sentinel behind every "that cartridge is
+// already running" refusal, so callers can recognize one.
+var errCartridgeAlreadyBooted = errors.New("cartridge is already booted")
+
+// ensureCartridgeBootable refuses a boot of a cartridge that is already running,
+// with a message naming the instance to eject.
+//
+// Two checks, in order of friendliness. The registry knows the instance NAME,
+// which is what the user has to type next; the on-image claim knows about a
+// holder that has not published an entry yet (or one started by a build that
+// does not publish at all). Neither is the protection — cartridge.Open takes an
+// exclusive claim, and that is what actually makes the race safe — they exist
+// so the common case reads as a sentence instead of a lock error.
+func ensureCartridgeBootable(path, name string) error {
+	if e, ok := bootedCartridgeInstance(path); ok {
+		return fmt.Errorf("%w: %q is running as instance %q (pid %d); eject it with 'br eject %s'",
+			errCartridgeAlreadyBooted, name, e.Name, e.PID, e.Name)
+	}
+	if holder, busy := cartridge.Busy(path); busy {
+		return fmt.Errorf("%w: %q is held by %s; eject it first",
+			errCartridgeAlreadyBooted, name, holder)
+	}
+	return nil
+}
+
 // runBootCartridge boots a .sparseimage/.dmg cartridge. Opening it converts a
 // shipped .dmg to a writable working copy (the read-only ship form stays
-// pristine), attaches the image privately, and verifies its layout; the VM is
-// then rooted inside the mount and the foreground runStart owns it — detaching
-// on exit.
+// pristine), attaches the image where the user can eject it, and verifies its
+// layout; the VM is then rooted inside the mount and the foreground runStart
+// owns it — detaching on exit.
 func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	name := cartridge.NameFromPath(path)
 	if !disk.ValidName(name) {
 		return jsonOrError(fmt.Errorf("invalid cartridge name %q derived from %s", name, path))
 	}
 
-	baseDir := cartridgeMountpoint(name)
-	if control.NewClient(baseDir).IsRunning() {
-		return jsonOrError(fmt.Errorf("cartridge %q is already booted (use 'br eject' first)", name))
+	if err := ensureCartridgeBootable(path, name); err != nil {
+		return jsonOrError(err)
 	}
 
-	opened, err := cartridge.Open(path, cartridge.OpenOptions{Mountpoint: baseDir, Name: name})
+	// No mountpoint is passed: the default policy is browsable, so macOS picks
+	// the location (under /Volumes, visible and ejectable in Finder) and Open
+	// reports back where it landed. Predicting it here is exactly the mistake
+	// this file used to make.
+	opened, err := cartridge.Open(path, cartridge.OpenOptions{Name: name})
 	if err != nil {
 		return jsonOrError(err)
 	}
@@ -364,23 +436,63 @@ type cartridgeStatus struct {
 	Booted     bool   `json:"booted"`
 }
 
-// listAttachedCartridges reports every cartridge attached under the state dir
-// along with its boot state (a live control socket => booted, else
+// listAttachedCartridges reports every cartridge currently attached to this
+// host along with its boot state (a live control socket => booted, else
 // ejected/idle). Nothing attached yields an empty list (no error).
+//
+// Two sources, unioned and deduplicated by mountpoint:
+//
+//  1. the instance registry, which is the only thing that knows about a booted
+//     cartridge now that one is mounted under /Volumes rather than at a path
+//     bladerunner picked;
+//  2. the legacy <state>/mnt scan, which still finds a privately mounted
+//     cartridge (a scripted boot, or one attached by an older build).
+//
+// The registry comes first so a booted cartridge is reported under the name the
+// user typed.
 func listAttachedCartridges() []cartridgeStatus {
-	attached := cartridge.ListAttached(config.DefaultStateDir())
-	if len(attached) == 0 {
-		// Stay nil so `br disks --json` keeps reporting null, not [].
-		return nil
-	}
-	out := make([]cartridgeStatus, 0, len(attached))
-	for _, a := range attached {
+	root := config.DefaultStateDir()
+	var out []cartridgeStatus
+	seen := make(map[string]bool)
+
+	add := func(name, mountpoint string) {
+		if name == "" || mountpoint == "" {
+			return
+		}
+		key := filepath.Clean(mountpoint)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
 		out = append(out, cartridgeStatus{
-			Name:       a.Name,
-			Mountpoint: a.Mountpoint,
-			Booted:     control.NewClient(a.Mountpoint).IsRunning(),
+			Name:       name,
+			Mountpoint: mountpoint,
+			Booted:     control.NewClient(mountpoint).IsRunning(),
 		})
 	}
+
+	entries, err := instance.List(root)
+	if err != nil {
+		logging.L().Debug("list instance registry for disks", "err", err)
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.Kind != instance.KindCartridge || !instance.Alive(*e) {
+			continue
+		}
+		mountpoint := e.Mountpoint
+		if mountpoint == "" {
+			// A cartridge instance is rooted AT its mountpoint.
+			mountpoint = e.StateDir
+		}
+		add(e.Name, mountpoint)
+	}
+	for _, a := range cartridge.ListAttached(root) {
+		add(a.Name, a.Mountpoint)
+	}
+
+	// Stay nil when there is nothing, so `br disks --json` keeps reporting null
+	// rather than [].
 	return out
 }
 

@@ -1,12 +1,16 @@
 package main
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
 func TestClassifyBootArgCartridge(t *testing.T) {
@@ -125,4 +129,106 @@ func TestDetachBootCartridgeNoOpWhenNoCartridge(t *testing.T) {
 	bootCartridge.opened = nil
 	bootCartridge.mountpoint = ""
 	detachBootCartridge()
+}
+
+// `br boot` must refuse a cartridge that is already running, and it must
+// recognize it however the user spelled it: the shipped .dmg and the working
+// .sparseimage the holder converted are one cartridge.
+//
+// The old guard probed a control socket under <state>/mnt/<name>, which a
+// browsable cartridge never occupies — so it never fired, and the second boot
+// went on to unlink the first VM's live disk.
+func TestEnsureCartridgeBootableRefusesARunningCartridge(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", root)
+	downloads := t.TempDir()
+	source := filepath.Join(downloads, "demo"+cartridge.DMGExt)
+	working := filepath.Join(downloads, "demo"+cartridge.SparseExt)
+
+	if err := instance.Write(root, instance.Entry{
+		Name:        "demo",
+		Kind:        instance.KindCartridge,
+		StateDir:    filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName("demo")),
+		Mountpoint:  filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName("demo")),
+		SourcePath:  source,
+		WorkingCopy: working,
+		PID:         os.Getpid(), // this test process is certainly alive
+	}); err != nil {
+		t.Fatalf("write registry entry: %v", err)
+	}
+
+	for _, spelling := range []string{source, working} {
+		err := ensureCartridgeBootable(spelling, "demo")
+		if !errors.Is(err, errCartridgeAlreadyBooted) {
+			t.Fatalf("ensureCartridgeBootable(%q) = %v, want errCartridgeAlreadyBooted", spelling, err)
+		}
+		// The refusal has to say what to do about it.
+		if !strings.Contains(err.Error(), "br eject demo") {
+			t.Errorf("error %q does not say how to release the cartridge", err)
+		}
+	}
+
+	// An unrelated cartridge is unaffected.
+	if err := ensureCartridgeBootable(filepath.Join(downloads, "other"+cartridge.DMGExt), "other"); err != nil {
+		t.Fatalf("an unrelated cartridge was refused: %v", err)
+	}
+}
+
+// A dead holder's entry must not block a boot: the registry is advisory and
+// crash-tolerant.
+func TestEnsureCartridgeBootableIgnoresADeadHolder(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", root)
+	downloads := t.TempDir()
+	source := filepath.Join(downloads, "demo"+cartridge.DMGExt)
+
+	if err := instance.Write(root, instance.Entry{
+		Name:       "demo",
+		Kind:       instance.KindCartridge,
+		StateDir:   filepath.Join(root, "gone"),
+		SourcePath: source,
+		PID:        -1, // no such process, and no control socket either
+	}); err != nil {
+		t.Fatalf("write registry entry: %v", err)
+	}
+
+	if err := ensureCartridgeBootable(source, "demo"); err != nil {
+		t.Fatalf("a dead holder blocked the boot: %v", err)
+	}
+}
+
+// `br disks` lists a booted cartridge. It is mounted under /Volumes now, so the
+// <state>/mnt scan that used to be the only source always came back empty and
+// the "cartridges" section was permanently absent.
+func TestListAttachedCartridgesSeesRegisteredCartridges(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", root)
+
+	if got := listAttachedCartridges(); got != nil {
+		t.Fatalf("nothing attached must stay nil for --json, got %+v", got)
+	}
+
+	mount := filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName("demo"))
+	for _, e := range []instance.Entry{
+		{
+			Name: "demo", Kind: instance.KindCartridge,
+			StateDir: mount, Mountpoint: mount, PID: os.Getpid(),
+		},
+		// A disk slot is not a cartridge and must not be listed as one.
+		{Name: "builder", Kind: instance.KindDisk, StateDir: filepath.Join(root, "disks", "builder"), PID: os.Getpid()},
+		// A dead cartridge holder is not attached either.
+		{Name: "ghost", Kind: instance.KindCartridge, StateDir: filepath.Join(root, "gone"), PID: -1},
+	} {
+		if err := instance.Write(root, e); err != nil {
+			t.Fatalf("write registry entry %q: %v", e.Name, err)
+		}
+	}
+
+	got := listAttachedCartridges()
+	if len(got) != 1 {
+		t.Fatalf("listAttachedCartridges() = %+v, want exactly the booted cartridge", got)
+	}
+	if got[0].Name != "demo" || got[0].Mountpoint != mount {
+		t.Errorf("cartridge = %+v, want demo at %q", got[0], mount)
+	}
 }

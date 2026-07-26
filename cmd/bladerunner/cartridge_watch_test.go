@@ -169,7 +169,7 @@ func TestDecideForVolume(t *testing.T) {
 			name:        "cartridge we already hold is ignored, not re-offered",
 			disk:        cartDisk,
 			detected:    bootableDetected("demo"),
-			held:        func(string, string) (string, bool) { return "demo", true },
+			held:        func(heldVolume) (string, bool) { return "demo", true },
 			wantVerdict: verdictIgnore,
 			wantHeldBy:  "demo",
 			wantDetects: 0,
@@ -203,23 +203,28 @@ func TestDecideForVolume(t *testing.T) {
 	}
 }
 
-// A held cartridge must be recognized even when only one of the two keys
-// matches, since a holder may have recorded the whole disk while
-// DiskArbitration reports the slice.
+// A held cartridge must be recognized when ANY of the three keys matches: a
+// holder may have recorded the whole disk while DiskArbitration reports the
+// slice, and a second Finder mount of the same file shares neither its
+// mountpoint nor its device — only the image behind it.
 func TestHeldVolumesAgainstRegistry(t *testing.T) {
 	root := t.TempDir()
 	mount := filepath.Join(root, "mnt", "demo")
 	if err := os.MkdirAll(mount, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	source := filepath.Join(root, "Downloads", "demo.dmg")
+	working := filepath.Join(root, "Downloads", "demo.sparseimage")
 
 	live := instance.Entry{
-		Name:       "demo",
-		Kind:       instance.KindCartridge,
-		StateDir:   mount,
-		Mountpoint: mount,
-		DevNode:    "/dev/disk9",
-		PID:        os.Getpid(), // this test process is certainly alive
+		Name:        "demo",
+		Kind:        instance.KindCartridge,
+		StateDir:    mount,
+		Mountpoint:  mount,
+		DevNode:     "/dev/disk9",
+		SourcePath:  source,
+		WorkingCopy: working,
+		PID:         os.Getpid(), // this test process is certainly alive
 	}
 	dead := instance.Entry{
 		Name:       "ghost",
@@ -227,6 +232,7 @@ func TestHeldVolumesAgainstRegistry(t *testing.T) {
 		StateDir:   filepath.Join(root, "mnt", "ghost"),
 		Mountpoint: filepath.Join(root, "mnt", "ghost"),
 		DevNode:    "/dev/disk12",
+		SourcePath: filepath.Join(root, "Downloads", "ghost.dmg"),
 	}
 	for _, e := range []instance.Entry{live, dead} {
 		if err := instance.Write(root, e); err != nil {
@@ -236,26 +242,82 @@ func TestHeldVolumesAgainstRegistry(t *testing.T) {
 
 	held := heldVolumes(root)
 	tests := []struct {
-		name       string
-		mountpoint string
-		devNode    string
-		wantName   string
-		wantHeld   bool
+		name     string
+		volume   heldVolume
+		wantName string
+		wantHeld bool
 	}{
-		{name: "by mountpoint", mountpoint: mount, wantName: "demo", wantHeld: true},
-		{name: "by the slice of the held whole disk", devNode: "/dev/disk9s1", wantName: "demo", wantHeld: true},
-		{name: "by bare bsd name", devNode: "disk9s1s2", wantName: "demo", wantHeld: true},
-		{name: "a different disk is not held", mountpoint: "/Volumes/bladerunner-other", devNode: "/dev/disk4s1"},
-		{name: "a dead holder does not hold anything", mountpoint: dead.Mountpoint, devNode: dead.DevNode},
+		{name: "by mountpoint", volume: heldVolume{Mountpoint: mount}, wantName: "demo", wantHeld: true},
+		{name: "by the slice of the held whole disk", volume: heldVolume{DevNode: "/dev/disk9s1"}, wantName: "demo", wantHeld: true},
+		{name: "by bare bsd name", volume: heldVolume{DevNode: "disk9s1s2"}, wantName: "demo", wantHeld: true},
+		{
+			// A SECOND Finder mount of the booted .dmg: macOS gives it its own
+			// volume path and its own device, so only the source connects them.
+			name: "by the source image of a second, independent mount",
+			volume: heldVolume{
+				Mountpoint: "/Volumes/bladerunner-demo 1",
+				DevNode:    "/dev/disk12s1",
+				SourcePath: source,
+			},
+			wantName: "demo", wantHeld: true,
+		},
+		{
+			name:     "by the working copy the holder converted",
+			volume:   heldVolume{Mountpoint: "/Volumes/bladerunner-demo 1", SourcePath: working},
+			wantName: "demo", wantHeld: true,
+		},
+		{
+			name:   "a different disk is not held",
+			volume: heldVolume{Mountpoint: "/Volumes/bladerunner-other", DevNode: "/dev/disk4s1", SourcePath: filepath.Join(root, "Downloads", "other.dmg")},
+		},
+		{
+			name:   "a dead holder does not hold anything",
+			volume: heldVolume{Mountpoint: dead.Mountpoint, DevNode: dead.DevNode, SourcePath: dead.SourcePath},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			name, ok := held(tt.mountpoint, tt.devNode)
+			name, ok := held(tt.volume)
 			if ok != tt.wantHeld || name != tt.wantName {
-				t.Errorf("held(%q, %q) = (%q, %v), want (%q, %v)",
-					tt.mountpoint, tt.devNode, name, ok, tt.wantName, tt.wantHeld)
+				t.Errorf("held(%+v) = (%q, %v), want (%q, %v)",
+					tt.volume, name, ok, tt.wantName, tt.wantHeld)
 			}
 		})
+	}
+}
+
+// The accept path's regression: a second mount of a cartridge that is already
+// booted must be recognized as held even though its mountpoint and device are
+// brand new. Matching only on those two — as the watcher did — offered the
+// cartridge again, and accepting the offer booted the same image twice.
+func TestDecideForVolumeIgnoresASecondMountOfABootedCartridge(t *testing.T) {
+	source := "/Users/someone/Downloads/demo.dmg"
+	// The holder's own mount is /Volumes/bladerunner-demo on disk9; this is the
+	// SECOND mount macOS made of the same file.
+	second := diskarb.DiskInfo{
+		BSDName:    "disk12s1",
+		VolumeName: "bladerunner-demo 1",
+		VolumePath: "/Volumes/bladerunner-demo 1",
+		VolumeKind: "apfs",
+	}
+	detected := bootableDetected("demo")
+	detected.Mountpoint = second.VolumePath
+	detected.DevNode = "/dev/disk12s1"
+	detected.BackingImage = source
+
+	// A holder that recorded only what it itself attached: another mountpoint,
+	// another device, the same image.
+	held := func(v heldVolume) (string, bool) {
+		if v.SourcePath != "" && cartridgeImageKey(v.SourcePath) == cartridgeImageKey(source) {
+			return "demo", true
+		}
+		return "", false
+	}
+
+	got := decideForVolume(second, detectReturning(detected, nil, nil), held)
+	if got.Verdict != verdictIgnore || got.HeldBy != "demo" {
+		t.Fatalf("verdict = %q heldBy = %q, want ignore/demo (booting it again would run one image twice)",
+			got.Verdict, got.HeldBy)
 	}
 }
 

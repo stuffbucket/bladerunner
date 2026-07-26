@@ -24,7 +24,6 @@ import (
 
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
-	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/diskarb"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
@@ -101,9 +100,21 @@ const (
 // decision can be tested without a filesystem. It is cartridge.Detect.
 type detectFunc func(volumePath string) (*cartridge.Detected, error)
 
-// heldFunc reports the instance already holding a volume, matched on mountpoint
-// or device node. A nil heldFunc means "nothing is held".
-type heldFunc func(mountpoint, devNode string) (name string, held bool)
+// heldVolume is one volume offered to a held lookup. SourcePath is only known
+// after Detect has traced the mount back to the file behind it, so the lookup
+// is consulted twice: once cheaply, and once more with the source.
+type heldVolume struct {
+	// Mountpoint is where the volume is mounted.
+	Mountpoint string
+	// DevNode is the BSD device backing it.
+	DevNode string
+	// SourcePath is the .dmg/.sparseimage file behind the mount, when known.
+	SourcePath string
+}
+
+// heldFunc reports the instance already holding a volume. A nil heldFunc means
+// "nothing is held".
+type heldFunc func(v heldVolume) (name string, held bool)
 
 // decideForVolume classifies one appearing volume. It is pure apart from the
 // two injected lookups, and it is the whole of the interesting logic.
@@ -116,7 +127,9 @@ type heldFunc func(mountpoint, devNode string) (name string, held bool)
 //  2. then "do we already hold it?", because a running holder's own cartridge
 //     mount appears exactly like a fresh insertion, and offering to boot a
 //     cartridge that is already booted is a bug;
-//  3. only then the authoritative Detect, which reads the volume.
+//  3. only then the authoritative Detect, which reads the volume — and asks
+//     "do we already hold it?" a second time, now that the image file behind
+//     the mount is known.
 func decideForVolume(d diskarb.DiskInfo, detect detectFunc, held heldFunc) watchAction {
 	a := watchAction{
 		Verdict:    verdictIgnore,
@@ -135,17 +148,15 @@ func decideForVolume(d diskarb.DiskInfo, detect detectFunc, held heldFunc) watch
 		a.Reason = reasonNotCandidate
 		return a
 	}
-	if name, ok := lookupHeld(held, a.Mountpoint, a.DevNode); ok {
-		a.Name, a.HeldBy = name, name
-		a.Reason = fmt.Sprintf("is already running as instance %q", name)
-		return a
+	if name, ok := lookupHeld(held, heldVolume{Mountpoint: a.Mountpoint, DevNode: a.DevNode}); ok {
+		return a.heldBy(name)
 	}
-	return decideDetected(a, detect)
+	return decideDetected(a, detect, held)
 }
 
 // decideDetected runs the authoritative check on a volume that passed the
 // name filter and turns the three-valued verdict into an action.
-func decideDetected(a watchAction, detect detectFunc) watchAction {
+func decideDetected(a watchAction, detect detectFunc, held heldFunc) watchAction {
 	det, err := detect(a.Mountpoint)
 	if err != nil {
 		return a.warn(fmt.Sprintf("could not be inspected: %v", err))
@@ -170,7 +181,7 @@ func decideDetected(a watchAction, detect detectFunc) watchAction {
 	case cartridge.StatusUnbootable:
 		return a.warn(det.Reason)
 	case cartridge.StatusBootable:
-		// Handled below, where the two remaining preconditions are checked.
+		// Handled below, where the remaining preconditions are checked.
 	}
 
 	// Bootable. Two things still have to hold: the name must be usable as an
@@ -182,7 +193,32 @@ func decideDetected(a watchAction, detect detectFunc) watchAction {
 		return a.warn(reasonNoBackingImage)
 	}
 	a.SourcePath = det.BackingImage
+
+	// Ask again now that the image is known. A SECOND mount of a cartridge we
+	// are already running shares neither mountpoint nor device with the
+	// holder's own — macOS calls it "/Volumes/bladerunner-demo 1" on a fresh
+	// device — so the file behind it is the only thing that connects the two.
+	if name, ok := lookupHeld(held, heldVolume{
+		Mountpoint: a.Mountpoint,
+		DevNode:    a.DevNode,
+		SourcePath: a.SourcePath,
+	}); ok {
+		return a.heldBy(name)
+	}
+
 	a.Verdict = verdictOffer
+	return a
+}
+
+// heldBy returns a copy of the action marked as a volume a live instance
+// already owns: nothing to offer, and nothing to warn about.
+func (a watchAction) heldBy(name string) watchAction {
+	a.Verdict = verdictIgnore
+	a.HeldBy = name
+	if a.Name == "" {
+		a.Name = name
+	}
+	a.Reason = fmt.Sprintf("is already running as instance %q", name)
 	return a
 }
 
@@ -278,19 +314,27 @@ func wholeDiskUnit(devNode string) string {
 }
 
 // lookupHeld consults a possibly-nil heldFunc.
-func lookupHeld(held heldFunc, mountpoint, devNode string) (string, bool) {
+func lookupHeld(held heldFunc, v heldVolume) (string, bool) {
 	if held == nil {
 		return "", false
 	}
-	return held(mountpoint, devNode)
+	return held(v)
 }
 
 // heldVolumes indexes the volumes currently held by a live instance, so the
-// watcher can ignore the mount a holder made for itself.
+// watcher can ignore the mount a holder made for itself — and the second mount
+// a user made of the same file.
 //
-// Both keys are used because either can be the only one available: the registry
-// records a cartridge's Mountpoint and DevNode, but an instance written by an
-// older holder may carry only the mountpoint (as its state dir).
+// Three keys, because each is the only one available in some real case:
+//
+//   - the SOURCE IMAGE, which is the only thing shared by a holder's mount and
+//     an independent Finder mount of the same .dmg (different mountpoint,
+//     different device, same file). Both the source and the working copy are
+//     indexed, since the two spellings name one cartridge;
+//   - the DEVICE, matched on the whole-disk unit, because a holder records the
+//     disk it attached while DiskArbitration reports the slice;
+//   - the MOUNTPOINT, for an instance written by an older holder that carries
+//     only its state dir.
 func heldVolumes(root string) heldFunc {
 	entries, err := instance.List(root)
 	if err != nil {
@@ -298,6 +342,7 @@ func heldVolumes(root string) heldFunc {
 	}
 	mounts := make(map[string]string, len(entries))
 	devs := make(map[string]string, len(entries))
+	sources := make(map[string]string, len(entries))
 	for i := range entries {
 		e := &entries[i]
 		if !instance.Alive(*e) {
@@ -311,14 +356,24 @@ func heldVolumes(root string) heldFunc {
 		if unit := wholeDiskUnit(e.DevNode); unit != "" {
 			devs[unit] = e.Name
 		}
+		for _, image := range []string{e.SourcePath, e.WorkingCopy} {
+			if key := cartridgeImageKey(image); key != "" {
+				sources[key] = e.Name
+			}
+		}
 	}
-	return func(mountpoint, devNode string) (string, bool) {
-		if unit := wholeDiskUnit(devNode); unit != "" {
+	return func(v heldVolume) (string, bool) {
+		if key := cartridgeImageKey(v.SourcePath); key != "" {
+			if name, ok := sources[key]; ok {
+				return name, true
+			}
+		}
+		if unit := wholeDiskUnit(v.DevNode); unit != "" {
 			if name, ok := devs[unit]; ok {
 				return name, true
 			}
 		}
-		for _, k := range pathKeys(mountpoint) {
+		for _, k := range pathKeys(v.Mountpoint) {
 			if name, ok := mounts[k]; ok {
 				return name, true
 			}
@@ -481,16 +536,19 @@ var errNoCartridgeSource = errors.New("no cartridge image file to boot")
 // so the Finder mount is not what gets booted. Leaving it attached would strand
 // a second mount of the same image on the desktop and hand the user an eject
 // gesture that no longer drains anything.
+//
+// Because that unmount is destructive to the user's view of the volume, the
+// "is it already running?" question is asked BEFORE it — by image, not by
+// mountpoint, since the mount this offer came from is by definition not the
+// holder's. A spawn that fails afterwards says so plainly, including that the
+// volume is now unmounted; claiming success would be worse than the failure.
 func bootDetectedCartridge(a watchAction) (int, error) {
 	if a.SourcePath == "" {
 		return 0, errNoCartridgeSource
 	}
 	root := config.DefaultStateDir()
-	// Belt and braces over the registry check in decideForVolume: a holder
-	// that has bound its control socket but not yet published its registry
-	// entry is invisible to instance.List.
-	if control.NewClient(cartridge.MountpointFor(root, a.Name)).IsRunning() {
-		return 0, fmt.Errorf("cartridge %q is already booted", a.Name)
+	if err := ensureCartridgeBootable(a.SourcePath, a.Name); err != nil {
+		return 0, err
 	}
 	if a.Mountpoint != "" {
 		if err := cartridge.Detach(a.Mountpoint); err != nil {
@@ -499,7 +557,8 @@ func bootDetectedCartridge(a watchAction) (int, error) {
 	}
 	pid, err := spawnHolder(holderSpawn{StateDir: root, Name: a.Name, CartridgePath: a.SourcePath})
 	if err != nil {
-		return 0, fmt.Errorf("boot cartridge %q: %w", a.Name, err)
+		return 0, fmt.Errorf("boot cartridge %q: %w (its volume was unmounted first; retry with 'br boot %s')",
+			a.Name, err, a.SourcePath)
 	}
 	return pid, nil
 }

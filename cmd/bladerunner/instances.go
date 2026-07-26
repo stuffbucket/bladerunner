@@ -92,9 +92,18 @@ func (r resolvedInstance) isDefaultSlot() bool {
 }
 
 // instanceName returns the name this instance's ssh config and registry entry
-// were written under. It is derived exactly the way the writer derives it
-// (config.Config.InstanceName), so the alias always matches the generated block.
+// were written under.
+//
+// The registry name wins when there is one, because that is what the holder
+// published and what it named its ssh config.d fragment. Deriving the name from
+// the state directory is only a fallback for a legacy instance that has no
+// entry — and it is WRONG for a cartridge, whose state dir is now
+// /Volumes/bladerunner-<name>: the basename would be "bladerunner-demo" and the
+// generated alias is "demo".
 func (r resolvedInstance) instanceName() string {
+	if r.Name != "" {
+		return r.Name
+	}
 	cfg := &config.Config{VMDir: r.StateDir}
 	return cfg.InstanceName()
 }
@@ -223,13 +232,42 @@ func (s instanceScanner) resolveNamed(name string) (resolvedInstance, error) {
 	if name == defaultSlotAlias || name == config.DefaultInstanceName {
 		return s.mark(s.flatSlot()), nil
 	}
-	if mp := cartridge.MountpointFor(s.root, name); cartridge.IsAttached(mp) {
+	if mp, ok := attachedCartridgeMountpoint(s.root, name); ok {
 		return s.mark(resolvedInstance{Name: name, Kind: instance.KindCartridge, StateDir: mp, Mountpoint: mp}), nil
 	}
 	if dir := filepath.Join(s.root, disksDirName, name); isDirectory(dir) {
 		return s.mark(resolvedInstance{Name: name, Kind: instance.KindDisk, StateDir: dir}), nil
 	}
 	return resolvedInstance{}, s.unknownError(name)
+}
+
+// cartridgeMountCandidates lists every place a cartridge named name can be
+// mounted on this host, in the order they should be tried:
+//
+//  1. the private slot <state>/mnt/<name>, used by scripted and headless boots
+//     (and by every boot before mounting became browsable);
+//  2. /Volumes/bladerunner-<name>, where macOS puts a browsable cartridge —
+//     which is where a `br boot` puts one today.
+//
+// The second is a PREDICTION: macOS appends a collision suffix when the name is
+// taken, so a cartridge can be mounted somewhere this list does not name. That
+// is exactly why the registry is consulted first and this is only the fallback.
+func cartridgeMountCandidates(root, name string) []string {
+	return []string{
+		cartridge.MountpointFor(root, name),
+		cartridge.BrowsableMountpointFor(name),
+	}
+}
+
+// attachedCartridgeMountpoint finds a cartridge of the given name that is
+// mounted but has no registry entry.
+func attachedCartridgeMountpoint(root, name string) (string, bool) {
+	for _, mp := range cartridgeMountCandidates(root, name) {
+		if cartridge.IsAttached(mp) {
+			return mp, true
+		}
+	}
+	return "", false
 }
 
 // mark stamps an explicitly selected instance with its liveness.

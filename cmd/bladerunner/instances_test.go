@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 )
@@ -447,5 +448,82 @@ func TestEjectSlotLabelKeepsTheLegacyDefaultName(t *testing.T) {
 	}
 	if got := ejectSlotLabel(resolvedInstance{Name: "demo", StateDir: filepath.Join(root, "mnt", "demo")}); got != "demo" {
 		t.Errorf("ejectSlotLabel(cartridge) = %q, want %q", got, "demo")
+	}
+}
+
+// A cartridge is addressed by the name the user typed, not by the volume macOS
+// mounted it as. The state dir of a booted cartridge is
+// /Volumes/bladerunner-demo, so deriving the alias from its basename produced
+// "bladerunner-demo" — an ssh alias and an --instance name nobody could guess.
+func TestInstanceNamePrefersTheRegisteredName(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", root)
+
+	cart := resolvedInstance{
+		Name:       "demo",
+		Kind:       instance.KindCartridge,
+		StateDir:   filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName("demo")),
+		Mountpoint: filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName("demo")),
+	}
+	if got := cart.instanceName(); got != "demo" {
+		t.Fatalf("instanceName() = %q, want demo (the registry name, not the mountpoint basename)", got)
+	}
+	// With no name at all — a legacy slot — the state dir still supplies one.
+	legacy := resolvedInstance{StateDir: filepath.Join(root, disksDirName, "builder")}
+	if got := legacy.instanceName(); got != "builder" {
+		t.Errorf("legacy instanceName() = %q, want builder", got)
+	}
+}
+
+// `br eject demo` and `--instance demo` must reach a cartridge booted with
+// `br boot demo.dmg`, whose state dir is a /Volumes path bladerunner did not
+// choose. The registry is what makes that possible; resolution must go through
+// it before any path guess.
+func TestEjectResolvesACartridgeByItsRegisteredName(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", root)
+	mount := filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName("demo"))
+	register(t, root, instance.Entry{
+		Name:       "demo",
+		Kind:       instance.KindCartridge,
+		StateDir:   mount,
+		Mountpoint: mount,
+		SourcePath: "/Users/someone/Downloads/demo.dmg",
+		PID:        os.Getpid(),
+	})
+
+	baseDir, slot, err := resolveEjectSlot("demo")
+	if err != nil {
+		t.Fatalf("resolveEjectSlot(demo): %v", err)
+	}
+	if slot != "demo" {
+		t.Errorf("slot = %q, want demo", slot)
+	}
+	if baseDir != mount {
+		t.Fatalf("baseDir = %q, want the cartridge's real mountpoint %q", baseDir, mount)
+	}
+}
+
+// The unregistered fallback has to look where a browsable cartridge actually
+// lands, not only at the private slot that browsable mounts never occupy.
+func TestCartridgeMountCandidatesCoverBothMountPolicies(t *testing.T) {
+	root := t.TempDir()
+	got := cartridgeMountCandidates(root, "demo")
+
+	want := map[string]bool{
+		filepath.Join(root, "mnt", "demo"):                                 false,
+		filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName("demo")): false,
+	}
+	for _, mp := range got {
+		if _, ok := want[mp]; !ok {
+			t.Errorf("unexpected candidate %q", mp)
+			continue
+		}
+		want[mp] = true
+	}
+	for mp, seen := range want {
+		if !seen {
+			t.Errorf("candidate %q is missing from %v", mp, got)
+		}
 	}
 }

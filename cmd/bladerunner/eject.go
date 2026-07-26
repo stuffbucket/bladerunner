@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 )
@@ -133,15 +132,20 @@ func ejectSlotLabel(r resolvedInstance) string {
 	return r.Name
 }
 
-// ejectSlotDirForName resolves a slot name to its control-socket base dir: an
-// attached cartridge's mountpoint wins (it owns a live socket there), else the
-// disk slot under disks/<name>, else (for "default") the flat layout.
+// ejectSlotDirForName resolves a slot name to its control-socket base dir when
+// the registry knows nothing about it: an attached cartridge's mountpoint wins
+// (it owns a live socket there), else the disk slot under disks/<name>, else
+// (for "default") the flat layout.
+//
+// The cartridge lookup covers both places a mount can be — the private
+// <state>/mnt/<name> and the browsable /Volumes/bladerunner-<name> macOS picks
+// — because a booted cartridge has not lived at the former since mounting
+// became browsable, and `br eject demo` has to keep working either way.
 func ejectSlotDirForName(name string) string {
 	if name == defaultSlotAlias {
 		return config.DefaultStateDir()
 	}
-	mp := cartridgeMountpoint(name)
-	if cartridge.IsAttached(mp) {
+	if mp, ok := attachedCartridgeMountpoint(config.DefaultStateDir(), name); ok {
 		return mp
 	}
 	return diskSlotDir(name)
