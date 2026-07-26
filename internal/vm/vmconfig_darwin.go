@@ -106,7 +106,18 @@ func (r *Runner) configureNestedVirt(platformConfig *vz.GenericPlatformConfigura
 }
 
 func (r *Runner) configureStorage(cfg *vz.VirtualMachineConfiguration) error {
-	mainDiskAttach, err := vz.NewDiskImageStorageDeviceAttachment(r.cfg.DiskPath, false)
+	// Attach the writable root image with an explicit caching/synchronization
+	// policy rather than taking the framework default: a cartridge is only
+	// transportable if a guest fsync has actually reached stable storage, so the
+	// guest's flushes must be honored all the way down (SynchronizationModeFull)
+	// instead of stopping at the host page cache. CachingModeAutomatic leaves the
+	// read path to the framework, which is the sensible default for a raw image.
+	mainDiskAttach, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(
+		r.cfg.DiskPath,
+		false,
+		vz.DiskImageCachingModeAutomatic,
+		vz.DiskImageSynchronizationModeFull,
+	)
 	if err != nil {
 		return fmt.Errorf("create main disk attachment: %w", err)
 	}
