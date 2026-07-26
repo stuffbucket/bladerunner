@@ -26,12 +26,12 @@ func TestShutdownStageRoundTrip(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := WriteDetail(dir, tc.stage, tc.detail, now); err != nil {
-				t.Fatalf("WriteDetail: %v", err)
+			if err := WriteState(dir, State{Stage: tc.stage, UpdatedAt: now, Detail: tc.detail}); err != nil {
+				t.Fatalf("WriteState: %v", err)
 			}
 			got, ok := Read(dir)
 			if !ok {
-				t.Fatal("Read: ok=false after WriteDetail")
+				t.Fatal("Read: ok=false after WriteState")
 			}
 			if got.Stage != tc.stage {
 				t.Errorf("Stage = %q, want %q", got.Stage, tc.stage)
@@ -215,8 +215,8 @@ func TestReadLegacyBootOnlyFile(t *testing.T) {
 func TestWriteStaysBackwardCompatible(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Unix(1700000000, 0).UTC()
-	if err := WriteDetail(dir, Ejecting, "detaching", now); err != nil {
-		t.Fatalf("WriteDetail: %v", err)
+	if err := WriteState(dir, State{Stage: Ejecting, UpdatedAt: now, Detail: "detaching"}); err != nil {
+		t.Fatalf("WriteState: %v", err)
 	}
 	b, err := os.ReadFile(Path(dir))
 	if err != nil {

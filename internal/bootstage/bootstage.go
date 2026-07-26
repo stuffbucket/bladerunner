@@ -13,9 +13,12 @@ package bootstage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 // Stage is a coarse lifecycle phase. Within a phase the stages are ordered
@@ -50,6 +53,10 @@ const (
 )
 
 const fileName = "boot-stage.json"
+
+// statePerm is the mode of the boot-stage file: readable by anything that can
+// read the state dir (the menubar polls it), writable only by its owner.
+const statePerm = 0o600
 
 // startingMessage is the fallback line for a stage this binary does not know
 // that is (or is assumed to be) part of the boot phase.
@@ -196,42 +203,19 @@ func Write(stateDir string, stage Stage, now time.Time) error {
 	return WriteState(stateDir, State{Stage: stage, UpdatedAt: now})
 }
 
-// WriteDetail records stage together with a human-readable reason to show in
-// place of the canned message.
-func WriteDetail(stateDir string, stage Stage, detail string, now time.Time) error {
-	return WriteState(stateDir, State{Stage: stage, UpdatedAt: now, Detail: detail})
-}
-
 // WriteState atomically records s, filling in Phase from Stage when unset.
-// Temp-file + rename so a reader never sees a half-written file.
+// The write is temp-file + fsync + rename + directory fsync (see
+// util.WriteFileAtomic), so a reader never sees a half-written file and the
+// rename survives a crash.
 func WriteState(stateDir string, s State) error {
 	if s.Phase == PhaseUnknown {
 		s.Phase = s.Stage.Phase()
 	}
 	b, err := json.Marshal(s)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode boot stage %q: %w", s.Stage, err)
 	}
-	path := Path(stateDir)
-	tmp, err := os.CreateTemp(stateDir, fileName+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
+	return util.WriteFileAtomic(Path(stateDir), b, statePerm)
 }
 
 // Read returns the recorded state, or ok=false when the file is absent or
