@@ -25,24 +25,11 @@ var bootFlags struct {
 	timeout   time.Duration
 }
 
-// bootManifest stashes the resolved disk manifest so runStart can apply it onto
-// the config after config.Default and before the cobra-flag overrides. It is
-// set by runBoot just before delegating to runStart and is nil for plain
-// `br start`.
+// bootManifest stashes the resolved disk manifest so runStart can fold it into
+// the vmhost.Spec, where it is applied onto the config after the persisted
+// Settings and before the flag overrides. It is set by runBoot just before
+// delegating to runStart and is nil for plain `br start`.
 var bootManifest *disk.Manifest
-
-// applyBootManifest applies the disk manifest stashed by `br boot` onto cfg
-// as defaults. It is a no-op (returns nil) for a plain `br start`, where
-// bootManifest is nil. Lives here so start.go's only addition is a single call.
-func applyBootManifest(cfg *config.Config) error {
-	if bootManifest == nil {
-		return nil
-	}
-	if err := bootManifest.ApplyTo(cfg); err != nil {
-		return fmt.Errorf("apply disk: %w", err)
-	}
-	return nil
-}
 
 var bootCmd = &cobra.Command{
 	Use:   "boot <name|url|path>",

@@ -237,17 +237,17 @@ func layoutCartridge(cmd *cobra.Command, mountpoint string, m *disk.Manifest, na
 
 // --- runner boot <cartridge> --------------------------------------------
 
-// bootCartridge is the handoff from `br boot <cartridge>` into the foreground
-// runStart: applyBootCartridge roots cfg inside the mount, and
-// detachBootCartridge (the last deferred cleanup in runStart) releases the
-// image after the VMM has stopped.
+// bootCartridge is the handoff from `br boot <cartridge>` into runStart, which
+// folds it into the vmhost.Spec and then hands the open cartridge itself to the
+// Host (see takeBootCartridge). The Host owns it from that moment: it applies
+// the rooting and detaches the image as the last step of its reverse-order
+// teardown, once the VMM has released root.img.
 //
 // Everything a cartridge boot needs — the mount and its dev node, the packed
-// manifest, the .dmg working copy, the layout — now lives in the
-// *cartridge.Opened value below rather than in loose package globals, so two
-// cartridges can be open in one process. The mountpoint mirror survives only
-// because start.go reads it directly to detect a driven start; extracting the
-// VM lifecycle replaces this handoff with an explicit parameter.
+// manifest, the .dmg working copy, the layout — lives in the *cartridge.Opened
+// value below rather than in loose package globals, so two cartridges can be
+// open in one process. What is left here is only the argument-passing hop
+// between two cobra RunE functions.
 var bootCartridge struct {
 	mountpoint string
 	opened     *cartridge.Opened
@@ -319,14 +319,30 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 
 // applyBootCartridge roots cfg inside the mounted cartridge (root.img, state/,
 // share/). No-op for a non-cartridge boot.
+//
+// The live boot path no longer calls this: runStart hands the open cartridge to
+// the vmhost.Host, which applies it as the last overlay in its config step. It
+// remains as the CLI-side assertion that the handoff routes through
+// cartridge.Opened rather than reconstructing the rooting rules here.
 func applyBootCartridge(cfg *config.Config) {
 	bootCartridge.opened.ApplyTo(cfg)
 }
 
-// detachBootCartridge releases the cartridge image the foreground boot owned. It
-// runs as the LAST deferred cleanup in runStart — after runner.Stop() has torn
-// the VMM down and released root.img — so the detach is not blocked by the VMM.
-// No-op for a non-cartridge boot.
+// takeBootCartridge hands the open cartridge over to whoever will own it from
+// here on (the vmhost.Host that runs the VM), clearing the stash so the
+// deferred detachBootCartridge safety net in runStart becomes a no-op. Returns
+// nil for a non-cartridge boot.
+func takeBootCartridge() *cartridge.Opened {
+	opened := bootCartridge.opened
+	bootCartridge.opened = nil
+	bootCartridge.mountpoint = ""
+	return opened
+}
+
+// detachBootCartridge releases a cartridge image that was opened but never
+// handed to a vmhost.Host — a spec rejected before the handoff, say. On the
+// normal path takeBootCartridge has already cleared the stash and the Host owns
+// the detach, so this is a no-op. It is also a no-op for a non-cartridge boot.
 func detachBootCartridge() {
 	opened := bootCartridge.opened
 	if opened == nil {

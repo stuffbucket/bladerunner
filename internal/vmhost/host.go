@@ -1,0 +1,1119 @@
+// Package vmhost owns the lifecycle of exactly one bladerunner VM instance:
+// the cartridge mount it boots from, the control socket, the reserved host
+// ports, the OIDC and SNTP side services, the VM itself, and the web-UI proxy.
+//
+// It exists so that lifecycle is importable. It used to live in `package main`
+// inside runStart, which meant a standalone holder process — the whole point of
+// the cartridge runtime — could not reach it. Accordingly this package imports
+// no cobra, no systray, and nothing Cocoa: a future `cmd/br-vmd` can import
+// vmhost and (almost) nothing else. Everything user-facing is delegated to an
+// Observer the front end installs, so the CLI keeps its banners, its boot
+// board, and its --json report without vmhost knowing they exist.
+//
+// # Ownership and ordering
+//
+// A Host runs a fixed, named list of steps (see the Step* constants). Teardown
+// is the exact reverse of the order the steps started in, it skips steps that
+// never started, and it is idempotent. That property is the whole reason the
+// steps are a data structure rather than a run of deferred calls: it can be
+// tested without a VM.
+//
+// # Threading
+//
+// main.go pins the process to its original OS thread (runtime.LockOSThread in
+// init) because Virtualization.framework requires the GUI event loop to own the
+// main thread. Consequently:
+//
+//   - Run MUST be called from the main goroutine on the locked main thread. In
+//     GUI mode it never returns until the VM window closes, because it blocks
+//     inside vz.StartGraphicApplication.
+//   - New, Drain, Info, Config, Runner and Endpoint are safe from any
+//     goroutine. Drain in particular is called from a control-socket handler
+//     goroutine and from a DiskArbitration dispatch queue.
+//
+// Two Hosts can be constructed in one process — there is no package-level
+// mutable state — but only one can be Run today, because only one goroutine can
+// hold the main thread. That restriction is a property of GUI mode, not of this
+// type, and it is why the design puts each instance in its own holder process.
+package vmhost
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/bootstage"
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
+	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
+	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/oidc"
+	"github.com/stuffbucket/bladerunner/internal/portalloc"
+	"github.com/stuffbucket/bladerunner/internal/ssh"
+	"github.com/stuffbucket/bladerunner/internal/timesource"
+	"github.com/stuffbucket/bladerunner/internal/vm"
+	"github.com/stuffbucket/bladerunner/internal/webproxy"
+)
+
+// Step names. They label the ordered start/stop pairs a Host runs, and they are
+// what an Observer sees when a teardown step fails.
+const (
+	// StepCartridge attaches (or adopts) the cartridge image. It runs first
+	// because every other path — including the control socket — lives inside
+	// the mount, and it is torn down last for the same reason.
+	StepCartridge = "cartridge"
+	// StepControl resolves the base config and binds the control socket.
+	StepControl = "control"
+	// StepServe starts answering on the bound control socket.
+	StepServe = "serve"
+	// StepConfig overlays Settings, the disk manifest, the CLI overrides and
+	// the cartridge onto the config, then brings logging up.
+	StepConfig = "config"
+	// StepPorts reserves this instance's host loopback ports as bound listeners.
+	StepPorts = "ports"
+	// StepSSHKeys materializes the host SSH key pair.
+	StepSSHKeys = "sshkeys"
+	// StepOIDC starts the local OIDC provider.
+	StepOIDC = "oidc"
+	// StepNTP starts the host pseudo-NTP responder.
+	StepNTP = "ntp"
+	// StepRunner constructs the VM runner (but does not start the VM).
+	StepRunner = "runner"
+	// StepBootStage publishes the coarse boot phase for the menubar splash.
+	StepBootStage = "bootstage"
+	// StepVM starts the VM and wires everything that needs a running guest.
+	StepVM = "vm"
+	// StepWebProxy starts the host-side web-UI TLS proxy.
+	StepWebProxy = "webproxy"
+)
+
+// ErrNotStarted is returned by Drain (and reported by the control-plane save
+// and eject handlers) before the VM runner exists.
+var ErrNotStarted = errors.New("VM is not started yet")
+
+// ErrAlreadyRunning is returned when another process already holds this
+// instance's control socket.
+var ErrAlreadyRunning = errors.New("VM is already running (use 'br stop' first)")
+
+// errOIDCDisabled signals that the OIDC provider was intentionally skipped
+// (e.g. LocalOIDCPort=0). Callers should treat it as a benign no-op.
+var errOIDCDisabled = errors.New("oidc disabled (LocalOIDCPort=0)")
+
+// guestProbeTimeout bounds the guest-liveness probe `br status` runs through
+// the control socket.
+const guestProbeTimeout = 2 * time.Second
+
+// DefaultDrainTimeout is the budget Drain gives the guest to power itself off
+// when neither the caller nor the Spec supplies one. It mirrors the vm
+// package's own default, which is declared in a darwin-only file and so cannot
+// be referenced from portable code (follow-up: lift it to a shared file).
+const DefaultDrainTimeout = 60 * time.Second
+
+// Observer receives the lifecycle notifications a front end renders. Every
+// method is called from the goroutine driving Run, in the documented order, so
+// implementations do not need to be concurrency-safe among themselves.
+type Observer interface {
+	// Resolved fires once the config is final and the VM runner exists, before
+	// any progress sink is attached. This is where the CLI prints its banner.
+	Resolved(cfg *config.Config)
+	// Progress fires immediately before the VM starts. A non-nil return is
+	// added to the boot progress fan-out (the CLI's TTY boot board); ctx is
+	// canceled when the host shuts down.
+	Progress(ctx context.Context, cfg *config.Config) vm.Progress
+	// Failed fires when the VM itself failed to start, before teardown.
+	Failed(err error)
+	// Started fires in GUI mode once the VM is running: boot success is not yet
+	// known, because the window has to open before the readiness wait can run.
+	Started(cfg *config.Config, endpoint string)
+	// Ready fires in headless mode once the readiness wait has finished;
+	// bootErr is nil when the guest reached the Incus-ready state.
+	Ready(cfg *config.Config, endpoint string, bootErr error)
+	// Waiting fires when the host is fully up and about to block — on the GUI
+	// event loop when gui is true, on context cancellation otherwise.
+	Waiting(gui bool)
+	// Stopping fires once the block has been released and teardown is next.
+	Stopping()
+	// TeardownWarning fires when a teardown step failed. Teardown continues
+	// regardless; the front end decides what is worth telling the user.
+	TeardownWarning(step string, err error)
+}
+
+// NopObserver is an Observer that renders nothing. It is the default, and it is
+// what a headless holder process wants.
+type NopObserver struct{}
+
+// Resolved implements Observer.
+func (NopObserver) Resolved(*config.Config) {}
+
+// Progress implements Observer.
+func (NopObserver) Progress(context.Context, *config.Config) vm.Progress { return nil }
+
+// Failed implements Observer.
+func (NopObserver) Failed(error) {}
+
+// Started implements Observer.
+func (NopObserver) Started(*config.Config, string) {}
+
+// Ready implements Observer.
+func (NopObserver) Ready(*config.Config, string, error) {}
+
+// Waiting implements Observer.
+func (NopObserver) Waiting(bool) {}
+
+// Stopping implements Observer.
+func (NopObserver) Stopping() {}
+
+// TeardownWarning implements Observer.
+func (NopObserver) TeardownWarning(string, error) {}
+
+// step is one named unit of the host lifecycle: something to bring up and the
+// matching thing to take back down. A start that fails must leave nothing
+// behind, which is why a failed step is never pushed onto the stack.
+type step struct {
+	name  string
+	start func(context.Context) error
+	stop  func() error
+}
+
+// noCtx adapts a start closure that has nothing to cancel to the step
+// signature. Most steps are synchronous setup; only the ones that hand a
+// context to something long-lived (the control listener, the OIDC server, the
+// VM boot) actually take one.
+func noCtx(fn func() error) func(context.Context) error {
+	return func(context.Context) error { return fn() }
+}
+
+// stepStack records which steps actually started, so teardown can unwind them
+// in exact reverse order — and only them.
+type stepStack struct {
+	mu      sync.Mutex
+	started []step
+}
+
+// run starts each step in order. The first failure unwinds every step that had
+// already started (in reverse) and returns that step's error unchanged.
+func (s *stepStack) run(ctx context.Context, steps []step, onStopErr func(string, error)) error {
+	for _, st := range steps {
+		if st.start != nil {
+			if err := st.start(ctx); err != nil {
+				s.teardown(onStopErr)
+				return err
+			}
+		}
+		s.mu.Lock()
+		s.started = append(s.started, st)
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+// teardown stops every started step in exact reverse order. It is idempotent:
+// the stack is drained under the lock before anything is stopped, so a second
+// call (from a deferred cleanup after run already unwound) does nothing.
+func (s *stepStack) teardown(onStopErr func(string, error)) {
+	s.mu.Lock()
+	pending := s.started
+	s.started = nil
+	s.mu.Unlock()
+
+	for i := len(pending) - 1; i >= 0; i-- {
+		st := pending[i]
+		if st.stop == nil {
+			continue
+		}
+		if err := st.stop(); err != nil && onStopErr != nil {
+			onStopErr(st.name, err)
+		}
+	}
+}
+
+// Host owns one instance's lifecycle. Build it with New, drive it with Run.
+type Host struct {
+	spec Spec
+	obs  Observer
+
+	stack     stepStack
+	startedAt time.Time
+
+	cfg       *config.Config
+	cfgRouter *control.ConfigRouter
+	cartridge *cartridge.Opened
+	// adopted records that the cartridge was opened by the caller and handed
+	// over; the Host still closes it, but never re-opens it.
+	adopted bool
+
+	ctrl     *control.LocalController
+	listener *control.Listener
+
+	oidc     *oidc.Provider
+	ntp      *timesource.Responder
+	webProxy *webproxy.Proxy
+	bootPub  *bootStagePublisher
+
+	// hostPublicKey is the host's own SSH public key, kept separately from the
+	// config because SetSSHKeys does not overwrite a key the config already
+	// carried and OIDC bootstraps from the key this process actually holds.
+	hostPublicKey string
+
+	endpoint string
+
+	mu     sync.Mutex
+	runner *vm.Runner
+	cancel context.CancelFunc
+}
+
+// New validates spec and returns a Host ready to Run. It performs no I/O and
+// starts nothing, so constructing a Host is always cheap and always reversible.
+func New(spec Spec) (*Host, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	return &Host{spec: spec, obs: NopObserver{}}, nil
+}
+
+// SetObserver installs the front end's render hooks. Passing nil restores the
+// silent default. Call it before Run.
+func (h *Host) SetObserver(obs Observer) {
+	if obs == nil {
+		obs = NopObserver{}
+	}
+	h.obs = obs
+}
+
+// AdoptCartridge hands the Host an already-open cartridge to own, instead of
+// having it open Spec.CartridgePath itself. The Host closes it during teardown
+// either way. Passing nil is a no-op, so a caller can hand over whatever it has
+// without branching. Call it before Run.
+func (h *Host) AdoptCartridge(opened *cartridge.Opened) {
+	if opened == nil {
+		return
+	}
+	h.cartridge = opened
+	h.adopted = true
+}
+
+// Config returns the resolved instance config. It is nil until Run has passed
+// the control step.
+func (h *Host) Config() *config.Config { return h.cfg }
+
+// Runner returns the VM runner, or nil before the VM has been constructed.
+func (h *Host) Runner() *vm.Runner { return h.activeRunner() }
+
+// Endpoint returns the Incus API endpoint the VM published, or "" before start.
+func (h *Host) Endpoint() string { return h.endpoint }
+
+// Cartridge returns the cartridge this instance booted from, or nil.
+func (h *Host) Cartridge() *cartridge.Opened { return h.cartridge }
+
+// Info describes the running instance in the form the registry records. It is
+// safe to call at any point; fields that are not known yet are zero.
+func (h *Host) Info() instance.Entry {
+	e := instance.Entry{
+		Name:            h.spec.Name,
+		Kind:            h.spec.Kind,
+		SourcePath:      h.spec.CartridgePath,
+		PID:             os.Getpid(),
+		ProtocolVersion: control.ProtocolVersion,
+		BinaryVersion:   h.spec.BinaryVersion,
+		StartedAt:       h.startedAt,
+	}
+	if h.cfg != nil {
+		if e.Name == "" {
+			e.Name = h.cfg.InstanceName()
+		}
+		e.StateDir = h.cfg.VMDir
+		e.GUI = h.cfg.GUI
+		p := h.cfg.Ports()
+		e.Ports = instance.Ports{SSH: p.SSH, API: p.API, Web: p.Web, OIDC: p.OIDC, NTP: p.NTP}
+	}
+	if h.cartridge != nil {
+		e.WorkingCopy = h.cartridge.WorkingCopy
+		e.DevNode = h.cartridge.Mount.DevNode
+		e.Mountpoint = h.cartridge.Mountpoint()
+		if e.SourcePath == "" {
+			e.SourcePath = h.cartridge.SourcePath
+		}
+	}
+	return e
+}
+
+// Run brings the instance up and blocks until ctx is canceled, the guest is
+// ejected, or (in GUI mode) the VM window closes. Teardown is always performed
+// before it returns, in exact reverse order.
+//
+// It must be called on the main thread: GUI mode hands that thread to
+// Virtualization.framework's event loop and never gives it back.
+func (h *Host) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	h.mu.Lock()
+	h.cancel = cancel
+	h.mu.Unlock()
+
+	h.startedAt = time.Now()
+	defer h.stack.teardown(h.onStopErr)
+
+	if err := h.stack.run(ctx, h.steps(), h.onStopErr); err != nil {
+		return err
+	}
+	return h.block(ctx)
+}
+
+// Drain performs the orderly spin-down: an ACPI power request, a genuine wait
+// for the guest to reach the stopped state, and an explicit escalation only if
+// that budget expires. On success it releases Run, whose teardown then detaches
+// the cartridge with the VMM already gone. A timeout <= 0 uses the Spec's
+// DrainTimeout, or the vm package default.
+//
+// Safe to call from any goroutine.
+func (h *Host) Drain(ctx context.Context, timeout time.Duration) error {
+	return h.drain(ctx, timeout, false)
+}
+
+// drain is the shared body of Drain and the control-plane eject handler; force
+// skips straight to the destructive stop.
+func (h *Host) drain(ctx context.Context, timeout time.Duration, force bool) error {
+	r := h.activeRunner()
+	if r == nil {
+		return ErrNotStarted
+	}
+	if timeout <= 0 {
+		timeout = h.spec.DrainTimeout
+	}
+	if timeout <= 0 {
+		timeout = DefaultDrainTimeout
+	}
+	if err := r.Eject(ctx, timeout, force); err != nil {
+		return err
+	}
+	h.stop()
+	return nil
+}
+
+// block waits for the instance to finish. In GUI mode it surrenders the main
+// thread to the VM window and runs the readiness wait in the background,
+// because the macOS event loop has to start immediately; headless it blocks on
+// readiness first so the boot board can render through to "ready".
+func (h *Host) block(ctx context.Context) error {
+	if h.cfg.GUI {
+		// GUI mode can't block on Incus before opening the window — the
+		// macOS event loop must run on the main thread immediately. We
+		// don't yet know if boot will succeed, so don't claim it did.
+		h.obs.Started(h.cfg, h.endpoint)
+		go func() { _ = h.waitForGuestReady(ctx) }()
+
+		h.obs.Waiting(true)
+		if err := h.activeRunner().StartGUI(); err != nil {
+			return fmt.Errorf("start gui: %w", err)
+		}
+	} else {
+		bootErr := h.waitForGuestReady(ctx)
+		h.obs.Ready(h.cfg, h.endpoint, bootErr)
+		h.obs.Waiting(false)
+		<-ctx.Done()
+	}
+
+	h.obs.Stopping()
+	return nil
+}
+
+// waitForGuestReady runs the Incus readiness wait. Returns nil if the guest
+// reached the Incus-ready state, or an error describing why it didn't. Errors
+// are non-fatal at the call site (partial reports are still useful) but the
+// caller should warn the user rather than pretend everything is fine.
+func (h *Host) waitForGuestReady(ctx context.Context) error {
+	if _, err := h.activeRunner().WaitForIncus(ctx); err != nil {
+		logging.L().Error("wait for incus", "error", err)
+		return err
+	}
+	return nil
+}
+
+// onStopErr routes a teardown failure to the Observer.
+func (h *Host) onStopErr(step string, err error) { h.obs.TeardownWarning(step, err) }
+
+// stop releases Run's block. It is what the control-plane stop and eject
+// handlers call, and it is safe before Run has started (a no-op).
+func (h *Host) stop() {
+	h.mu.Lock()
+	cancel := h.cancel
+	h.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// setRunner publishes the runner so the control handlers (registered before the
+// VM exists) can reach it.
+func (h *Host) setRunner(r *vm.Runner) {
+	h.mu.Lock()
+	h.runner = r
+	h.mu.Unlock()
+}
+
+// activeRunner returns the runner, or nil if the VM has not been constructed.
+func (h *Host) activeRunner() *vm.Runner {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.runner
+}
+
+// lockedConfig mutates the config under the config router's lock, so a
+// concurrent `br config get` never reads a half-updated value.
+func (h *Host) lockedConfig(mutate func()) {
+	if h.cfgRouter == nil {
+		mutate()
+		return
+	}
+	h.cfgRouter.Lock()
+	defer h.cfgRouter.Unlock()
+	mutate()
+}
+
+// steps is the ordered lifecycle. Teardown is its exact reverse.
+func (h *Host) steps() []step {
+	return []step{
+		{name: StepCartridge, start: noCtx(h.startCartridge), stop: h.stopCartridge},
+		{name: StepControl, start: noCtx(h.startControl), stop: h.stopControl},
+		{name: StepServe, start: h.startServe},
+		{name: StepConfig, start: noCtx(h.startConfig)},
+		{name: StepPorts, start: noCtx(h.startPorts), stop: h.stopPorts},
+		{name: StepSSHKeys, start: noCtx(h.startSSHKeys)},
+		{name: StepOIDC, start: h.startOIDC, stop: h.stopOIDC},
+		{name: StepNTP, start: noCtx(h.startNTP), stop: h.stopNTP},
+		{name: StepRunner, start: noCtx(h.startRunner), stop: h.stopRunner},
+		{name: StepBootStage, start: noCtx(h.startBootStage), stop: h.stopBootStage},
+		{name: StepVM, start: h.startVM},
+		{name: StepWebProxy, start: noCtx(h.startWebProxy), stop: h.stopWebProxy},
+	}
+}
+
+// startCartridge attaches the cartridge image, unless the caller already opened
+// one and handed it over. A non-cartridge instance skips this entirely.
+func (h *Host) startCartridge() error {
+	if h.spec.Kind != instance.KindCartridge || h.adopted {
+		return nil
+	}
+	opened, err := cartridge.Open(h.spec.CartridgePath, cartridge.OpenOptions{
+		Mountpoint: h.spec.Mountpoint,
+		Name:       h.spec.Name,
+	})
+	if err != nil {
+		return err
+	}
+	h.cartridge = opened
+	return nil
+}
+
+// stopCartridge releases the cartridge image. It runs last, after the VMM has
+// stopped and released root.img, so the detach is never blocked by the VM.
+func (h *Host) stopCartridge() error {
+	if h.cartridge == nil {
+		return nil
+	}
+	return h.cartridge.Close()
+}
+
+// startControl resolves the base config, refuses to start over a live
+// instance, and BINDS the control socket — the ownership token for this
+// instance. It does not serve yet; that is StepServe, so that claiming the
+// socket and answering on it stay separable. The socket lives inside the
+// cartridge mount, which is why this runs after the cartridge is attached.
+func (h *Host) startControl() error {
+	cfg, err := h.baseConfig()
+	if err != nil {
+		return err
+	}
+	h.cfg = cfg
+
+	if control.NewClient(cfg.VMDir).IsRunning() {
+		return ErrAlreadyRunning
+	}
+
+	// We build the controller explicitly (rather than via NewServer) so a
+	// guest-liveness probe can be attached once the VM is running — see
+	// ProbeGuest in startVM.
+	h.ctrl = control.NewLocalController(h.stop)
+	listener, err := control.NewListener(cfg.VMDir, h.ctrl)
+	if err != nil {
+		return fmt.Errorf("start control server: %w", err)
+	}
+	h.listener = listener
+
+	// The config handler captures cfg by reference, so it serves values set
+	// long after the VM starts.
+	h.cfgRouter = control.NewConfigRouter(cfg)
+	listener.Router().Mount("config", h.cfgRouter.Router())
+
+	// Handlers must all be registered before the server starts serving, to
+	// avoid a handlers-map race.
+	h.registerControlHandlers(listener.Router())
+	return nil
+}
+
+// startServe begins answering on the bound control socket. Every handler is
+// registered by then, so the accept loop can never race the handlers map.
+func (h *Host) startServe(ctx context.Context) error {
+	go h.listener.Start(ctx)
+	return nil
+}
+
+// stopControl closes the control socket.
+func (h *Host) stopControl() error {
+	if h.listener == nil {
+		return nil
+	}
+	_ = h.listener.Close()
+	return nil
+}
+
+// baseConfig resolves the config the overlays are applied to: the caller's
+// pre-resolved one when given, else config.Default rooted at the cartridge
+// mountpoint (which owns the instance's state) or the spec's state dir.
+func (h *Host) baseConfig() (*config.Config, error) {
+	if h.spec.Config != nil {
+		return h.spec.Config, nil
+	}
+	stateDir := h.spec.StateDir
+	if mp := h.cartridge.Mountpoint(); mp != "" {
+		stateDir = mp
+	}
+	cfg, err := config.Default(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	return cfg, nil
+}
+
+// startConfig applies the whole overlay chain and brings logging up.
+//
+// Precedence, weakest first: defaults -> persisted Settings -> disk manifest ->
+// CLI overrides -> explicit port preference -> the cartridge. The cartridge is
+// last because it is by definition self-contained: its own root.img, state and
+// share always win.
+func (h *Host) startConfig() error {
+	// Settings live under the default state dir (not a custom --state-dir slot
+	// or a cartridge), matching the menubar's settings screen. A missing file
+	// yields defaults (no-op); an invalid file is logged once logging is up and
+	// ignored in favor of defaults rather than aborting start.
+	settings, settingsErr := config.LoadSettings(config.DefaultStateDir())
+	if settingsErr != nil {
+		settings = config.DefaultSettings()
+	}
+	settings.ApplyTo(h.cfg)
+
+	if h.spec.Manifest != nil {
+		if err := h.spec.Manifest.ApplyTo(h.cfg); err != nil {
+			return fmt.Errorf("apply disk: %w", err)
+		}
+	}
+
+	h.spec.applyOverrides(h.cfg)
+
+	if h.spec.Ports != (config.PortAssignment{}) {
+		h.cfg.AssignPorts(h.spec.Ports)
+	}
+
+	// Roots every per-VM path inside the mounted image and wires the RW share.
+	// No-op for a non-cartridge boot.
+	h.cartridge.ApplyTo(h.cfg)
+
+	if err := logging.Init(h.cfg.LogPath); err != nil {
+		return err
+	}
+	if settingsErr != nil {
+		logging.L().Warn("ignoring invalid settings; using defaults", "err", settingsErr)
+	}
+	return nil
+}
+
+// startPorts reserves this instance's host loopback ports before anything binds
+// one. The default instance still PREFERS 6022 / 18443 / 18444 / 15556 / 15557
+// so documented URLs, muscle memory, and hand-written ssh configs keep working;
+// only an additional instance — which finds those taken — falls back to
+// ephemeral ports. The reservations stay BOUND and are handed to the services
+// that serve them, so nothing can steal a port in between.
+//
+// Reservation failure is not fatal: the services fall back to binding the
+// well-known ports themselves, exactly as they did before reservations existed.
+func (h *Host) startPorts() error {
+	set, err := h.reservePorts()
+	if err != nil {
+		logging.L().Warn("port reservation failed; using the well-known ports directly", "err", err)
+		return nil
+	}
+	h.lockedConfig(func() { h.cfg.AssignPortsFrom(set) })
+	h.parkHostListeners(set)
+	return nil
+}
+
+// stopPorts releases anything not taken by a service (start failed, or that
+// service is disabled) rather than leaking it for the process lifetime.
+func (h *Host) stopPorts() error {
+	if h.cfg == nil {
+		return nil
+	}
+	_ = h.cfg.CloseHostListeners()
+	return nil
+}
+
+// startSSHKeys materializes the host key pair the guest is provisioned with and
+// the OIDC bootstrap identity is derived from.
+func (h *Host) startSSHKeys() error {
+	keyPair, err := ssh.EnsureKeyPair()
+	if err != nil {
+		return fmt.Errorf("ssh keys: %w", err)
+	}
+	h.hostPublicKey = keyPair.PublicKey
+	h.lockedConfig(func() { h.cfg.SetSSHKeys(keyPair.PublicKey, keyPair.PrivateKeyPath) })
+	return nil
+}
+
+// startOIDC starts the local OIDC provider before the VM so the vsock-reverse
+// forwarder can dial it as soon as the guest comes up. Failure to start OIDC is
+// logged but does not abort start; the mTLS fallback path remains available.
+func (h *Host) startOIDC(ctx context.Context) error {
+	provider, err := h.startOIDCProvider(ctx)
+	switch {
+	case errors.Is(err, errOIDCDisabled):
+		logging.L().Info("oidc provider disabled by config")
+	case err != nil:
+		logging.L().Warn("oidc provider not started", "err", err)
+	default:
+		h.oidc = provider
+	}
+	return nil
+}
+
+// stopOIDC shuts the local OIDC provider down.
+func (h *Host) stopOIDC() error {
+	if h.oidc == nil {
+		return nil
+	}
+	_ = h.oidc.Stop()
+	return nil
+}
+
+// startNTP starts the host pseudo-NTP (SNTP) responder before the VM so the
+// vsock reverse forwarder can dial it the moment the guest chrony polls. The
+// responder serves the HOST clock as a stratum-1 source; the guest coheres to
+// the host (not UTC) and works offline over vsock. Non-fatal: chrony retries.
+func (h *Host) startNTP() error {
+	if h.cfg.LocalNTPPort == 0 || h.cfg.VsockNTPPort == 0 {
+		return nil
+	}
+	responder, err := h.newNTPResponder()
+	if err != nil {
+		logging.L().Warn("ntp responder not started", "err", err)
+		return nil
+	}
+	responder.Start()
+	h.ntp = responder
+	return nil
+}
+
+// stopNTP shuts the SNTP responder down.
+func (h *Host) stopNTP() error {
+	if h.ntp == nil {
+		return nil
+	}
+	_ = h.ntp.Stop()
+	return nil
+}
+
+// startRunner constructs the VM runner and lets the front end render its
+// pre-boot banner. The VM itself is not started here — see startVM.
+func (h *Host) startRunner() error {
+	runner, err := vm.NewRunner(h.cfg)
+	if err != nil {
+		return fmt.Errorf("create runner: %w", err)
+	}
+	h.setRunner(runner)
+
+	// --restore: bring the guest up from a saved-state file (and resume it)
+	// instead of cold-booting. Used by `br restore` and `br upgrade`.
+	if h.spec.RestoreFrom != "" {
+		runner.SetRestoreFrom(h.spec.RestoreFrom)
+	}
+
+	h.obs.Resolved(h.cfg)
+	return nil
+}
+
+// stopRunner tears the VMM down, draining the guest first.
+func (h *Host) stopRunner() error {
+	if r := h.activeRunner(); r != nil {
+		_ = r.Stop()
+	}
+	return nil
+}
+
+// startBootStage publishes coarse, human-friendly boot phase to the bootstage
+// file for the menubar's starting splash. Driven by the runner's own stage
+// events — which fire in every mode (GUI, headless, detached menubar boot) and
+// don't depend on racing/parsing the serial console — so a separate process
+// that only sees the control socket can still show "Booting Linux… / Setting
+// up… / Starting Incus…" as the guest comes up.
+func (h *Host) startBootStage() error {
+	h.bootPub = newBootStagePublisher(h.cfg.VMDir)
+	return nil
+}
+
+// stopBootStage clears the published boot phase on the way out.
+func (h *Host) stopBootStage() error {
+	bootstage.Clear(h.cfg.VMDir)
+	return nil
+}
+
+// startVM starts the VM and wires everything that needs a running guest.
+func (h *Host) startVM(ctx context.Context) error {
+	// Attach progress sinks: always the bootstage file publisher, plus the
+	// front end's own (the CLI's TTY boot board) when it has one.
+	reporters := []vm.Progress{&bootStageProgress{pub: h.bootPub}}
+	if p := h.obs.Progress(ctx, h.cfg); p != nil {
+		reporters = append(reporters, p)
+	}
+	runner := h.activeRunner()
+	runner.SetProgress(teeProgress(reporters))
+
+	result, err := runner.StartVM(ctx)
+	if err != nil {
+		h.obs.Failed(err)
+		return fmt.Errorf("start vm: %w", err)
+	}
+	h.endpoint = result.Endpoint
+
+	// Now that the VM (and its vsock device) exists, teach `br status` to probe
+	// guest liveness instead of trusting the host run-state alone. A panicked
+	// or unreachable guest now reports "unreachable" rather than "running".
+	h.ctrl.SetProbe(func(ctx context.Context) error {
+		pctx, cancelProbe := context.WithTimeout(ctx, guestProbeTimeout)
+		defer cancelProbe()
+		return runner.ProbeGuest(pctx)
+	})
+
+	// Publish the resolved nested-virt state so `br status` can report whether
+	// Incus VMs are available in this guest.
+	h.lockedConfig(func() { h.cfg.NestedVirt = runner.NestedVirtState() })
+
+	// Write SSH config after VM starts. The default instance rewrites the shared
+	// aggregator (its legacy "Host bladerunner" block); every other instance
+	// writes its own config.d/<name> fragment, so two instances no longer
+	// clobber each other's O_TRUNC write.
+	sshConfigPath, err := ssh.WriteConfigFor(h.cfg.InstanceName(), h.cfg.LocalSSHPort, h.cfg.SSHUser, h.cfg.SSHPrivateKeyPath)
+	if err != nil {
+		logging.L().Warn("ssh config", "error", err)
+		return nil
+	}
+	h.lockedConfig(func() { h.cfg.SSHConfigPath = sshConfigPath })
+	return nil
+}
+
+// startWebProxy starts the host-side web-UI proxy. It terminates the browser's
+// TLS WITHOUT requesting a client certificate (so the browser never shows the
+// cert picker), forwarding to Incus over loopback with no client cert of its
+// own — so Incus authenticates the browser via OIDC. `br web` points the
+// browser here (LocalWebPort) instead of straight at Incus. Non-fatal: a
+// failure just means `br web` falls back to the direct Incus URL (with the cert
+// prompt).
+//
+// The proxy binds its own listener, so the reservation held for it is released
+// here — as late as possible, which keeps a concurrently starting instance off
+// this port until the moment the proxy takes it. It is the one remaining
+// reserve-then-rebind window; closing it needs a Listener option on
+// webproxy.Options (follow-up).
+func (h *Host) startWebProxy() error {
+	h.releaseHostListener(config.PortNameWeb)
+
+	proxy, err := webproxy.New(webproxy.Options{
+		ListenAddr:   config.LoopbackAddr(h.cfg.LocalWebPort),
+		UpstreamAddr: config.LoopbackAddr(h.cfg.LocalAPIPort),
+		CertPath:     filepath.Join(h.cfg.VMDir, "webproxy.crt"),
+		KeyPath:      filepath.Join(h.cfg.VMDir, "webproxy.key"),
+	})
+	if err != nil {
+		logging.L().Warn("web proxy not created", "err", err)
+		return nil
+	}
+	if err := proxy.Start(); err != nil {
+		logging.L().Warn("web proxy not started", "err", err)
+		return nil
+	}
+	h.webProxy = proxy
+	return nil
+}
+
+// stopWebProxy shuts the web-UI proxy down.
+func (h *Host) stopWebProxy() error {
+	if h.webProxy == nil {
+		return nil
+	}
+	_ = h.webProxy.Close()
+	return nil
+}
+
+// registerControlHandlers registers the control commands that back `runner
+// upgrade` and `br eject`: reporting the server's build version, pausing+saving
+// the guest state, and the clean ACPI shutdown. They are registered before the
+// VM exists and reach it through activeRunner once it does.
+func (h *Host) registerControlHandlers(router *control.Router) {
+	router.HandleFunc(control.CmdServerVersion, func(_ context.Context, _ *control.Request) *control.Message {
+		return &control.Message{Response: h.spec.BinaryVersion}
+	})
+	router.HandleFunc(control.CmdSave, func(_ context.Context, req *control.Request) *control.Message {
+		r := h.activeRunner()
+		if r == nil {
+			return &control.Message{Error: ErrNotStarted.Error()}
+		}
+		if err := r.SaveState(h.cfg.SavedStatePath); err != nil {
+			return &control.Message{Error: err.Error()}
+		}
+		if req.Args["0"] != control.SaveModePause {
+			if err := r.ResumeVM(); err != nil {
+				return &control.Message{Error: err.Error()}
+			}
+		}
+		return &control.Message{Response: h.cfg.SavedStatePath}
+	})
+	router.HandleFunc(control.CmdEject, func(ctx context.Context, req *control.Request) *control.Message {
+		// Gracefully (ACPI) shut the guest down and wait for it to stop. Detach
+		// of any cartridge is NOT done here: the VMM still holds root.img until
+		// the runner is stopped after Run unblocks. We only stop the guest,
+		// then release Run so teardown runs its steps in reverse — VMM first,
+		// cartridge detach last.
+		if err := h.drain(ctx, ejectTimeoutFromArgs(req), ejectForceFromArgs(req)); err != nil {
+			return &control.Message{Error: err.Error()}
+		}
+		return &control.Message{Response: control.RespOK}
+	})
+}
+
+// ejectTimeoutFromArgs parses the positional timeout (seconds) from an eject
+// request, falling back to the default when absent or unparseable.
+func ejectTimeoutFromArgs(req *control.Request) time.Duration {
+	if v, ok := req.Args["0"]; ok {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return control.DefaultEjectTimeoutSeconds * time.Second
+}
+
+// ejectForceFromArgs reports whether the eject request asked for a forced stop.
+func ejectForceFromArgs(req *control.Request) bool {
+	return req.Args["1"] == control.EjectModeForce
+}
+
+// startOIDCProvider boots the local OIDC server, registers the host's own SSH
+// public key as the bootstrap admin identity, and returns the running provider.
+// Returns errOIDCDisabled (with a nil provider) when OIDC is disabled by config;
+// other errors mean startup failed and the caller should log and continue.
+func (h *Host) startOIDCProvider(ctx context.Context) (*oidc.Provider, error) {
+	cfg := h.cfg
+	if cfg.LocalOIDCPort == 0 {
+		return nil, errOIDCDisabled
+	}
+
+	signingKey, err := oidc.LoadOrCreateSigningKey(cfg.OIDCStateDir)
+	if err != nil {
+		return nil, fmt.Errorf("signing key: %w", err)
+	}
+
+	store := oidc.NewStore(cfg.IdentityDir)
+	if err := store.Load(); err != nil {
+		return nil, fmt.Errorf("load identities: %w", err)
+	}
+
+	// Bootstrap: auto-import the host's SSH public key on first start.
+	if h.hostPublicKey != "" && store.Count() == 0 {
+		if _, err := store.Add(h.hostPublicKey); err != nil {
+			logging.L().Warn("auto-import host key failed", "err", err)
+		}
+	}
+
+	// Serve on the listener reserved for this instance when there is one; the
+	// provider binds ListenAddr itself otherwise. IssuerURL is read from the
+	// config, which AssignPorts re-derived from the port actually reserved —
+	// formatting it from the port constant here is what used to break OIDC
+	// silently at login time.
+	ln := cfg.TakeHostListener(config.PortNameOIDC)
+	provider, err := oidc.NewProvider(oidc.Config{
+		ListenAddr: config.LoopbackAddr(cfg.LocalOIDCPort),
+		Listener:   ln,
+		IssuerURL:  cfg.OIDCIssuerURL,
+		Audience:   cfg.OIDCAudience,
+		SigningKey: signingKey,
+		Store:      store,
+	})
+	if err != nil {
+		closeListener(config.PortNameOIDC, ln)
+		return nil, err
+	}
+	if err := provider.Start(ctx); err != nil {
+		closeListener(config.PortNameOIDC, ln)
+		return nil, err
+	}
+	return provider, nil
+}
+
+// reservePorts binds this instance's host loopback ports as a set, preferring
+// whatever the config currently asks for (the well-known constants for the
+// default instance, a Settings/manifest override otherwise) and falling back to
+// ephemeral ports when a preferred one is taken. Reservation is all-or-nothing:
+// a partial failure rolls back every port it had bound.
+//
+// A zero OIDC or NTP port means that service is disabled, so no port is
+// reserved for it and AssignPortsFrom leaves the zero in place.
+func (h *Host) reservePorts() (*portalloc.Set, error) {
+	cfg := h.cfg
+	specs := []portalloc.Spec{
+		{Name: config.PortNameSSH, Preferred: cfg.LocalSSHPort},
+		{Name: config.PortNameAPI, Preferred: cfg.LocalAPIPort},
+		{Name: config.PortNameWeb, Preferred: cfg.LocalWebPort},
+	}
+	if cfg.LocalOIDCPort != 0 {
+		specs = append(specs, portalloc.Spec{Name: config.PortNameOIDC, Preferred: cfg.LocalOIDCPort})
+	}
+	if cfg.LocalNTPPort != 0 {
+		specs = append(specs, portalloc.Spec{Name: config.PortNameNTP, Preferred: cfg.LocalNTPPort})
+	}
+	set, err := portalloc.ReserveSet(specs...)
+	if err != nil {
+		return nil, fmt.Errorf("reserve instance ports: %w", err)
+	}
+	logging.L().Info("reserved instance ports",
+		"instance", cfg.InstanceName(),
+		"ssh", set.Port(config.PortNameSSH),
+		"api", set.Port(config.PortNameAPI),
+		"web", set.Port(config.PortNameWeb),
+		"oidc", set.Port(config.PortNameOIDC),
+		"ntp", set.Port(config.PortNameNTP),
+	)
+	return set, nil
+}
+
+// parkHostListeners moves every bound listener out of the reservation set and
+// onto the config, where each service takes the one it serves. Handing over the
+// live listener — instead of a port number to re-bind — is what removes the
+// window in which a second instance could steal the port.
+func (h *Host) parkHostListeners(set *portalloc.Set) {
+	for _, name := range set.Names() {
+		ln, err := set.Detach(name)
+		if err != nil {
+			logging.L().Warn("could not hand over reserved listener", "port_name", name, "err", err)
+			continue
+		}
+		h.cfg.SetHostListener(name, ln)
+	}
+}
+
+// releaseHostListener closes a reserved listener whose service binds the
+// address itself, immediately before that service binds.
+func (h *Host) releaseHostListener(name string) {
+	closeListener(name, h.cfg.TakeHostListener(name))
+}
+
+// closeListener closes a reserved listener that will not be served, logging
+// rather than failing the start.
+func closeListener(name string, ln net.Listener) {
+	if ln == nil {
+		return
+	}
+	if err := ln.Close(); err != nil {
+		logging.L().Warn("could not release reserved listener", "port_name", name, "err", err)
+	}
+}
+
+// newNTPResponder builds the host SNTP responder on the listener reserved for
+// it, or binds the configured address when no reservation was made.
+func (h *Host) newNTPResponder() (*timesource.Responder, error) {
+	if ln := h.cfg.TakeHostListener(config.PortNameNTP); ln != nil {
+		return timesource.NewResponderWithListener(ln), nil
+	}
+	responder, err := timesource.NewResponder(config.LoopbackAddr(h.cfg.LocalNTPPort))
+	if err != nil {
+		return nil, fmt.Errorf("bind sntp responder: %w", err)
+	}
+	return responder, nil
+}
+
+// bootStagePublisher writes the coarse boot phase to the bootstage file,
+// advancing monotonically (rank-gated; Failed is terminal). Safe for the
+// concurrent Begin/Done calls the runner makes from its wait goroutines.
+type bootStagePublisher struct {
+	mu       sync.Mutex
+	stateDir string
+	cur      bootstage.Stage
+}
+
+// newBootStagePublisher creates the publisher and writes the initial Boot phase
+// immediately, so the menubar shows "Booting Linux…" the moment a start begins.
+func newBootStagePublisher(stateDir string) *bootStagePublisher {
+	p := &bootStagePublisher{stateDir: stateDir}
+	p.advance(bootstage.Boot)
+	return p
+}
+
+func (p *bootStagePublisher) advance(to bootstage.Stage) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if to != bootstage.Failed && bootstage.Rank(to) <= bootstage.Rank(p.cur) {
+		return
+	}
+	p.cur = to
+	_ = bootstage.Write(p.stateDir, to, time.Now())
+}
+
+// bootStageProgress is a vm.Progress sink that maps the runner's stage events
+// onto bootstage phases. VMBoot done -> Setup covers the guest's own boot
+// (kernel/cloud-init/ssh) between the VM reaching "running" and the Incus wait.
+type bootStageProgress struct{ pub *bootStagePublisher }
+
+func (p *bootStageProgress) Begin(stage, _ string, _ time.Duration) {
+	switch stage {
+	case vm.StageVMBoot:
+		p.pub.advance(bootstage.Boot)
+	case vm.StageIncusWait:
+		p.pub.advance(bootstage.Incus)
+	}
+}
+func (p *bootStageProgress) Substatus(string, string) {}
+func (p *bootStageProgress) Done(stage string) {
+	if stage == vm.StageVMBoot {
+		p.pub.advance(bootstage.Setup)
+	}
+}
+func (p *bootStageProgress) Fail(string, error) { p.pub.advance(bootstage.Failed) }
+
+// teeProgress fans every progress event out to several sinks (the bootstage
+// file publisher plus the front end's optional TTY board).
+type teeProgress []vm.Progress
+
+func (t teeProgress) Begin(s, l string, b time.Duration) {
+	for _, p := range t {
+		p.Begin(s, l, b)
+	}
+}
+func (t teeProgress) Substatus(s, m string) {
+	for _, p := range t {
+		p.Substatus(s, m)
+	}
+}
+func (t teeProgress) Done(s string) {
+	for _, p := range t {
+		p.Done(s)
+	}
+}
+func (t teeProgress) Fail(s string, e error) {
+	for _, p := range t {
+		p.Fail(s, e)
+	}
+}
