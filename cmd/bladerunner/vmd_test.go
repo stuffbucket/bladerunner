@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/vmhost"
 )
@@ -273,11 +274,11 @@ func TestVMDDrainLeavesReleaseToDrainOnSuccess(t *testing.T) {
 // must not throw away the log of the boot that failed.
 func TestOpenVMDLogAppendsPrivately(t *testing.T) {
 	dir := t.TempDir()
-	if got, want := vmdLogPath(dir), filepath.Join(dir, "vmd.log"); got != want {
+	if got, want := vmdLogPath(dir, ""), filepath.Join(dir, "vmd.log"); got != want {
 		t.Fatalf("vmdLogPath = %q, want %q", got, want)
 	}
 
-	first, err := openVMDLog(dir)
+	first, err := openVMDLog(dir, "")
 	if err != nil {
 		t.Fatalf("openVMDLog: %v", err)
 	}
@@ -288,7 +289,7 @@ func TestOpenVMDLogAppendsPrivately(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	second, err := openVMDLog(dir)
+	second, err := openVMDLog(dir, "")
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -299,7 +300,7 @@ func TestOpenVMDLogAppendsPrivately(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	data, err := os.ReadFile(vmdLogPath(dir))
+	data, err := os.ReadFile(vmdLogPath(dir, ""))
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
@@ -307,12 +308,92 @@ func TestOpenVMDLogAppendsPrivately(t *testing.T) {
 		t.Fatalf("log = %q, want the second open to have appended", data)
 	}
 
-	info, err := os.Stat(vmdLogPath(dir))
+	info, err := os.Stat(vmdLogPath(dir, ""))
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("log mode = %v, want 0600", perm)
+	}
+}
+
+// TestHoldersDoNotShareALogFile is the resource-leak regression. Every holder
+// used to be spawned with the registry ROOT as its state dir, so every one of
+// them appended to a single ~/.local/state/bladerunner/vmd.log: two running
+// holders interleaved their output into one file that nothing ever truncated.
+func TestHoldersDoNotShareALogFile(t *testing.T) {
+	root := t.TempDir()
+
+	demo := vmdLogPath(root, "demo")
+	other := vmdLogPath(root, "other")
+	if demo == other {
+		t.Fatalf("two instances share the holder log %q", demo)
+	}
+	// Both still live under the directory they were spawned with.
+	for _, path := range []string{demo, other} {
+		if filepath.Dir(path) != root {
+			t.Errorf("holder log %q escaped %q", path, root)
+		}
+	}
+	// The flat default keeps the historical name.
+	if got, want := vmdLogPath(root, config.DefaultInstanceName), filepath.Join(root, "vmd.log"); got != want {
+		t.Errorf("default holder log = %q, want %q", got, want)
+	}
+	// A name that is not a usable path element must not be pasted into one.
+	if got := vmdLogPath(root, "../../etc/passwd"); filepath.Dir(got) != root {
+		t.Errorf("holder log %q escaped %q", got, root)
+	}
+
+	// And the name a spawn derives is what separates the cartridge holders the
+	// mount watcher starts, all of which share the registry root.
+	spawns := []holderSpawn{
+		{StateDir: root, CartridgePath: "/Users/me/Downloads/demo.dmg"},
+		{StateDir: root, CartridgePath: "/Users/me/Downloads/other.dmg"},
+		{StateDir: root, Name: "named", CartridgePath: "/Users/me/Downloads/demo.dmg"},
+	}
+	seen := map[string]bool{}
+	for _, s := range spawns {
+		path := vmdLogPath(s.StateDir, s.logName())
+		if seen[path] {
+			t.Errorf("holder spawn %+v reuses the log %q", s, path)
+		}
+		seen[path] = true
+	}
+}
+
+// The holder log is capped: a holder writes to it for as long as the VM runs,
+// and nothing else ever truncates it.
+func TestOpenVMDLogRotatesAnOversizedLog(t *testing.T) {
+	dir := t.TempDir()
+	path := vmdLogPath(dir, "demo")
+	oversized := make([]byte, vmdLogMaxSizeMB*1024*1024+1)
+	if err := os.WriteFile(path, oversized, 0o600); err != nil {
+		t.Fatalf("stage oversized log: %v", err)
+	}
+
+	f, err := openVMDLog(dir, "demo")
+	if err != nil {
+		t.Fatalf("openVMDLog: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("holder log = %d bytes, want a freshly rotated (empty) file", info.Size())
+	}
+	// The rotated generation is kept beside it, so the previous boot's output
+	// survives the rotation.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("rotation discarded the previous log: %v", entries)
 	}
 }
 

@@ -84,3 +84,49 @@ func TestRotatingFile_EmptyPath(t *testing.T) {
 		t.Fatalf("expected error for empty path")
 	}
 }
+
+// RotateIfLarger serves logs written by a DIFFERENT process (a detached child
+// holding an inherited descriptor), where there is nobody on this side to
+// notice the file growing. It must rotate only what is already oversized.
+func TestRotateIfLargerOnlyRotatesAnOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	opts := RotateOptions{MaxSize: 1, MaxBackups: 2}
+
+	// Missing file: nothing to rotate, and nothing created.
+	missing := filepath.Join(dir, "missing.log")
+	if err := RotateIfLarger(missing, opts); err != nil {
+		t.Fatalf("RotateIfLarger on a missing file: %v", err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("RotateIfLarger created %s: %v", missing, err)
+	}
+
+	// Small file: left exactly as it was.
+	small := filepath.Join(dir, "small.log")
+	if err := os.WriteFile(small, []byte("still small\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RotateIfLarger(small, opts); err != nil {
+		t.Fatalf("RotateIfLarger on a small file: %v", err)
+	}
+	data, err := os.ReadFile(small)
+	if err != nil || string(data) != "still small\n" {
+		t.Fatalf("small log = %q, %v; want it untouched", data, err)
+	}
+
+	// Oversized file: rotated away, leaving an empty current file.
+	big := filepath.Join(dir, "big.log")
+	if err := os.WriteFile(big, make([]byte, bytesPerMB+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RotateIfLarger(big, opts); err != nil {
+		t.Fatalf("RotateIfLarger on an oversized file: %v", err)
+	}
+	info, err := os.Stat(big)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("rotated log = %d bytes, want 0", info.Size())
+	}
+}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
+	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/vmhost"
@@ -228,19 +229,75 @@ func vmdDrain(ctx context.Context, host vmdDrainer, release context.CancelFunc, 
 	release()
 }
 
-// vmdLogPath returns the holder's log file: <stateDir>/vmd.log. A detached
-// holder has no terminal, so this is the only place its output can go.
-func vmdLogPath(stateDir string) string {
-	return filepath.Join(stateDir, vmdLogName)
+// vmdLogPath returns the holder's log file. A detached holder has no terminal,
+// so this is the only place its output can go.
+//
+// The file is named PER INSTANCE — <stateDir>/vmd-<name>.log — because the
+// state dir alone does not separate holders: a cartridge holder is spawned with
+// the registry ROOT as its state dir (its own state lives inside a volume it
+// has not mounted yet), so every cartridge ever booted would otherwise append
+// to one shared vmd.log and interleave. The flat default instance keeps the
+// original vmd.log name, so nothing that reads it has to learn a new path.
+func vmdLogPath(stateDir, name string) string {
+	return filepath.Join(stateDir, vmdLogName(name))
 }
 
-// vmdLogName is the holder's log file name.
-const vmdLogName = "vmd.log"
+// vmdLogName is the holder log file name for an instance.
+//
+// A name that is not a usable path element falls back to the default file
+// rather than being pasted into a path: this runs before the holder exists, so
+// there is nothing yet to reject an invalid name, and a log file is not worth a
+// directory traversal.
+func vmdLogName(name string) string {
+	if name == "" || name == config.DefaultInstanceName || instance.ValidName(name) != nil {
+		return vmdDefaultLogName
+	}
+	return vmdLogPrefix + name + vmdLogExt
+}
+
+const (
+	// vmdDefaultLogName is the holder log of the flat default instance, which
+	// has carried this name since holders existed.
+	vmdDefaultLogName = "vmd.log"
+	// vmdLogPrefix / vmdLogExt bracket a named instance's holder log.
+	vmdLogPrefix = "vmd-"
+	vmdLogExt    = ".log"
+)
+
+// vmdLogRotation caps the holder log. The holder writes to it for as long as
+// the VM runs and nothing else ever truncates it, so without a cap it is a file
+// that only grows. Rotation happens at OPEN time (see openVMDLog): the writer
+// is a detached child process, so this side can act only when it hands over the
+// descriptor.
+var vmdLogRotation = logging.RotateOptions{
+	MaxSize:    vmdLogMaxSizeMB,
+	MaxBackups: vmdLogMaxBackups,
+	MaxAge:     vmdLogMaxAgeDays,
+	Compress:   true,
+}
+
+const (
+	// vmdLogMaxSizeMB is the size at which the holder log is rotated.
+	vmdLogMaxSizeMB = 10
+	// vmdLogMaxBackups is how many rotated holder logs are kept.
+	vmdLogMaxBackups = 3
+	// vmdLogMaxAgeDays is how long a rotated holder log is kept.
+	vmdLogMaxAgeDays = 14
+)
 
 // openVMDLog opens the holder log for appending, creating it 0600 — it carries
-// instance paths and boot detail and is nobody else's business.
-func openVMDLog(stateDir string) (*os.File, error) {
-	f, err := os.OpenFile(vmdLogPath(stateDir), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+// instance paths and boot detail and is nobody else's business. An oversized
+// log is rotated first, so a machine that boots the same instance for months
+// does not accumulate one unbounded file.
+//
+// A rotation failure is logged and not fatal: it costs disk, whereas refusing
+// to spawn costs the user their VM.
+func openVMDLog(stateDir, name string) (*os.File, error) {
+	path := vmdLogPath(stateDir, name)
+	if err := logging.RotateIfLarger(path, vmdLogRotation); err != nil {
+		logging.L().Warn("could not rotate the holder log", "path", path, "err", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open holder log: %w", err)
 	}

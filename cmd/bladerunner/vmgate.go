@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/logging"
@@ -203,19 +204,34 @@ func (h holderSpawn) args() []string {
 	return args
 }
 
+// logName is the instance name this spawn's holder log is keyed on: the
+// explicit name, else the cartridge's own name (a cartridge holder is spawned
+// with the registry root as its state dir, so the name is the only thing that
+// separates its log from every other cartridge's), else "" for the flat
+// default.
+func (h holderSpawn) logName() string {
+	if h.Name != "" {
+		return h.Name
+	}
+	if h.CartridgePath == "" {
+		return ""
+	}
+	return cartridge.NameFromPath(h.CartridgePath)
+}
+
 // spawnHolder starts a detached `br vmd` for one instance and returns its PID.
 //
 // The holder is a re-exec of this same signed binary (see vmd.go for why), it
 // runs in its own session so nothing that happens to this process reaches it,
-// and its output goes to <stateDir>/vmd.log because it has no terminal to write
-// to. This function returns as soon as the child is running; readiness is
-// observed through the control socket and the instance registry the holder
-// publishes, not by waiting on the process.
+// and its output goes to the instance's own holder log because it has no
+// terminal to write to. This function returns as soon as the child is running;
+// readiness is observed through the control socket and the instance registry
+// the holder publishes, not by waiting on the process.
 func spawnHolder(spawn holderSpawn) (int, error) {
 	if spawn.StateDir == "" {
 		return 0, errHolderStateDir
 	}
-	logFile, err := openVMDLog(spawn.StateDir)
+	logFile, err := openVMDLog(spawn.StateDir, spawn.logName())
 	if err != nil {
 		return 0, err
 	}

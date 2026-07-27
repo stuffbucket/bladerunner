@@ -520,6 +520,9 @@ func bootDetectedCartridge(a watchAction) (int, error) {
 			return 0, fmt.Errorf("unmount %s: %w", a.Mountpoint, err)
 		}
 	}
+	// The holder's own state lives inside the cartridge it has not mounted yet,
+	// so it is spawned against the registry root; Name is what keeps its log
+	// (and its registry entry) separate from every other cartridge's.
 	pid, err := spawnHolder(holderSpawn{StateDir: root, Name: a.Name, CartridgePath: a.SourcePath})
 	if err != nil {
 		return 0, fmt.Errorf("boot cartridge %q: %w (its volume was unmounted first; retry with 'br boot %s')",

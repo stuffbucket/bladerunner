@@ -119,3 +119,51 @@ func (r *RotatingFile) Close() error {
 	})
 	return r.closeErr
 }
+
+// bytesPerMB converts RotateOptions.MaxSize (megabytes, lumberjack's unit) into
+// bytes.
+const bytesPerMB = 1024 * 1024
+
+// RotateIfLarger rotates the log at path when it has already grown past
+// opts.MaxSize megabytes, then returns — leaving no file open.
+//
+// It exists for logs that are written by a DIFFERENT process than the one that
+// opens them: a detached child inherits a plain file descriptor, so there is
+// nobody on this side to notice it growing. RotatingFile cannot serve that case
+// at all, because its pump goroutine lives in the process that created it — a
+// short-lived spawner would exit and leave the child writing into a pipe with
+// no reader. Checking the size at open time is the part that can be done from
+// here, and it is what stops the file growing without bound across spawns.
+//
+// The rotation itself (timestamped backup, backup pruning, optional
+// compression) is lumberjack's, the same implementation RotatingFile and Init
+// use; nothing about the policy is reimplemented here. A path that does not
+// exist yet is not an error: there is nothing to rotate.
+func RotateIfLarger(path string, opts RotateOptions) error {
+	if path == "" || opts.MaxSize <= 0 {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat log %s: %w", path, err)
+	}
+	if info.Size() < int64(opts.MaxSize)*bytesPerMB {
+		return nil
+	}
+
+	rot := &lumberjack.Logger{
+		Filename:   path,
+		MaxSize:    opts.MaxSize,
+		MaxBackups: opts.MaxBackups,
+		MaxAge:     opts.MaxAge,
+		Compress:   opts.Compress,
+	}
+	defer func() { _ = rot.Close() }()
+	if err := rot.Rotate(); err != nil {
+		return fmt.Errorf("rotate log %s: %w", path, err)
+	}
+	return nil
+}
