@@ -108,6 +108,69 @@ func TestOpenNameOverrideWins(t *testing.T) {
 	}
 }
 
+// TestOpenLegacyCartridgeWithADisagreeingVolumeName is the backward-compatibility
+// half of the volume-name fix.
+//
+// A cartridge packed by an OLDER build carries the SOURCE DISK's name in its
+// APFS volume and in its on-image metadata, whichever file it was written to:
+// `br disk pack debian-trixie-gui --out smoke-cartridge.sparseimage` produced a
+// volume named bladerunner-debian-trixie-gui inside smoke-cartridge.sparseimage.
+// Those cartridges are already in circulation (they AirDrop), so opening and
+// booting one must keep working exactly as before — the new derivation applies
+// at PACK time only, and nothing on the open path may start requiring the two
+// names to agree.
+func TestOpenLegacyCartridgeWithADisagreeingVolumeName(t *testing.T) {
+	tmp := t.TempDir()
+	// The mount is named after the disk (what the old -volname baked in) while
+	// the image file is named after the cartridge — the disagreement itself.
+	mp := filepath.Join(tmp, VolumesRoot, VolumeName("debian-trixie-gui"))
+	if err := os.MkdirAll(mp, layoutDirPerm); err != nil {
+		t.Fatalf("mkdir %s: %v", mp, err)
+	}
+	// Packed the old way: the metadata and manifest carry the disk's name too.
+	if err := Pack(mp, validSourceManifest(), PackOptions{Name: "debian-trixie-gui", PackedBy: "br-old"}); err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	writeFixtureFile(t, filepath.Join(mp, RootImageFile), "not-really-a-disk")
+
+	image := filepath.Join(tmp, "smoke-cartridge"+SparseExt)
+	f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
+
+	o, err := open(context.Background(), f, image, privateOpen(mp))
+	if err != nil {
+		t.Fatalf("a cartridge from an older build must still open: %v", err)
+	}
+	t.Cleanup(func() { o.releaseClaim() })
+
+	// The boot-side name still comes from the FILE, as it always has; the stale
+	// volume name is simply never consulted.
+	if o.Name != "smoke-cartridge" {
+		t.Errorf("Name = %q, want smoke-cartridge (derived from the file)", o.Name)
+	}
+	// ...and the cartridge's own record of what it was packed as is preserved,
+	// not overwritten or rejected.
+	if o.Metadata.Name != "debian-trixie-gui" {
+		t.Errorf("Metadata.Name = %q, want the name it was packed under", o.Metadata.Name)
+	}
+	if o.Manifest == nil || o.Manifest.Name != "debian-trixie-gui" {
+		t.Fatalf("Manifest = %+v, want the packed manifest untouched", o.Manifest)
+	}
+
+	// Detection of that same legacy volume also still works: the prefilter only
+	// asks for the bladerunner- prefix, and the name it reports is the one the
+	// cartridge records.
+	if !IsCandidate(filepath.Base(mp)) {
+		t.Errorf("IsCandidate(%q) = false; a legacy cartridge would never be offered", filepath.Base(mp))
+	}
+	d := detectNoHdiutil(t, mp)
+	if d.Status != StatusBootable {
+		t.Fatalf("Status = %q (%s), want %q", d.Status, d.Reason, StatusBootable)
+	}
+	if d.Name != "debian-trixie-gui" {
+		t.Errorf("Detected.Name = %q, want debian-trixie-gui", d.Name)
+	}
+}
+
 // TestOpenConvertsAShippedDMG pins the pristine-artifact rule: a .dmg is never
 // attached directly, it is converted to a writable working .sparseimage first.
 func TestOpenConvertsAShippedDMG(t *testing.T) {

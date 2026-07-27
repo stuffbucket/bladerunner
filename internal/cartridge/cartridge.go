@@ -179,12 +179,17 @@ func VolumeName(name string) string {
 // createArgs builds the `hdiutil create` argument vector for an APFS SPARSE
 // cartridge. hdiutil auto-appends .sparseimage; we pass the full path (no
 // double-append is observed) and confirm the real output path from stdout.
-func createArgs(path, name string, sizeGiB int) []string {
+//
+// The volume name is DERIVED from path rather than accepted as a parameter, and
+// that is the whole point: a cartridge's identity is its own file name, so the
+// name baked into the volume cannot disagree with the name NameFromPath gives
+// the same file. See Create for what that disagreement used to cost.
+func createArgs(path string, sizeGiB int) []string {
 	return []string{
 		cmdCreate,
 		"-type", "SPARSE",
 		"-fs", "APFS",
-		"-volname", VolumeName(name),
+		"-volname", VolumeName(NameFromPath(path)),
 		"-size", fmt.Sprintf("%dg", sizeGiB),
 		"-nospotlight",
 		flagQuiet,
@@ -216,8 +221,8 @@ func compactArgs(path string) []string {
 // create provisions a new sparse cartridge image and returns the actual output
 // path (resolved from hdiutil's "created:" line, falling back to the requested
 // path with a guaranteed .sparseimage extension).
-func create(ctx context.Context, r commandRunner, path, name string, sizeGiB int) (string, error) {
-	out, errOut, err := r.run(ctx, hdiutil, createArgs(path, name, sizeGiB)...)
+func create(ctx context.Context, r commandRunner, path string, sizeGiB int) (string, error) {
+	out, errOut, err := r.run(ctx, hdiutil, createArgs(path, sizeGiB)...)
 	if err != nil {
 		return "", wrapHdiutil(cmdCreate, err, errOut)
 	}
@@ -619,16 +624,28 @@ func decodePlistValue(dec *xml.Decoder, start xml.StartElement) (any, error) {
 // unused-code trap on Linux CI).
 
 // Create provisions a new APFS SPARSE cartridge image of sizeGiB capacity at
-// path (whose APFS volume is named bladerunner-<name>) and returns the actual
-// output path hdiutil produced. Sparse images consume only real bytes, so the
-// provisioned size is a ceiling, not a cost.
-func Create(path, name string, sizeGiB int) (string, error) {
+// path and returns the actual output path hdiutil produced. Sparse images
+// consume only real bytes, so the provisioned size is a ceiling, not a cost.
+//
+// The volume is named bladerunner-<NameFromPath(path)> — after the CARTRIDGE
+// being written, never after whatever disk supplied its contents. Three names
+// have to agree for a cartridge to work, and this is where all three are
+// seeded: the volume mount detection reads back (NameFromVolume), the name `br
+// boot <file>` derives (NameFromPath), and the instance name the boot then
+// registers under. Taking the name as a parameter is what let `br disk pack
+// <disk> --out <other>.sparseimage` bake the DISK's name into the volume: every
+// cartridge packed from one base disk then mounted at the same /Volumes path,
+// and `br watch` reported a name the user could not eject by.
+//
+// A caller passing a user-supplied path must check the derived name itself
+// (instance.ValidName): Create is a plain hdiutil wrapper and does not judge it.
+func Create(path string, sizeGiB int) (string, error) {
 	if !hostSupported() {
 		return "", ErrUnsupported
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), createTimeout)
 	defer cancel()
-	return create(ctx, defaultRunner, path, name, sizeGiB)
+	return create(ctx, defaultRunner, path, sizeGiB)
 }
 
 // Attach mounts the cartridge image privately at mountpoint (-nobrowse) and
