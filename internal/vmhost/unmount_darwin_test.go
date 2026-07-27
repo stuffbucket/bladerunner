@@ -46,9 +46,8 @@ func (f *fakeUnmountSession) Close() error {
 	return nil
 }
 
-// cartridgeHost builds a cartridge Host whose mount records devNode, with the
-// session constructor replaced by newSession.
-func cartridgeHost(t *testing.T, devNode string, newSession func() (unmountSession, error)) *Host {
+// cartridgeHost builds a cartridge Host whose mount records devNode.
+func cartridgeHost(t *testing.T, devNode string) *Host {
 	t.Helper()
 	host, err := New(Spec{
 		Kind:          instance.KindCartridge,
@@ -63,19 +62,27 @@ func cartridgeHost(t *testing.T, devNode string, newSession func() (unmountSessi
 		Name:  "demo",
 		Mount: cartridge.Mount{Mountpoint: "/Volumes/bladerunner-demo", DevNode: devNode},
 	})
-	host.newUnmountSession = newSession
 	return host
+}
+
+// neverOpened is the constructor for the bail-outs that decide before there is
+// anything to open: reaching DiskArbitration at all would be the bug.
+func neverOpened(t *testing.T) func() (unmountSession, error) {
+	t.Helper()
+	return func() (unmountSession, error) {
+		t.Error("a bail-out that precedes the session must not open one")
+		return nil, errNoSession
+	}
 }
 
 // The four ways protection is lost, plus the one that is not a loss at all.
 // Each must leave the start unfailed, arm no watcher, and say which it was.
 func TestStartUnmountWatchBailOutsAreRecorded(t *testing.T) {
-	failingSession := func() (unmountSession, error) { return nil, errNoSession }
-
 	cases := []struct {
-		name string
-		host func(t *testing.T) *Host
-		want UnprotectedReason
+		name    string
+		host    func(t *testing.T) *Host
+		session func(t *testing.T) func() (unmountSession, error)
+		want    UnprotectedReason
 	}{
 		{
 			name: "the cartridge step produced no mount",
@@ -87,30 +94,38 @@ func TestStartUnmountWatchBailOutsAreRecorded(t *testing.T) {
 				}
 				return host
 			},
-			want: UnprotectedNoCartridge,
+			session: neverOpened,
+			want:    UnprotectedNoCartridge,
 		},
 		{
-			name: "the mount recorded no device node",
-			host: func(t *testing.T) *Host { return cartridgeHost(t, "", nil) },
-			want: UnprotectedNoDevNode,
+			name:    "the mount recorded no device node",
+			host:    func(t *testing.T) *Host { return cartridgeHost(t, "") },
+			session: neverOpened,
+			want:    UnprotectedNoDevNode,
 		},
 		{
-			name: "the recorded device node names no BSD disk",
-			host: func(t *testing.T) *Host { return cartridgeHost(t, "/Volumes/bladerunner-demo", nil) },
-			want: UnprotectedUnreadableDevNode,
+			name:    "the recorded device node names no BSD disk",
+			host:    func(t *testing.T) *Host { return cartridgeHost(t, "/Volumes/bladerunner-demo") },
+			session: neverOpened,
+			want:    UnprotectedUnreadableDevNode,
 		},
 		{
 			name: "DiskArbitration would not open",
-			host: func(t *testing.T) *Host { return cartridgeHost(t, "/dev/disk9s1", failingSession) },
+			host: func(t *testing.T) *Host { return cartridgeHost(t, "/dev/disk9s1") },
+			session: func(t *testing.T) func() (unmountSession, error) {
+				t.Helper()
+				return func() (unmountSession, error) { return nil, errNoSession }
+			},
 			want: UnprotectedNoSession,
 		},
 		{
 			name: "the approval watcher would not register",
-			host: func(t *testing.T) *Host {
+			host: func(t *testing.T) *Host { return cartridgeHost(t, "/dev/disk9s1") },
+			session: func(t *testing.T) func() (unmountSession, error) {
 				t.Helper()
-				return cartridgeHost(t, "/dev/disk9s1", func() (unmountSession, error) {
+				return func() (unmountSession, error) {
 					return &fakeUnmountSession{watchErr: errors.New("register refused")}, nil
-				})
+				}
 			},
 			want: UnprotectedWatchFailed,
 		},
@@ -119,7 +134,7 @@ func TestStartUnmountWatchBailOutsAreRecorded(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			host := tc.host(t)
-			if err := host.startUnmountWatch(); err != nil {
+			if err := host.watchUnmount(tc.session(t)); err != nil {
 				t.Fatalf("startUnmountWatch failed the start: %v — the veto must fail open", err)
 			}
 			if got := host.UnmountProtection(); got != tc.want {
@@ -141,9 +156,9 @@ func TestStartUnmountWatchBailOutsAreRecorded(t *testing.T) {
 // queue for the life of the holder.
 func TestStartUnmountWatchClosesTheSessionWhenRegistrationFails(t *testing.T) {
 	session := &fakeUnmountSession{watchErr: errors.New("register refused")}
-	host := cartridgeHost(t, "/dev/disk9s1", func() (unmountSession, error) { return session, nil })
+	host := cartridgeHost(t, "/dev/disk9s1")
 
-	if err := host.startUnmountWatch(); err != nil {
+	if err := host.watchUnmount(func() (unmountSession, error) { return session, nil }); err != nil {
 		t.Fatalf("startUnmountWatch: %v", err)
 	}
 	if got := session.closed.Load(); got != 1 {
@@ -156,9 +171,9 @@ func TestStartUnmountWatchClosesTheSessionWhenRegistrationFails(t *testing.T) {
 // both cancels the watcher and closes the session.
 func TestStartUnmountWatchArmsTheVeto(t *testing.T) {
 	session := &fakeUnmountSession{}
-	host := cartridgeHost(t, "/dev/disk9s1", func() (unmountSession, error) { return session, nil })
+	host := cartridgeHost(t, "/dev/disk9s1")
 
-	if err := host.startUnmountWatch(); err != nil {
+	if err := host.watchUnmount(func() (unmountSession, error) { return session, nil }); err != nil {
 		t.Fatalf("startUnmountWatch: %v", err)
 	}
 	if got := host.UnmountProtection(); got != UnprotectedNone {
@@ -198,12 +213,13 @@ func TestStartUnmountWatchLeavesFlatInstancesProtectionless(t *testing.T) {
 }
 
 // Without an injected constructor the veto reaches for a real DiskArbitration
-// session, which is what a holder does. Whether the framework is available in
-// the test environment is not the assertion: the assertion is that either
-// outcome leaves the Host consistent — armed, or unprotected with a stated
-// reason — and never fails the start.
+// session, which is what a holder does — and startUnmountWatch is what wires
+// the two together. Whether the framework is available in the test environment
+// is not the assertion: the assertion is that either outcome leaves the Host
+// consistent — armed, or unprotected with a stated reason — and never fails the
+// start.
 func TestStartUnmountWatchUsesRealDiskArbitrationByDefault(t *testing.T) {
-	host := cartridgeHost(t, "/dev/disk9s1", nil)
+	host := cartridgeHost(t, "/dev/disk9s1")
 	if err := host.startUnmountWatch(); err != nil {
 		t.Fatalf("startUnmountWatch: %v", err)
 	}

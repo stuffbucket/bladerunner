@@ -277,11 +277,6 @@ type Host struct {
 	// non-cartridge instance, a platform without DiskArbitration, or a failed
 	// registration (which is warned about, never fatal).
 	unmountCancel func() error
-	// newUnmountSession opens the DiskArbitration session the veto registers
-	// on. It is a field only so a test can inject a constructor that fails
-	// (or a session that refuses to register) without a real framework; nil
-	// means diskarb.NewSession.
-	newUnmountSession func() (unmountSession, error)
 	// unprotected records why this instance is running WITHOUT the unmount
 	// veto, or UnprotectedNone when it is armed. Guarded by mu: it is written
 	// on the goroutine driving Run and read by whoever reports instance state.
@@ -555,42 +550,10 @@ func (h *Host) setUnmountProtection(why UnprotectedReason) {
 	h.unprotected = why
 }
 
-// unprotect records why the veto is off, says so once at Warn, and returns nil.
-//
-// Returning nil is the fail-open contract: startUnmountWatch is a lifecycle
-// step, and a non-nil error would abort the whole start over a missing safety
-// net. args are appended to the log line as key/value pairs.
-func (h *Host) unprotect(why UnprotectedReason, args ...any) error {
-	h.setUnmountProtection(why)
-	logging.L().Warn(string(why)+"; unmount protection is off", args...)
-	return nil
-}
-
-// unmountSession is the part of a *diskarb.Session the unmount veto uses.
-//
-// It is an interface so the two ways registration can fail — the session, then
-// the watcher — are reachable from a test with no DiskArbitration anywhere.
-// Both are bail-outs that disable protection silently, which is the failure
-// mode this whole mechanism exists to prevent.
-type unmountSession interface {
-	// WatchUnmountApproval registers fn for disks matching bsdName.
-	WatchUnmountApproval(bsdName string, fn func(diskarb.DiskInfo) diskarb.Dissent) (diskarb.CancelFunc, error)
-	// Close releases the session.
-	Close() error
-}
-
-// openUnmountSession opens the session to register the veto on: the injected
-// constructor when a test supplied one, else a real DiskArbitration session.
-func (h *Host) openUnmountSession() (unmountSession, error) {
-	if h.newUnmountSession != nil {
-		return h.newUnmountSession()
-	}
-	session, err := diskarb.NewSession()
-	if err != nil {
-		return nil, fmt.Errorf("open DiskArbitration session: %w", err)
-	}
-	return session, nil
-}
+// The session type the veto registers on, the constructor that opens it and the
+// bail-out helper that records a lost veto all live in unmount_darwin.go: they
+// are DiskArbitration's, and DiskArbitration is macOS-only. What stays here is
+// what both platforms share — the recorded reason, the filter, and the decision.
 
 // unmountFilter is the BSD name the unmount-approval watcher registers for, or
 // "" when there is nothing to protect: no cartridge, or a recorded device node
