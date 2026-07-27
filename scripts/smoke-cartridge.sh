@@ -18,7 +18,10 @@
 # <state>/mnt/<name>. resolve_mnt() handles both, so this script keeps passing
 # whichever default is in force.
 #
-# Slow (downloads a guest image and boots a VM): budget ~5-10 minutes. Needs a
+# Slow (downloads a guest image and boots a VM): budget ~15-25 minutes. The pack
+# step alone takes ~7.5 minutes on a cold image cache. Do NOT run this under an
+# outer timeout shorter than that: killing the script makes it look like a boot
+# failure when the guest was simply still coming up. Needs a
 # codesigned binary (the script runs `make sign`), network, and macOS hdiutil.
 #
 # Env overrides:
@@ -69,12 +72,19 @@ mount_line_path() { sed 's/.*\/Volumes\//\/Volumes\//'; }
 resolve_mnt() {
   local mp
   mp="$(hdiutil info 2>/dev/null | grep -m1 "/Volumes/$VOLNAME" | mount_line_path)"
-  if [[ -n "$mp" && -d "$mp" ]]; then printf '%s\n' "$mp"; return; fi
+  if [[ -n "$mp" && -d "$mp" ]]; then printf '%s\n' "$mp"; return 0; fi
   # --private-mount (and any future policy that dictates a location) puts the
   # volume outside /Volumes, where hdiutil info still reports it by path.
   for mp in "$PRIVATE_MNT" "$BROWSABLE_MNT"; do
-    [[ -d "$mp/share" ]] && { printf '%s\n' "$mp"; return; }
+    [[ -d "$mp/share" ]] && { printf '%s\n' "$mp"; return 0; }
   done
+  # "Not mounted yet" is the normal case while the guest is still attaching, so
+  # it must be success-with-no-output, NOT a non-zero return. Without this the
+  # last command evaluated is the failing [[ -d ]] above, the function returns
+  # 1, and `MNT="$(resolve_mnt)"` under `set -e` kills the whole script mid-wait
+  # — silently, because no `fail` ever runs. The caller already treats an empty
+  # result as "keep waiting".
+  return 0
 }
 
 cleanup() {
