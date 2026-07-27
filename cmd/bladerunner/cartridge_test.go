@@ -59,6 +59,12 @@ func TestPackOutPath(t *testing.T) {
 	if got, err := packOutPath("/x/custom.sparseimage", "demo"); err != nil || got != "/x/custom.sparseimage" {
 		t.Fatalf("packOutPath(out) = %q, %v", got, err)
 	}
+	// An --out without the extension gets it, because hdiutil appends it
+	// anyway: the path we name the cartridge after has to be the file that
+	// actually appears, or pack and boot derive different names for it.
+	if got, err := packOutPath("/x/custom", "demo"); err != nil || got != "/x/custom"+cartridge.SparseExt {
+		t.Fatalf("packOutPath(no ext) = %q, %v", got, err)
+	}
 	// Default is ./<name>.sparseimage in the cwd.
 	got, err := packOutPath("", "demo")
 	if err != nil {
@@ -66,6 +72,123 @@ func TestPackOutPath(t *testing.T) {
 	}
 	if filepath.Base(got) != "demo"+cartridge.SparseExt {
 		t.Fatalf("default out base = %q, want demo%s", filepath.Base(got), cartridge.SparseExt)
+	}
+}
+
+// Whatever --out is spelled, the name the cartridge is packed under and the
+// name `br boot` derives from the file that appears must be the same string.
+func TestPackOutPathAndCartridgeNameAgree(t *testing.T) {
+	for _, out := range []string{"/x/demo" + cartridge.SparseExt, "/x/demo", "demo"} {
+		resolved, err := packOutPath(out, "incus")
+		if err != nil {
+			t.Fatalf("packOutPath(%q): %v", out, err)
+		}
+		name, err := packCartridgeName(resolved)
+		if err != nil {
+			t.Fatalf("packCartridgeName(%q): %v", resolved, err)
+		}
+		if name != "demo" {
+			t.Errorf("--out %q packed as %q, want demo", out, name)
+		}
+		if boot := cartridge.NameFromPath(resolved); boot != name {
+			t.Errorf("--out %q: packed as %q but br boot derives %q", out, name, boot)
+		}
+	}
+	// `disk pack` writes the runnable form; --ship writes the .dmg. Asking for
+	// a .dmg output is refused rather than silently producing
+	// demo.dmg.sparseimage under the unusable name "demo.dmg".
+	resolved, err := packOutPath("/x/demo"+cartridge.DMGExt, "incus")
+	if err != nil {
+		t.Fatalf("packOutPath: %v", err)
+	}
+	if _, err := packCartridgeName(resolved); !errors.Is(err, instance.ErrInvalidName) {
+		t.Fatalf("packCartridgeName(%q) = %v, want an invalid-name error", resolved, err)
+	}
+}
+
+// TestPackCartridgeNameComesFromTheOutputFile is the CLI half of the volume-name
+// regression (see internal/cartridge's
+// TestCreateArgsVolumeNameComesFromTheCartridgeNotTheDisk): `br disk pack
+// <disk> --out <file>` must name the cartridge after the FILE it writes, so the
+// baked-in volume name, the on-image metadata and the name `br boot <file>`
+// derives are one name rather than three.
+//
+// The cases are already-resolved paths (packOutPath ran first), which is the
+// only form runDiskPack ever passes.
+func TestPackCartridgeNameComesFromTheOutputFile(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		disk string
+		want string
+	}{
+		{"out differs from the disk", "/tmp/smoke-cartridge" + cartridge.SparseExt, "debian-trixie-gui", "smoke-cartridge"},
+		{"directories are not part of the name", "/a/b/c/handoff" + cartridge.SparseExt, "incus", "handoff"},
+		{"digits and dashes survive", "/tmp/blue-2" + cartridge.SparseExt, "incus", "blue-2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := packCartridgeName(tt.out)
+			if err != nil {
+				t.Fatalf("packCartridgeName(%q): %v", tt.out, err)
+			}
+			if got != tt.want {
+				t.Fatalf("packCartridgeName(%q) = %q, want %q (not the disk %q)", tt.out, got, tt.want, tt.disk)
+			}
+			// The volume `hdiutil create` will bake in must round-trip back to
+			// the same name through mount detection...
+			if back := cartridge.NameFromVolume(cartridge.VolumeName(got)); back != got {
+				t.Errorf("NameFromVolume round trip = %q, want %q", back, got)
+			}
+			// ...and `br boot <file>` must derive that same name, since the
+			// instance name, the registry key and the ssh alias all follow it.
+			if boot := cartridge.NameFromPath(tt.out); boot != got {
+				t.Errorf("br boot would call it %q, packed as %q", boot, got)
+			}
+		})
+	}
+}
+
+// With --out omitted the output is ./<disk>.sparseimage, so the cartridge is
+// still named after the disk — the pre-fix behavior, now reached by derivation
+// rather than by assumption.
+func TestPackCartridgeNameDefaultsToTheDiskName(t *testing.T) {
+	out, err := packOutPath("", "debian-trixie-gui")
+	if err != nil {
+		t.Fatalf("packOutPath: %v", err)
+	}
+	got, err := packCartridgeName(out)
+	if err != nil {
+		t.Fatalf("packCartridgeName(%q): %v", out, err)
+	}
+	if got != "debian-trixie-gui" {
+		t.Fatalf("packCartridgeName = %q, want debian-trixie-gui", got)
+	}
+}
+
+// A cartridge name has to survive as far as the instance registry, so an --out
+// whose base name cannot be one is refused at pack time — with the name and the
+// path in the message — rather than producing a cartridge that boots into an
+// unregistrable instance.
+func TestPackCartridgeNameRejectsAnUnusableOutputName(t *testing.T) {
+	for _, out := range []string{
+		"/tmp/My Cartridge" + cartridge.SparseExt, // spaces and capitals
+		"/tmp/-leading-dash" + cartridge.SparseExt,
+		"/tmp/" + cartridge.SparseExt, // nothing but an extension
+		"/tmp/über" + cartridge.SparseExt,
+		"/tmp/" + strings.Repeat("x", instance.MaxNameLen+1) + cartridge.SparseExt,
+	} {
+		got, err := packCartridgeName(out)
+		if err == nil {
+			t.Errorf("packCartridgeName(%q) = %q, want an error", out, got)
+			continue
+		}
+		if !errors.Is(err, instance.ErrInvalidName) {
+			t.Errorf("packCartridgeName(%q) error = %v, want it to wrap instance.ErrInvalidName", out, err)
+		}
+		if !strings.Contains(err.Error(), out) {
+			t.Errorf("error %q does not name the offending path %q", err, out)
+		}
 	}
 }
 

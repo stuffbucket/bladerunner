@@ -60,6 +60,48 @@ func detectNoHdiutil(t *testing.T, path string) *Detected {
 	return d
 }
 
+// TestDetectAgreesWithBootOnTheNameOfAPackedCartridge walks the identity of one
+// cartridge from the file `br disk pack --out` wrote, through the volume name
+// hdiutil bakes in, to the two names the rest of the system reads back: the one
+// `br boot <file>` derives (NameFromPath, which becomes the instance name) and
+// the one `br watch` reports for the mounted volume (Detected.Name).
+//
+// They have to be the same string. Before the pack-time fix they were not for
+// any cartridge whose output file was not named after its source disk: the
+// volume and the on-image metadata carried the DISK's name while the boot
+// carried the FILE's, so the name the user was shown was not the name they
+// could eject by.
+func TestDetectAgreesWithBootOnTheNameOfAPackedCartridge(t *testing.T) {
+	// `br disk pack debian-trixie-gui --out smoke-cartridge.sparseimage`.
+	image := filepath.Join(t.TempDir(), "smoke-cartridge"+SparseExt)
+	name := NameFromPath(image) // exactly what pack and boot both derive
+
+	// The volume hdiutil would create, laid out as pack lays it out.
+	mp := filepath.Join(t.TempDir(), VolumeName(name))
+	if err := os.MkdirAll(mp, layoutDirPerm); err != nil {
+		t.Fatalf("mkdir %s: %v", mp, err)
+	}
+	if err := Pack(mp, validSourceManifest(), PackOptions{Name: name, PackedBy: "br-test"}); err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	writeDetectFile(t, filepath.Join(mp, RootImageFile), "not-really-a-disk")
+
+	d := detectNoHdiutil(t, mp)
+	if d.Status != StatusBootable {
+		t.Fatalf("Status = %q (%s), want %q", d.Status, d.Reason, StatusBootable)
+	}
+	for label, got := range map[string]string{
+		"Detected.Name (what br watch offers)":  d.Name,
+		"NameFromVolume (the mount prefilter)":  NameFromVolume(d.VolumeName),
+		"Metadata.Name (the on-image stamp)":    d.Metadata.Name,
+		"NameFromPath (what br boot registers)": NameFromPath(image),
+	} {
+		if got != name {
+			t.Errorf("%s = %q, want %q", label, got, name)
+		}
+	}
+}
+
 func TestDetectBootableCartridge(t *testing.T) {
 	mp := stagedCartridgeVolume(t)
 	d := detectNoHdiutil(t, mp)
@@ -467,7 +509,7 @@ func TestDetectMountedCartridge_Integration(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	imgPath, err := Create(filepath.Join(dir, "src"), detectCartridgeName, MinSizeGiB)
+	imgPath, err := Create(filepath.Join(dir, detectCartridgeName), MinSizeGiB)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

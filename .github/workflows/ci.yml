@@ -85,6 +85,15 @@ jobs:
           exit-code: '1'
           format: 'sarif'
           output: 'trivy-results.sarif'
+          # Required: with format=sarif, trivy-action *unsets* TRIVY_SEVERITY
+          # unless this is 'true', so `severity` above is silently discarded and
+          # `exit-code: 1` then trips on any finding at any severity — including
+          # UNKNOWN-severity Go advisories that have no fix available (e.g.
+          # GO-2026-5932, the x/crypto/openpgp "unmaintained" notice). That made
+          # this job permanently red regardless of the declared HIGH,CRITICAL
+          # policy. Trade-off: the SARIF uploaded to the Security tab is now
+          # limited to HIGH,CRITICAL as well.
+          limit-severities-for-sarif: 'true'
           # This is the production gate for the shipped Go binary + OS packages.
           # The ./site landing page is a separate static sub-project whose npm
           # deps are build-time tooling only (nothing ships at runtime); they are

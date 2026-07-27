@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,6 +50,11 @@ bladerunner and 'br boot <file>' just works.
   --arch <arch>  Target architecture for the root image (default: host GOARCH)
   --size <GiB>   Cartridge capacity (default: disk size + headroom)
 
+The cartridge is named after its OUTPUT FILE, not after the disk it was packed
+from: '--out demo.sparseimage' produces a volume named bladerunner-demo, and
+'br boot demo.sparseimage' runs it as instance "demo". Omit --out and the two
+coincide. The name must be lowercase letters, digits and dashes.
+
 Requires macOS (hdiutil) and qemu-img.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDiskPack,
@@ -68,6 +74,7 @@ func init() {
 type cartridgePackReport struct {
 	Status     string `json:"status"`
 	Name       string `json:"name"`
+	Disk       string `json:"disk"`
 	Cartridge  string `json:"cartridge"`
 	DMG        string `json:"dmg,omitempty"`
 	SizeGiB    int    `json:"size_gib"`
@@ -87,17 +94,59 @@ func packSizeGiB(flagSize, diskGiB int) int {
 	return cartridge.SizeGiB(diskGiB)
 }
 
-// packOutPath resolves the output cartridge path: an explicit --out wins (with a
-// .sparseimage extension ensured), else ./<name>.sparseimage in the cwd.
+// packOutPath resolves the output cartridge path: an explicit --out wins, else
+// ./<name>.sparseimage in the cwd. Either way the .sparseimage extension is
+// ensured, because hdiutil appends it regardless — and a requested path that
+// differs from the file that actually appears would make the cartridge's name
+// (packCartridgeName, derived from this path) disagree with the name `br boot`
+// later derives from that file. `--out demo.dmg` therefore resolves to
+// demo.dmg.sparseimage and is rejected as a name, which is the honest answer:
+// `disk pack` writes the runnable form and --ship produces the .dmg.
 func packOutPath(flagOut, name string) (string, error) {
 	if flagOut != "" {
-		return flagOut, nil
+		return ensureSparseExt(flagOut), nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("resolve working directory: %w", err)
 	}
 	return filepath.Join(cwd, name+cartridge.SparseExt), nil
+}
+
+// ensureSparseExt appends the runnable cartridge extension unless p already
+// carries it.
+func ensureSparseExt(p string) string {
+	if strings.HasSuffix(p, cartridge.SparseExt) {
+		return p
+	}
+	return p + cartridge.SparseExt
+}
+
+// packCartridgeName is the identity of the cartridge being written: the base
+// name of the output file with its cartridge extension trimmed.
+//
+// It is deliberately NOT the source disk's name. `br boot <file>` derives the
+// cartridge name the same way (cartridge.NameFromPath), and everything
+// downstream — the instance name, the registry key, the ssh alias — follows
+// from that, while detection reads the name back out of the APFS VOLUME name
+// (cartridge.NameFromVolume). Seeding both ends from the output path is what
+// keeps them from disagreeing for every cartridge whose file name differs from
+// the disk it was packed from, and what stops two such cartridges from
+// colliding on one /Volumes path.
+//
+// With --out omitted the output is ./<disk>.sparseimage, so the cartridge name
+// is still the disk name — the previous behavior, now reached by derivation
+// rather than by assumption.
+//
+// The name must survive as far as the instance registry, so it is checked with
+// instance.ValidName (the strictest of the name rules, and a superset of
+// disk.ValidName) rather than with a rule invented here.
+func packCartridgeName(outPath string) (string, error) {
+	name := cartridge.NameFromPath(outPath)
+	if err := instance.ValidName(name); err != nil {
+		return "", fmt.Errorf("cartridge name %q derived from output path %s is unusable: %w", name, outPath, err)
+	}
+	return name, nil
 }
 
 func runDiskPack(cmd *cobra.Command, args []string) error {
@@ -125,19 +174,27 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return jsonOrError(err)
 	}
+	// From here on the CARTRIDGE's own name is the identity: the volume name,
+	// the on-image metadata, the private mount slot and the report all take it,
+	// so a boot of this file and a detection of its volume name agree.
+	cartName, err := packCartridgeName(outPath)
+	if err != nil {
+		return jsonOrError(err)
+	}
 
 	if !jsonOutput {
-		fmt.Printf("%s cartridge %s (%s, %d GiB) -> %s\n", subtle("Packing"), value(name), diskPackFlags.arch, sizeGiB, subtle(outPath))
+		fmt.Printf("%s cartridge %s from disk %s (%s, %d GiB) -> %s\n",
+			subtle("Packing"), value(cartName), value(name), diskPackFlags.arch, sizeGiB, subtle(outPath))
 	}
 
 	// 1) Create the sparse image.
-	imgPath, err := cartridge.Create(outPath, name, sizeGiB)
+	imgPath, err := cartridge.Create(outPath, sizeGiB)
 	if err != nil {
 		return jsonOrError(fmt.Errorf("create cartridge image: %w", err))
 	}
 
 	// 2) Attach to a private mountpoint and lay out the cartridge.
-	mountpoint := cartridgeMountpoint(name)
+	mountpoint := cartridgeMountpoint(cartName)
 	mount, err := cartridge.Attach(imgPath, mountpoint)
 	if err != nil {
 		return jsonOrError(fmt.Errorf("attach cartridge: %w", err))
@@ -154,7 +211,7 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	if err := layoutCartridge(cmd, mount.Mountpoint, m, name); err != nil {
+	if err := layoutCartridge(cmd, mount.Mountpoint, m, cartName); err != nil {
 		return jsonOrError(err)
 	}
 
@@ -162,7 +219,8 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 
 	report := cartridgePackReport{
 		Status:    "packed",
-		Name:      name,
+		Name:      cartName,
+		Disk:      name,
 		Cartridge: imgPath,
 		SizeGiB:   sizeGiB,
 		RootImg:   cartridge.RootImageFile,
@@ -214,7 +272,12 @@ func (r cartridgePackReport) cartridgeArg() string {
 // The root.img half stays here because it needs the host's image cache and
 // qemu-img; everything that defines the cartridge *shape* is cartridge.Pack, so
 // the CLI and a holder process cannot drift apart.
-func layoutCartridge(cmd *cobra.Command, mountpoint string, m *disk.Manifest, name string) error {
+//
+// m is the SOURCE disk manifest (it names the image to materialize), while
+// cartName is the CARTRIDGE's own name: the packed manifest and the on-image
+// metadata are stamped with the latter, which is what cartridge.Detected
+// resolveName reports and therefore what `br watch` offers the user.
+func layoutCartridge(cmd *cobra.Command, mountpoint string, m *disk.Manifest, cartName string) error {
 	// Resolve + materialize the bootable root image into the cartridge. We reuse
 	// the exact image cache/convert path boot uses, so packed bytes == booted bytes.
 	tmpCfg, err := config.Default("")
@@ -235,7 +298,7 @@ func layoutCartridge(cmd *cobra.Command, mountpoint string, m *disk.Manifest, na
 		return fmt.Errorf("materialize root.img: %w", err)
 	}
 
-	return cartridge.Pack(mountpoint, m, cartridge.PackOptions{Name: name, PackedBy: version})
+	return cartridge.Pack(mountpoint, m, cartridge.PackOptions{Name: cartName, PackedBy: version})
 }
 
 // --- runner boot <cartridge> --------------------------------------------

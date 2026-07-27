@@ -108,20 +108,88 @@ func TestVolumeNameIsAlwaysACandidate(t *testing.T) {
 	}
 	// createArgs is the single place the volume name is written; assert it uses
 	// VolumeName rather than a hand-rolled prefix.
-	args := createArgs("/tmp/demo"+SparseExt, "demo", MinSizeGiB)
-	found := ""
-	for i, a := range args {
-		if a == "-volname" && i+1 < len(args) {
-			found = args[i+1]
-		}
-	}
+	args := createArgs("/tmp/demo"+SparseExt, MinSizeGiB)
+	found := volnameIn(args)
 	if found != VolumeName("demo") {
 		t.Fatalf("createArgs -volname = %q, want %q", found, VolumeName("demo"))
 	}
 }
 
+// volnameIn returns the value `hdiutil create` was told to name the volume.
+func volnameIn(args []string) string {
+	for i, a := range args {
+		if a == "-volname" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// TestCreateArgsVolumeNameComesFromTheCartridgeNotTheDisk is the regression test
+// for the bug scripts/smoke-cartridge.sh caught on its first run: `br disk pack
+// debian-trixie-gui --out smoke-cartridge.sparseimage` baked the SOURCE DISK's
+// name into the APFS volume, so the cartridge mounted at
+// /Volumes/bladerunner-debian-trixie-gui.
+//
+// That is not cosmetic. Every cartridge packed from one base disk claimed the
+// same /Volumes path (mount two and macOS suffixes one, so two holders contend
+// for one cartridge identity), and the name detection reads back out of the
+// volume disagreed with the name `br boot <file>` derives from the file — so
+// the instance name, the registry key and the ssh alias all followed the wrong
+// one.
+//
+// createArgs takes only the output path now, so the disk name cannot reach the
+// volume name at all; this pins the derivation and the round trip back out.
+func TestCreateArgsVolumeNameComesFromTheCartridgeNotTheDisk(t *testing.T) {
+	const (
+		disk = "debian-trixie-gui" // what `br disk pack` was given
+		cart = "smoke-cartridge"   // what --out named the output
+	)
+	out := filepath.Join(t.TempDir(), cart+SparseExt)
+
+	got := volnameIn(createArgs(out, MinSizeGiB))
+	if got != VolumeName(cart) {
+		t.Fatalf("-volname = %q, want %q (the cartridge), not %q (the source disk)",
+			got, VolumeName(cart), VolumeName(disk))
+	}
+
+	// The three names that have to agree: what mount detection reads back off
+	// the volume, and what `br boot <file>` derives from the file itself.
+	if back := NameFromVolume(got); back != cart {
+		t.Errorf("NameFromVolume(%q) = %q, want %q", got, back, cart)
+	}
+	if boot := NameFromPath(out); boot != cart {
+		t.Errorf("NameFromPath(%q) = %q, want %q", out, boot, cart)
+	}
+
+	// Two cartridges packed from the SAME disk must claim different volumes —
+	// the collision this bug made reachable in normal use.
+	other := filepath.Join(t.TempDir(), "other-cartridge"+SparseExt)
+	if o := volnameIn(createArgs(other, MinSizeGiB)); o == got {
+		t.Errorf("two cartridges from one disk share volume name %q", o)
+	}
+}
+
+// TestCreateVolumeNameThroughTheRunner drives the same guarantee through the
+// worker that actually shells out, so the derivation cannot be lost between
+// createArgs and `hdiutil create`.
+func TestCreateVolumeNameThroughTheRunner(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "smoke-cartridge"+SparseExt)
+	f := &fakeRunner{}
+
+	if _, err := create(context.Background(), f, out, MinSizeGiB); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("hdiutil calls = %v, want a single create", f.calls)
+	}
+	if got := volnameIn(f.calls[0]); got != VolumeName("smoke-cartridge") {
+		t.Fatalf("hdiutil create -volname = %q, want %q", got, VolumeName("smoke-cartridge"))
+	}
+}
+
 func TestCreateArgs(t *testing.T) {
-	got := createArgs("/tmp/foo.sparseimage", "foo", 28)
+	got := createArgs("/tmp/foo.sparseimage", 28)
 	want := []string{
 		"create",
 		"-type", "SPARSE",
@@ -182,7 +250,7 @@ func TestCompactArgs(t *testing.T) {
 
 func TestCreateReturnsResolvedPath(t *testing.T) {
 	f := &fakeRunner{results: []fakeResult{{stdout: "created: /tmp/foo.sparseimage\n"}}}
-	got, err := create(context.Background(), f, "/tmp/foo", "foo", 28)
+	got, err := create(context.Background(), f, "/tmp/foo", 28)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -198,7 +266,7 @@ func TestCreateReturnsResolvedPath(t *testing.T) {
 func TestCreateFallsBackToExtensionedPath(t *testing.T) {
 	// No "created:" line in stdout -> fall back to requested+ext.
 	f := &fakeRunner{results: []fakeResult{{stdout: ""}}}
-	got, err := create(context.Background(), f, "/tmp/foo", "foo", 10)
+	got, err := create(context.Background(), f, "/tmp/foo", 10)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -209,7 +277,7 @@ func TestCreateFallsBackToExtensionedPath(t *testing.T) {
 
 func TestCreateNoDoubleExtension(t *testing.T) {
 	f := &fakeRunner{results: []fakeResult{{stdout: ""}}}
-	got, err := create(context.Background(), f, "/tmp/foo.sparseimage", "foo", 10)
+	got, err := create(context.Background(), f, "/tmp/foo.sparseimage", 10)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -221,7 +289,7 @@ func TestCreateNoDoubleExtension(t *testing.T) {
 func TestCreateWrapsError(t *testing.T) {
 	wantErr := errors.New("exit status 1")
 	f := &fakeRunner{results: []fakeResult{{stderr: "hdiutil: create failed - some reason", err: wantErr}}}
-	_, err := create(context.Background(), f, "/tmp/foo", "foo", 10)
+	_, err := create(context.Background(), f, "/tmp/foo", 10)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -779,7 +847,7 @@ func TestAttachRealImageCapturesDevNode(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	imgPath, err := Create(filepath.Join(dir, "devnode"), "devnode", MinSizeGiB)
+	imgPath, err := Create(filepath.Join(dir, "devnode"), MinSizeGiB)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -26,16 +26,24 @@ const maxPort = 65535
 // scalars: a holder process is launched by re-exec, so a Spec must survive a
 // round trip through JSON with no live handles or callbacks in it.
 type Overrides struct {
-	CPUs         uint          `json:"cpus,omitempty"`
-	MemoryGiB    uint64        `json:"memoryGiB,omitempty"`
-	DiskSizeGiB  int           `json:"diskSizeGiB,omitempty"`
-	GUI          bool          `json:"gui,omitempty"`
-	ImageURL     string        `json:"imageURL,omitempty"`
-	ImagePath    string        `json:"imagePath,omitempty"`
-	HostedImage  bool          `json:"hostedImage,omitempty"`
-	DebianImage  bool          `json:"debianImage,omitempty"`
-	Timeout      time.Duration `json:"timeout,omitempty"`
-	NoNestedVirt bool          `json:"noNestedVirt,omitempty"`
+	CPUs         uint   `json:"cpus,omitempty"`
+	MemoryGiB    uint64 `json:"memoryGiB,omitempty"`
+	DiskSizeGiB  int    `json:"diskSizeGiB,omitempty"`
+	GUI          bool   `json:"gui,omitempty"`
+	ImageURL     string `json:"imageURL,omitempty"`
+	ImagePath    string `json:"imagePath,omitempty"`
+	HostedImage  bool   `json:"hostedImage,omitempty"`
+	DebianImage  bool   `json:"debianImage,omitempty"`
+	NoNestedVirt bool   `json:"noNestedVirt,omitempty"`
+
+	// Timeout is `--timeout`: the budget the boot gives the guest to bring the
+	// Incus API up and authorize this client. It is the ONE budget that governs
+	// the readiness wait — see resolveWaitBudget, which is the only place the
+	// decision is made. Zero means "not supplied", which is why it must never
+	// be written onto the config verbatim: `omitempty` drops it from a Spec
+	// serialized to a holder process, so a zero here has to mean "keep the
+	// baseline", not "wait for no time at all".
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 // Spec is the complete, serializable description of one instance to run.
@@ -281,9 +289,11 @@ func (s Spec) applyOverrides(cfg *config.Config) {
 	if s.changed("gui") {
 		cfg.GUI = o.GUI
 	}
-	if s.changed("timeout") {
-		cfg.WaitForIncus = o.Timeout
-	}
+	// The readiness budget is RESOLVED, never assigned: see resolveWaitBudget.
+	// Assigning it the way every other flag is assigned is what let a Spec with
+	// no timeout in it (a zero survives no JSON round trip, and a driven start
+	// applies its overrides verbatim) hand the readiness wait a budget of zero.
+	cfg.WaitForIncus = resolveWaitBudget(s.timeoutOverride(), cfg.WaitForIncus)
 	if s.changed("no-nested-virt") {
 		cfg.NestedVirtDisabled = o.NoNestedVirt
 	}
@@ -324,5 +334,49 @@ func (s Spec) applyOverrides(cfg *config.Config) {
 		// auto-fallback is needed and the escape hatch boots the verified Debian
 		// path directly. Best effort: an unsupported arch leaves the default URL.
 		_ = config.UseDebianImage(cfg)
+	}
+}
+
+// timeoutOverride is the `--timeout` the user actually supplied, or 0 when they
+// supplied none.
+//
+// A driven (boot/cartridge) start carries pre-resolved precedence and so counts
+// as having supplied every flag — but only a POSITIVE value is an override. A
+// zero on a driven Spec means the field was never filled in (it is `omitempty`,
+// so it does not survive the JSON round trip to a holder process), and treating
+// that as "the user asked for no time at all" is the bug this exists to prevent.
+func (s Spec) timeoutOverride() time.Duration {
+	if !s.changed("timeout") {
+		return 0
+	}
+	return s.Overrides.Timeout
+}
+
+// resolveWaitBudget picks the budget the Incus readiness wait runs under, and it
+// is the only place that decision is made — cfg.WaitForIncus is what the runner
+// bounds the wait with, and this function is what writes it.
+//
+// The precedence is total, and deliberately so:
+//
+//  1. the user's --timeout, when they supplied one. It wins over everything,
+//     including a persisted Settings value and this package's own default. That
+//     is the whole point of the flag.
+//  2. the baseline already resolved onto the config — the persisted
+//     Settings.waitForIncus, else config.Default's DefaultTimeout.
+//  3. config.DefaultTimeout, so a config that arrived with no budget at all
+//     (a hand-built Spec.Config, a zeroed round trip) still gets one.
+//
+// It never returns a non-positive duration. A zero budget makes
+// context.WithTimeout expire before the first probe, which surfaces far away as
+// either an instant "deadline exceeded" or a config-validation error about
+// wait-for-incus, neither of which names the flag that caused it.
+func resolveWaitBudget(override, base time.Duration) time.Duration {
+	switch {
+	case override > 0:
+		return override
+	case base > 0:
+		return base
+	default:
+		return config.DefaultTimeout
 	}
 }

@@ -22,9 +22,16 @@ const (
 	DefaultCPUs        = 4
 	DefaultMemoryGiB   = 8
 	DefaultDiskSizeGiB = 64
-	// DefaultTimeout bounds WaitForIncus. Trixie genericcloud's first-boot
-	// bootstrap (apt install incus + admin init) can exceed 5m on stock M-series
-	// hardware; 10m absorbs that. Dial back with --timeout. (#52)
+	// DefaultTimeout bounds WaitForIncus: how long a boot waits for the guest's
+	// Incus API to answer AND to report this client as authorized. It is the
+	// budget `--timeout` overrides, and the only one that governs that wait.
+	//
+	// It has to absorb a COLD first boot, which is the slow case by a wide
+	// margin: on a cartridge or a fresh Debian genericcloud disk the guest runs
+	// apt-get update, installs Incus and initializes it before the API exists —
+	// ~3 minutes on stock M-series hardware, and more on a slow network. 10m
+	// absorbs that with room to spare; a warm re-boot answers in seconds and
+	// never comes near it. Dial back with --timeout. (#52)
 	DefaultTimeout = 10 * time.Minute
 
 	// LoopbackHost is the only interface bladerunner binds host-side services

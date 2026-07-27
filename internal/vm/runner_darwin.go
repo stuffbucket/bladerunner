@@ -495,6 +495,10 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 }
 
 // WaitForIncus waits for the Incus API to become ready and returns a startup report.
+//
+// r.cfg.WaitForIncus is the ONE budget this wait runs under; it is resolved
+// once, in vmhost, from `--timeout` / the persisted Settings / the package
+// default (see vmhost.resolveWaitBudget). Nothing here shortens it.
 func (r *Runner) WaitForIncus(ctx context.Context) (*report.StartupReport, error) {
 	log := logging.L()
 	endpoint := fmt.Sprintf("https://127.0.0.1:%d", r.cfg.LocalAPIPort)
@@ -513,7 +517,17 @@ func (r *Runner) WaitForIncus(ctx context.Context) (*report.StartupReport, error
 		// never reach that state the VM is half-started (or its trust store never
 		// took our cert), so fail loudly instead of writing a partial report that
 		// reads as success. Persist the partial report for diagnostics first.
-		log.Error("incus api never became authorized before timeout", "endpoint", endpoint, "err", err)
+		//
+		// A CANCELED wait is a different event and says so: the budget is not
+		// what ended it, so reporting it as a timeout sends the next reader
+		// after the wrong thing (they raise --timeout; nothing changes).
+		if errors.Is(err, context.Canceled) {
+			log.Warn("incus readiness wait canceled before the api was authorized; this is a shutdown, not a boot timeout",
+				"endpoint", endpoint, "budget", r.cfg.WaitForIncus.String(), "err", err)
+		} else {
+			log.Error("incus api never became authorized within its budget",
+				"endpoint", endpoint, "budget", r.cfg.WaitForIncus.String(), "err", err)
+		}
 		reportData := r.makeReport(r.baseImagePath, endpoint, nil)
 		if saveErr := report.SaveJSON(r.cfg.ReportPath, reportData); saveErr != nil {
 			log.Warn("failed to save partial startup report", "path", r.cfg.ReportPath, "err", saveErr)

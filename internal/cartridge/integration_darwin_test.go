@@ -27,7 +27,7 @@ func TestCartridgeRoundTrip_Integration(t *testing.T) {
 	mp := filepath.Join(dir, "mnt")
 
 	// Create a tiny sparse cartridge (MinSizeGiB is small and sparse-backed).
-	imgPath, err := Create(stem, "it", MinSizeGiB)
+	imgPath, err := Create(stem, MinSizeGiB)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
