@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -449,5 +450,161 @@ func TestStateDirectoryEnvOverride(t *testing.T) {
 
 	if cfg.StateDir != tmpDir {
 		t.Errorf("StateDir = %v, want %v", cfg.StateDir, tmpDir)
+	}
+}
+
+// fakePortSource is a PortSource backed by a map, standing in for
+// *portalloc.Set (which config must not import).
+type fakePortSource map[string]int
+
+func (f fakePortSource) Port(name string) int { return f[name] }
+
+// TestDefaultDerivesOIDCIssuerFromPort locks the default path: the issuer URL
+// must agree with LocalOIDCPort, not with a constant that happens to match.
+func TestDefaultDerivesOIDCIssuerFromPort(t *testing.T) {
+	cfg, err := Default(t.TempDir())
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	if cfg.LocalSSHPort != DefaultLocalSSHPort || cfg.LocalAPIPort != DefaultLocalAPIPort ||
+		cfg.LocalWebPort != DefaultLocalWebPort || cfg.LocalOIDCPort != DefaultLocalOIDCPort ||
+		cfg.LocalNTPPort != DefaultLocalNTPPort {
+		t.Errorf("Default() must keep the well-known ports, got %+v", cfg.Ports())
+	}
+	want := fmt.Sprintf("http://127.0.0.1:%d", cfg.LocalOIDCPort)
+	if cfg.OIDCIssuerURL != want {
+		t.Errorf("OIDCIssuerURL = %q, want %q", cfg.OIDCIssuerURL, want)
+	}
+}
+
+// TestAssignPortsRederivesOIDCIssuerURL is the regression test for the latent
+// silent-failure bug: OIDCIssuerURL used to be formatted from the port CONSTANT,
+// so reassigning LocalOIDCPort left a stale issuer that only broke at login.
+func TestAssignPortsRederivesOIDCIssuerURL(t *testing.T) {
+	cfg, err := Default(t.TempDir())
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+
+	const newOIDCPort = 51234
+	cfg.AssignPorts(PortAssignment{SSH: 51230, API: 51231, Web: 51232, OIDC: newOIDCPort, NTP: 51233})
+
+	if cfg.LocalOIDCPort != newOIDCPort {
+		t.Fatalf("LocalOIDCPort = %d, want %d", cfg.LocalOIDCPort, newOIDCPort)
+	}
+	if !strings.Contains(cfg.OIDCIssuerURL, fmt.Sprintf(":%d", newOIDCPort)) {
+		t.Errorf("OIDCIssuerURL = %q, want it to contain the NEW port %d", cfg.OIDCIssuerURL, newOIDCPort)
+	}
+	if strings.Contains(cfg.OIDCIssuerURL, fmt.Sprintf(":%d", DefaultLocalOIDCPort)) {
+		t.Errorf("OIDCIssuerURL = %q still carries the default port constant", cfg.OIDCIssuerURL)
+	}
+	if got, want := cfg.Ports(), (PortAssignment{SSH: 51230, API: 51231, Web: 51232, OIDC: newOIDCPort, NTP: 51233}); got != want {
+		t.Errorf("Ports() = %+v, want %+v", got, want)
+	}
+	if err := cfg.Validate(); err != nil && !strings.Contains(err.Error(), "ssh public key") {
+		t.Errorf("reassigned ports must stay valid, got %v", err)
+	}
+}
+
+func TestAssignPortsFromSource(t *testing.T) {
+	cfg, err := Default(t.TempDir())
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+
+	// OIDC deliberately disabled by the caller before the reservation.
+	cfg.LocalOIDCPort = 0
+	cfg.AssignPortsFrom(fakePortSource{
+		PortNameSSH: 52000,
+		PortNameAPI: 52001,
+		// web/oidc/ntp absent: the source never reserved them.
+	})
+
+	if cfg.LocalSSHPort != 52000 || cfg.LocalAPIPort != 52001 {
+		t.Errorf("reserved ports not applied: %+v", cfg.Ports())
+	}
+	if cfg.LocalWebPort != DefaultLocalWebPort || cfg.LocalNTPPort != DefaultLocalNTPPort {
+		t.Errorf("absent names must leave fields untouched, got %+v", cfg.Ports())
+	}
+	if cfg.LocalOIDCPort != 0 {
+		t.Errorf("LocalOIDCPort = %d, want the caller's explicit 0 (disabled)", cfg.LocalOIDCPort)
+	}
+	if want := OIDCIssuerURLForPort(0); cfg.OIDCIssuerURL != want {
+		t.Errorf("OIDCIssuerURL = %q, want %q (re-derived even when disabled)", cfg.OIDCIssuerURL, want)
+	}
+
+	// A nil source is a no-op, not a panic.
+	before := cfg.Ports()
+	cfg.AssignPortsFrom(nil)
+	if cfg.Ports() != before {
+		t.Errorf("nil PortSource changed ports: %+v", cfg.Ports())
+	}
+}
+
+func TestInstanceName(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", stateDir)
+
+	def, err := Default("")
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	if got := def.InstanceName(); got != DefaultInstanceName {
+		t.Errorf("InstanceName() = %q, want %q for the default state dir", got, DefaultInstanceName)
+	}
+
+	slot, err := Default(filepath.Join(stateDir, "disks", "demo"))
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	if got := slot.InstanceName(); got != "demo" {
+		t.Errorf("InstanceName() = %q, want demo", got)
+	}
+}
+
+func TestHostListenerHandoff(t *testing.T) {
+	cfg, err := Default(t.TempDir())
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+
+	if got := cfg.TakeHostListener(PortNameSSH); got != nil {
+		t.Errorf("TakeHostListener on an empty config = %v, want nil", got)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	cfg.SetHostListener(PortNameSSH, ln)
+	cfg.SetHostListener(PortNameAPI, nil) // nil is ignored, not stored
+
+	if got := cfg.TakeHostListener(PortNameAPI); got != nil {
+		t.Errorf("nil listener should not be stored, got %v", got)
+	}
+	if got := cfg.TakeHostListener(PortNameSSH); got != ln {
+		t.Fatalf("TakeHostListener = %v, want the parked listener", got)
+	}
+	if got := cfg.TakeHostListener(PortNameSSH); got != nil {
+		t.Error("a listener must only be handed out once")
+	}
+	if err := ln.Close(); err != nil {
+		t.Errorf("close taken listener: %v", err)
+	}
+
+	// Untaken listeners are released by CloseHostListeners.
+	other, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	cfg.SetHostListener(PortNameWeb, other)
+	if err := cfg.CloseHostListeners(); err != nil {
+		t.Errorf("CloseHostListeners() = %v", err)
+	}
+	if got := cfg.TakeHostListener(PortNameWeb); got != nil {
+		t.Error("CloseHostListeners must drop the entries it closed")
+	}
+	if err := cfg.CloseHostListeners(); err != nil {
+		t.Errorf("second CloseHostListeners() = %v", err)
 	}
 }

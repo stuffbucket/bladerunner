@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -18,24 +19,31 @@ func connectIncus() (*incus.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return incusClientFromControl(ctl)
+	return incusClientFromControl(ctl, config.DefaultStateDir())
 }
 
 // incusClientFromControl builds an Incus client from an already-connected
 // control client. It does not prompt, so it is safe to call from shell
 // completion.
-func incusClientFromControl(ctl *control.Client) (*incus.Client, error) {
+//
+// stateDir MUST be the same state dir the control client was built from: the
+// API port is read live from that instance, but the client certificate is
+// material on disk, and each instance keeps its own client.crt/client.key
+// beside its control socket. Taking the port from one instance and the identity
+// from another (which is what reading config.Default("") did) fails
+// authentication against every non-default instance.
+func incusClientFromControl(ctl *control.Client, stateDir string) (*incus.Client, error) {
 	port, err := ctl.GetConfig(control.ConfigKeyLocalAPIPort)
 	if err != nil {
 		logging.L().Debug("read local-api-port failed", "err", err)
 		return nil, errVMNotRunning
 	}
 	if port == "" {
-		return nil, fmt.Errorf("local-api-port not configured")
+		return nil, errors.New("local-api-port not configured")
 	}
 	endpoint := fmt.Sprintf("https://127.0.0.1:%s", port)
 
-	cfg, err := config.Default("")
+	cfg, err := config.Default(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("load defaults: %w", err)
 	}
@@ -50,11 +58,12 @@ func instanceNameCompletion(_ *cobra.Command, args []string, _ string) ([]string
 	}
 	// Completion must never block on a prompt: check silently and bail if the VM
 	// is not running.
-	ctl := control.NewClient(config.DefaultStateDir())
+	stateDir := config.DefaultStateDir()
+	ctl := control.NewClient(stateDir)
 	if !ctl.IsRunning() {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	client, err := incusClientFromControl(ctl)
+	client, err := incusClientFromControl(ctl, stateDir)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError | cobra.ShellCompDirectiveNoFileComp
 	}

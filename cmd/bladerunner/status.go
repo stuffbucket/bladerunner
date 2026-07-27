@@ -32,9 +32,11 @@ var statusCmd = &cobra.Command{
 }
 
 func runStatus(_ *cobra.Command, _ []string) error {
-	stateDir := config.DefaultStateDir()
-	client := control.NewClient(stateDir)
-
+	target, err := resolveInstanceTarget()
+	if err != nil {
+		return jsonOrError(err)
+	}
+	client := control.NewClient(target.StateDir)
 	// Right panel: always build info.
 	right := newPanel("Build")
 	right.row("Version", version)

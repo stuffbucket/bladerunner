@@ -168,7 +168,15 @@ func onMenubarReady() {
 	// and NSPopover implementations are dropped in behind these interfaces in
 	// later PRs.
 	splash := defaultSplash()
-	notif := newVMNotifier(defaultNotifier(), splash)
+	notifications := defaultNotifier()
+	notif := newVMNotifier(notifications, splash)
+
+	// Goal 4: notice a cartridge DMG being mounted and offer to boot it. The
+	// watcher owns its own DiskArbitration session and delivers through the
+	// notifier above, so an insertion is announced the same way every other VM
+	// event is. It runs for the life of the menubar; systray.Quit takes the
+	// process with it, so the stop function is deliberately dropped.
+	_ = watchCartridgesForMenubar(newCartridgePrompter(notifications))
 
 	// When a second launch hands off (see acquireMenubarLock), re-surface the
 	// splash only if a start is in progress — never strand a "starting" splash

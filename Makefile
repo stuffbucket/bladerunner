@@ -16,12 +16,18 @@ GOSUMDB ?= sum.golang.org
 GOCACHE ?= $(CURDIR)/.cache/go-build
 GO_ENV = GOCACHE="$(GOCACHE)" GOPROXY="$(GOPROXY)" GOSUMDB="$(GOSUMDB)"
 
+# The Linux test container pins the same Go version as go.mod, which is what CI
+# installs, and keeps its caches in named docker volumes of its own.
+GO_VERSION ?= $(shell awk '/^go [0-9]/ {print $$2; exit}' go.mod)
+LINUX_CACHE_VOL ?= bladerunner-linux-gocache
+LINUX_MOD_VOL ?= bladerunner-linux-gomodcache
+
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help setup cache deps tidy fmt fmt-check vet test build build-agent build-release run sign check clean distclean lint vulncheck trivy security release snapshot
+.PHONY: help setup cache deps tidy fmt fmt-check vet test test-linux build build-release run sign check clean distclean lint vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -70,17 +76,29 @@ vet: cache ## Run go vet
 test: cache ## Run tests
 	@$(GO_ENV) $(GO) test ./...
 
+# test-linux runs the suite the way CI runs it: on Linux, against a READ-ONLY
+# mount of the tree, with caches of its own so nothing the container builds
+# reaches the host's GOCACHE (a darwin object file and a linux one must never
+# share a cache). The Go version is read from go.mod, which is also what CI's
+# setup-go reads, so the two cannot drift apart.
+#
+# CI runs linux/amd64 and a Mac runs this on linux/arm64. It therefore catches a
+# broken build tag, a darwin-only assumption and platform logic. It does NOT
+# catch behaviour that is specific to the amd64 architecture.
+test-linux: ## Run the test suite in a Linux container (catches CI-only failures)
+	@command -v docker >/dev/null 2>&1 || { echo "docker not found. Install: brew install colima docker && colima start"; exit 1; }
+	@docker info >/dev/null 2>&1 || { echo "The Docker daemon is not running. Start it: colima start (or open Docker Desktop)"; exit 1; }
+	@echo "Running tests on linux/$$(docker version --format '{{.Server.Arch}}') with go $(GO_VERSION)..."
+	@docker run --rm \
+		-v "$(CURDIR)":/src:ro -w /src \
+		-v $(LINUX_CACHE_VOL):/tmp/gocache -v $(LINUX_MOD_VOL):/tmp/gomodcache \
+		-e GOFLAGS=-mod=mod -e GOCACHE=/tmp/gocache -e GOMODCACHE=/tmp/gomodcache \
+		"golang:$(GO_VERSION)" go test -race ./...
+
 build: cache ## Build bladerunner binary
 	@echo "Building $(APP_NAME)..."
 	@$(GO_ENV) $(GO) build -ldflags="$(LDFLAGS)" -o "$(BIN_PATH)" "$(CMD_PKG)"
 	@echo "Built $(BIN_PATH)"
-
-build-agent: cache ## Cross-compile br-agent for linux/amd64 and linux/arm64
-	@echo "Building br-agent for linux/arm64..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO_ENV) $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o "$(BIN_DIR)/br-agent-linux-arm64" ./cmd/br-agent
-	@echo "Building br-agent for linux/amd64..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO_ENV) $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o "$(BIN_DIR)/br-agent-linux-amd64" ./cmd/br-agent
-	@echo "Built br-agent: $(BIN_DIR)/br-agent-linux-{arm64,amd64}"
 
 build-release: cache ## Build optimized release binary
 	@echo "Building $(APP_NAME) (release)..."
@@ -96,6 +114,18 @@ sign: build ## Codesign binary with virtualization entitlements
 
 smoke-cartridge: ## Live end-to-end cartridge smoke (pack -> boot -> RW share -> ACPI eject); needs codesign+network, ~5-10min
 	@./scripts/smoke-cartridge.sh
+
+smoke-holder: ## Live end-to-end holder smoke (spawn -> kill the spawner -> VM survives -> drain); needs codesign+network, ~5-15min
+	@./scripts/smoke-holder.sh
+
+# clonedetect lives in its own module under tools/, so the parent module's
+# "./..." never loads it and `make check` is unaffected. Run it with -C rather
+# than a package path for the same reason.
+clonedetect: cache ## Rank duplicated concepts across packages (pass ARGS='-json')
+	@$(GO_ENV) $(GO) -C tools/clonedetect run . -root ../.. $(ARGS)
+
+clonedetect-test: cache ## Run the clonedetect tool's own tests
+	@$(GO_ENV) $(GO) -C tools/clonedetect test ./...
 
 check: fmt-check vet lint test ## Run fast checks (format, vet, lint, test)
 

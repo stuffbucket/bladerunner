@@ -20,7 +20,7 @@ var lsCmd = &cobra.Command{
 }
 
 func runLs(_ *cobra.Command, _ []string) error {
-	client, err := connectIncus()
+	client, err := incusClientForTarget()
 	if err != nil {
 		if jsonOutput {
 			emitJSONError(err)

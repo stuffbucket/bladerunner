@@ -5,6 +5,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
 var shellCmd = &cobra.Command{
@@ -32,13 +33,13 @@ func runShell(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	configPath, err := sshConfigFromControl()
+	configPath, instanceName, err := sshTarget()
 	if err != nil {
 		return err
 	}
 
 	// Build ssh command with -t for PTY
-	sshPath, sshExecArgs, err := sshArgv(configPath, []string{"-t"}, shellArgs...)
+	sshPath, sshExecArgs, err := sshArgvFor(ssh.HostAlias(instanceName), configPath, []string{"-t"}, shellArgs...)
 	if err != nil {
 		return err
 	}

@@ -6,26 +6,21 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strconv"
-	"sync"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/boot"
-	"github.com/stuffbucket/bladerunner/internal/bootstage"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
-	"github.com/stuffbucket/bladerunner/internal/logging"
-	"github.com/stuffbucket/bladerunner/internal/oidc"
-	"github.com/stuffbucket/bladerunner/internal/ssh"
-	"github.com/stuffbucket/bladerunner/internal/timesource"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/ui"
 	"github.com/stuffbucket/bladerunner/internal/ui/board"
 	"github.com/stuffbucket/bladerunner/internal/vm"
-	"github.com/stuffbucket/bladerunner/internal/webproxy"
+	"github.com/stuffbucket/bladerunner/internal/vmhost"
 	"golang.org/x/term"
 )
 
@@ -42,6 +37,16 @@ var startFlags struct {
 	timeout     time.Duration
 	noNested    bool
 	restoreFrom string
+}
+
+// startFlagNames lists every flag `br start` owns, so a Spec can record which
+// of them the user actually set. It is enumerated (rather than walked with
+// pflag) because runStart is also reached from `br up`, `br boot`, `br restore`
+// and `br upgrade`, whose commands carry a different flag set; a name the
+// command does not define simply reports "not changed", exactly as before.
+var startFlagNames = []string{
+	"cpus", "memory", "disk", "gui", "state-dir", "image-url", "image-path",
+	"hosted-image", "debian-image", "timeout", "no-nested-virt", "restore",
 }
 
 var startCmd = &cobra.Command{
@@ -82,460 +87,257 @@ func nestedVirtBanner() string {
 	}
 }
 
-// registerUpgradeHandlers registers the control commands that back `runner
-// upgrade` and `br eject`: reporting the server's build version,
-// pausing+saving the guest state, and the clean ACPI shutdown. getRunner returns
-// the active runner once StartVM has created it (nil before). cancel unblocks the
-// foreground runStart so the process exits after a graceful eject — the deferred
-// runner.Stop() then tears the VMM down and the deferred cartridge detach (if
-// any) runs last.
-func registerUpgradeHandlers(router *control.Router, cfg *config.Config, getRunner func() *vm.Runner, cancel context.CancelFunc) {
-	router.HandleFunc(control.CmdServerVersion, func(_ context.Context, _ *control.Request) *control.Message {
-		return &control.Message{Response: version}
-	})
-	router.HandleFunc(control.CmdSave, func(_ context.Context, req *control.Request) *control.Message {
-		r := getRunner()
-		if r == nil {
-			return &control.Message{Error: "VM is not started yet"}
-		}
-		if err := r.SaveState(cfg.SavedStatePath); err != nil {
-			return &control.Message{Error: err.Error()}
-		}
-		if req.Args["0"] != control.SaveModePause {
-			if err := r.ResumeVM(); err != nil {
-				return &control.Message{Error: err.Error()}
-			}
-		}
-		return &control.Message{Response: cfg.SavedStatePath}
-	})
-	router.HandleFunc(control.CmdEject, func(ctx context.Context, req *control.Request) *control.Message {
-		r := getRunner()
-		if r == nil {
-			return &control.Message{Error: "VM is not started yet"}
-		}
-		timeout := ejectTimeoutFromArgs(req)
-		force := ejectForceFromArgs(req)
-		// Gracefully (ACPI) shut the guest down and wait for it to stop. Detach of
-		// any cartridge is NOT done here: the VMM still holds root.img until the
-		// deferred runner.Stop() runs after the foreground unblocks. We only stop
-		// the guest, then cancel to unblock runStart so its deferred Stop() +
-		// cartridge detach run in the right order.
-		if err := r.Eject(ctx, timeout, force); err != nil {
-			return &control.Message{Error: err.Error()}
-		}
-		cancel()
-		return &control.Message{Response: control.RespOK}
-	})
-}
-
-// ejectTimeoutFromArgs parses the positional timeout (seconds) from an eject
-// request, falling back to the default when absent or unparseable.
-func ejectTimeoutFromArgs(req *control.Request) time.Duration {
-	if v, ok := req.Args["0"]; ok {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			return time.Duration(secs) * time.Second
-		}
-	}
-	return control.DefaultEjectTimeoutSeconds * time.Second
-}
-
-// ejectForceFromArgs reports whether the eject request asked for a forced stop.
-func ejectForceFromArgs(req *control.Request) bool {
-	return req.Args["1"] == control.EjectModeForce
-}
-
-// applyFlagOverrides applies the `start` CLI flags onto cfg, on top of the
-// already-overlaid Settings and disk manifest. When driven is true (a
-// boot/cartridge boot stuffed pre-resolved precedence into startFlags) every
-// flag is applied verbatim; otherwise only flags the user explicitly changed
-// (per the changed predicate, normally cmd.Flags().Changed) are applied, so the
-// persisted Settings baseline is not clobbered by cobra's flag defaults.
-func applyFlagOverrides(cfg *config.Config, changed func(string) bool, driven bool) {
-	apply := func(name string) bool { return driven || changed(name) }
-
-	if apply("cpus") {
-		cfg.CPUs = startFlags.cpus
-	}
-	if apply("memory") {
-		cfg.MemoryGiB = startFlags.memory
-	}
-	if apply("disk") {
-		cfg.DiskSizeGiB = startFlags.disk
-	}
-	if apply("gui") {
-		cfg.GUI = startFlags.gui
-	}
-	if apply("timeout") {
-		cfg.WaitForIncus = startFlags.timeout
-	}
-	if apply("no-nested-virt") {
-		cfg.NestedVirtDisabled = startFlags.noNested
-	}
-	// Image flags keep their "non-empty means set" guard: a boot/cartridge start
-	// clears them (it carries the image via the manifest), and a plain start
-	// leaves them empty unless the user passed one.
-	if startFlags.imageURL != "" && apply("image-url") {
-		cfg.BaseImageURL = startFlags.imageURL
-		// A custom image isn't the pinned Debian default, so the embedded
-		// SHA-512 no longer applies; fall back to sidecar verification.
-		cfg.BaseImageSHA512 = ""
-	}
-	if startFlags.imagePath != "" && apply("image-path") {
-		cfg.BaseImagePath = startFlags.imagePath
-	}
-	// --hosted-image (or BLADERUNNER_FORCE_HOSTED_IMAGE=1) forces the pre-baked
-	// hosted guest image. Since the hosted image is now the DEFAULT, this mostly
-	// re-selects it over a persisted Settings image choice or makes the intent
-	// explicit. It re-resolves BaseImageURL to the guest-image-latest release asset
-	// for this arch, clears the pinned Debian SHA-512 and any local path, and arms
-	// UseHostedGuestImage — which switches vm asset verification to the fail-closed
-	// .sha256 sidecar path. --debian-image is the opposite escape hatch: it forces
-	// the Debian genericcloud + cloud-init path. Conflicts (both flags, or either
-	// with --image-url/--image-path) are rejected up front by
-	// validateImageOverrideFlags, so at most one force lands here.
-	if forceHostedImage() {
-		if url, err := config.HostedGuestImageURL(cfg.Arch); err == nil {
-			cfg.BaseImageURL = url
-		}
-		cfg.BaseImageSHA512 = ""
-		cfg.BaseImageExpectedSHA256 = ""
-		cfg.BaseImagePath = ""
-		cfg.UseHostedGuestImage = true
-	}
-	if forceDebianImage() {
-		// UseDebianImage repoints the URL, restores the pinned SHA-512, disarms
-		// UseHostedGuestImage, and clears any local path / manifest pin — so no
-		// auto-fallback is needed and the escape hatch boots the verified Debian
-		// path directly. Best effort: an unsupported arch leaves the default URL.
-		_ = config.UseDebianImage(cfg)
-	}
-}
-
-// forceHostedImage reports whether this run must use the pre-baked hosted guest
-// image, requested either via the --hosted-image flag or the
-// BLADERUNNER_FORCE_HOSTED_IMAGE=1 env (the non-interactive equivalent).
-func forceHostedImage() bool {
-	return startFlags.hostedImage || config.ForceHostedImage()
-}
-
-// forceDebianImage reports whether this run must use the Debian genericcloud +
-// cloud-init escape hatch, requested either via the --debian-image flag or the
-// BLADERUNNER_FORCE_DEBIAN_IMAGE=1 env (the non-interactive equivalent).
-func forceDebianImage() bool {
-	return startFlags.debianImage || config.ForceDebianImage()
-}
-
-// validateImageOverrideFlags rejects contradictory image-selection overrides.
-// --hosted-image (or its force env) selects the pre-baked hosted image and
-// --debian-image (or its force env) selects the Debian escape hatch, so the two
-// cannot be combined with each other or with an explicit --image-url/--image-path
-// (which pick a different, user-supplied image). Asking for two at once is a user
-// error, not something to resolve silently by precedence.
-func validateImageOverrideFlags() error {
-	if forceHostedImage() && forceDebianImage() {
-		return fmt.Errorf("--hosted-image conflicts with --debian-image (also check BLADERUNNER_FORCE_HOSTED_IMAGE / BLADERUNNER_FORCE_DEBIAN_IMAGE)")
-	}
-	if !forceHostedImage() && !forceDebianImage() {
-		return nil
-	}
-	which := "--hosted-image"
-	if forceDebianImage() {
-		which = "--debian-image"
-	}
-	if startFlags.imageURL != "" {
-		return fmt.Errorf("%s conflicts with --image-url", which)
-	}
-	if startFlags.imagePath != "" {
-		return fmt.Errorf("%s conflicts with --image-path", which)
-	}
-	return nil
-}
-
-//nolint:gocyclo // runStart was already at the gocyclo ceiling; the applyBootManifest guard for `br boot` tips it one over with essential error propagation.
-func runStart(cmd *cobra.Command, args []string) error {
+// runStart is the CLI wrapper over internal/vmhost: it turns the flags (plus
+// whatever `br boot` stashed) into a vmhost.Spec, installs the terminal front
+// end, and hands the whole VM lifecycle to the Host. Everything that owns a
+// resource lives in vmhost so a holder process — which cannot import package
+// main — can run the exact same sequence.
+func runStart(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Reject contradictory image-selection overrides before doing any work.
-	if err := validateImageOverrideFlags(); err != nil {
-		return err
-	}
-
-	// A cartridge boot OWNS the mounted image: detach it on the way out. This
-	// defer is registered first so, running LIFO, it executes LAST — after the
-	// deferred runner.Stop() below tears the VMM down and releases root.img.
+	// Safety net for a cartridge boot that never reaches the Host (a rejected
+	// spec, say): the mount must not be stranded. Once ownership is handed over
+	// below this is a no-op.
 	defer detachBootCartridge()
 
-	// Build config
-	cfg, err := config.Default(startFlags.stateDir)
+	host, err := vmhost.New(buildStartSpec(cmd))
 	if err != nil {
-		return fmt.Errorf("config: %w", err)
-	}
-
-	// Check if already running
-	client := control.NewClient(cfg.VMDir)
-	if client.IsRunning() {
-		return fmt.Errorf("VM is already running (use 'br stop' first)")
-	}
-
-	// Start control server. We build the controller explicitly (rather than
-	// via NewServer) so a guest-liveness probe can be attached once the VM is
-	// running — see runner.ProbeGuest below.
-	ctrl := control.NewLocalController(cancel)
-	ctrlServer, err := control.NewListener(cfg.VMDir, ctrl)
-	if err != nil {
-		return fmt.Errorf("start control server: %w", err)
-	}
-	defer func() { _ = ctrlServer.Close() }()
-
-	// Mount config handler (captures cfg by reference; sees values set after VM start)
-	cfgHandler := control.NewConfigRouter(cfg)
-	ctrlServer.Router().Mount("config", cfgHandler.Router())
-
-	// Synchronized holder so the save handler (registered before the server
-	// starts serving, to avoid a handlers-map race) can reach the runner once
-	// it exists.
-	var (
-		runnerMu     sync.Mutex
-		activeRunner *vm.Runner
-	)
-	setRunner := func(r *vm.Runner) { runnerMu.Lock(); activeRunner = r; runnerMu.Unlock() }
-	registerUpgradeHandlers(ctrlServer.Router(), cfg, func() *vm.Runner {
-		runnerMu.Lock()
-		defer runnerMu.Unlock()
-		return activeRunner
-	}, cancel)
-
-	go ctrlServer.Start(ctx)
-
-	// Overlay the persisted, host-wide user settings (defaults -> Settings)
-	// BEFORE the manifest and flags so a user's saved preferences become the
-	// baseline. Settings live under the default state dir (not a custom
-	// --state-dir slot or a cartridge), matching the menubar's settings screen.
-	// A missing file yields defaults (no-op); an invalid file is logged once
-	// logging is up and ignored in favor of defaults rather than aborting start.
-	settings, settingsErr := config.LoadSettings(config.DefaultStateDir())
-	if settingsErr != nil {
-		settings = config.DefaultSettings()
-	}
-	settings.ApplyTo(cfg)
-
-	// Apply a disk manifest (set by `br boot`) as defaults AFTER Settings but
-	// BEFORE the flag overrides below, so the manifest's image/sizing/boot-mode
-	// overrides saved Settings and explicit flags still win. No-op for a plain
-	// `br start`.
-	if err := applyBootManifest(cfg); err != nil {
 		return err
 	}
+	host.AdoptCartridge(takeBootCartridge())
 
-	// Apply CLI flags. On a boot/cartridge-driven start the flags carry
-	// pre-resolved precedence (flag-or-manifest-or-default, incl. a --headless
-	// override of a GUI manifest) and are applied verbatim; on a plain `br
-	// start` only flags the user explicitly changed are applied, so the
-	// persisted Settings overlaid above are not clobbered by flag defaults.
-	driven := bootManifest != nil || bootCartridge.mountpoint != ""
-	applyFlagOverrides(cfg, cmd.Flags().Changed, driven)
+	obs := &cliObserver{json: jsonOutput}
+	defer obs.close()
+	host.SetObserver(obs)
 
-	// A cartridge boot roots every per-VM path inside the mounted image and wires
-	// the RW share. This must land AFTER the manifest/flag overrides so the
-	// cartridge's own root.img / state / share win. No-op for a non-cartridge boot.
-	applyBootCartridge(cfg)
+	return explainHostError(host.Run(ctx))
+}
 
-	// Setup logging
-	if err := logging.Init(cfg.LogPath); err != nil {
-		return err
-	}
-	if settingsErr != nil {
-		logging.L().Warn("ignoring invalid settings; using defaults", "err", settingsErr)
-	}
-
-	// Ensure SSH keys
-	keyPair, err := ssh.EnsureKeyPair()
-	if err != nil {
-		return fmt.Errorf("ssh keys: %w", err)
-	}
-	cfgHandler.Lock()
-	cfg.SetSSHKeys(keyPair.PublicKey, keyPair.PrivateKeyPath)
-	cfgHandler.Unlock()
-
-	// Start the local OIDC provider before the VM so the vsock-reverse forwarder
-	// can dial it as soon as the guest comes up. Failure to start OIDC is logged
-	// but does not abort start; the mTLS fallback path remains available.
-	oidcProvider, err := startOIDCProvider(ctx, cfg, keyPair.PublicKey)
+// A Host declines to start for two reasons that are not really errors so much
+// as facts about the machine: someone else already holds this instance
+// (control.ErrInstanceLocked, taken before the socket dance) or it is already
+// running (vmhost.ErrAlreadyRunning, taken when the socket answers). Both are
+// sentinels, and until this existed nothing matched them — so the friendly path
+// they were declared for did not exist and the user got the raw wrapped text.
+//
+// explainHostError is where they are matched. It appends a hint and keeps the
+// sentinel wrapped, so `errors.Is` still works for any caller above.
+func explainHostError(err error) error {
 	switch {
-	case errors.Is(err, errOIDCDisabled):
-		logging.L().Info("oidc provider disabled by config")
-	case err != nil:
-		logging.L().Warn("oidc provider not started", "err", err)
+	case err == nil:
+		return nil
+	case errors.Is(err, control.ErrInstanceLocked):
+		return fmt.Errorf("%w\n%s", err, instanceLockedHint(err))
+	case errors.Is(err, vmhost.ErrAlreadyRunning):
+		return fmt.Errorf("%w\n%s", err, alreadyRunningHint)
 	default:
-		defer func() { _ = oidcProvider.Stop() }()
+		return err
 	}
+}
 
-	// Start the host pseudo-NTP (SNTP) responder before the VM so the vsock
-	// reverse forwarder can dial it the moment the guest chrony polls. The
-	// responder serves the HOST clock as a stratum-1 source; the guest coheres to
-	// the host (not UTC) and works offline over vsock. Non-fatal: chrony retries.
-	if cfg.LocalNTPPort != 0 && cfg.VsockNTPPort != 0 {
-		ntpResponder, nerr := timesource.NewResponder(fmt.Sprintf("127.0.0.1:%d", cfg.LocalNTPPort))
-		if nerr != nil {
-			logging.L().Warn("ntp responder not started", "err", nerr)
-		} else {
-			ntpResponder.Start()
-			defer func() { _ = ntpResponder.Stop() }()
+// alreadyRunningHint is what to do about an instance whose control socket
+// already answers.
+const alreadyRunningHint = "  it is already up: 'br instances' lists it, 'br shell' gets into it, 'br stop' shuts it down"
+
+// instanceLockedHint names the process holding the instance, because "another
+// bladerunner process" is not something a user can act on and a PID is: it is
+// what `br instances` shows and what a kill needs when a holder has wedged.
+func instanceLockedHint(err error) string {
+	if pid, ok := lockHolderPID(err); ok {
+		return fmt.Sprintf("  process %d holds it: 'br instances' shows what it is running, 'br stop' releases it", pid)
+	}
+	return "  'br instances' shows which process holds it, 'br stop' releases it"
+}
+
+// lockHolderPIDMarker is how internal/control names the holder when it could
+// read the lock file: "...: pid 1234 holds /path/control.lock".
+const lockHolderPIDMarker = "pid "
+
+// lockHolderPID digs the holding process's PID out of a wrapped
+// control.ErrInstanceLocked.
+//
+// It reads the message because the sentinel carries no typed field for the PID
+// (follow-up: make it a struct error and delete this). That is why it is only a
+// HINT: the contended branch names no holder at all, so a caller must cope with
+// (0, false), and a message that changes shape degrades the hint rather than
+// the error.
+func lockHolderPID(err error) (int, bool) {
+	_, digits, found := strings.Cut(err.Error(), lockHolderPIDMarker)
+	if !found {
+		return 0, false
+	}
+	end := 0
+	for end < len(digits) && digits[end] >= '0' && digits[end] <= '9' {
+		end++
+	}
+	pid, convErr := strconv.Atoi(digits[:end])
+	if convErr != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// buildStartSpec turns the `start` flags — plus the disk manifest or open
+// cartridge a `br boot` stashed — into the serializable description of one
+// instance that vmhost runs.
+func buildStartSpec(cmd *cobra.Command) vmhost.Spec {
+	spec := vmhost.Spec{
+		Kind:          instance.KindFlat,
+		StateDir:      startFlags.stateDir,
+		Manifest:      bootManifest,
+		RestoreFrom:   startFlags.restoreFrom,
+		BinaryVersion: version,
+		ChangedFlags:  changedStartFlags(cmd),
+		Overrides: vmhost.Overrides{
+			CPUs:         startFlags.cpus,
+			MemoryGiB:    startFlags.memory,
+			DiskSizeGiB:  startFlags.disk,
+			GUI:          startFlags.gui,
+			ImageURL:     startFlags.imageURL,
+			ImagePath:    startFlags.imagePath,
+			HostedImage:  startFlags.hostedImage,
+			DebianImage:  startFlags.debianImage,
+			Timeout:      startFlags.timeout,
+			NoNestedVirt: startFlags.noNested,
+		},
+		// A boot/cartridge start stuffed pre-resolved precedence into the flags
+		// (including a --headless override of a GUI manifest), so every flag is
+		// applied verbatim; a plain start applies only what the user changed.
+		Driven: bootManifest != nil || bootCartridge.mountpoint != "",
+	}
+	// Spec.Name is deliberately left empty: the Host derives it with
+	// config.InstanceName (the slot directory's basename), which is exactly the
+	// disk/cartridge name and needs no second validation pass. Setting it here
+	// would subject boots that work today to instance.ValidName's 64-character
+	// bound, which disk.ValidName does not impose.
+	if bootManifest != nil {
+		spec.Kind = instance.KindDisk
+	}
+	if opened := bootCartridge.opened; opened != nil {
+		spec.Kind = instance.KindCartridge
+		spec.CartridgePath = opened.SourcePath
+		spec.Mountpoint = opened.Mountpoint()
+	}
+	return spec
+}
+
+// changedStartFlags reports the `start` flags the user explicitly set on cmd.
+func changedStartFlags(cmd *cobra.Command) []string {
+	if cmd == nil {
+		return nil
+	}
+	changed := make([]string, 0, len(startFlagNames))
+	for _, name := range startFlagNames {
+		if cmd.Flags().Changed(name) {
+			changed = append(changed, name)
 		}
 	}
+	return changed
+}
 
-	// Create and start VM
-	runner, err := vm.NewRunner(cfg)
-	if err != nil {
-		return fmt.Errorf("create runner: %w", err)
+// cliObserver is the terminal front end for a vmhost.Host: the start banner,
+// the buildx-style boot board, and the running summary (human or --json). It
+// holds every piece of rendering state that used to be local to runStart.
+type cliObserver struct {
+	json       bool
+	board      *board.Board
+	tailCancel context.CancelFunc
+}
+
+// Resolved prints the pre-boot banner.
+func (o *cliObserver) Resolved(cfg *config.Config) {
+	if o.json {
+		return
 	}
-	defer func() { _ = runner.Stop() }()
-	setRunner(runner)
+	fmt.Println(title("Starting Bladerunner VM..."))
+	fmt.Printf("  %s %s\n", key("Name:"), value(cfg.Name))
+	fmt.Printf("  %s %d\n", key("CPUs:"), cfg.CPUs)
+	fmt.Printf("  %s %d GiB\n", key("Memory:"), cfg.MemoryGiB)
+	fmt.Printf("  %s %s\n", key("Arch:"), value(runtime.GOARCH))
+	fmt.Printf("  %s %s\n", key("Incus VMs:"), nestedVirtBanner())
+	fmt.Println()
+}
 
-	// --restore: bring the guest up from a saved-state file (and resume it)
-	// instead of cold-booting. Used by `br restore` and `br upgrade`.
-	if startFlags.restoreFrom != "" {
-		runner.SetRestoreFrom(startFlags.restoreFrom)
+// Progress builds the buildx-style boot board when stderr is a TTY. It shows
+// stage state on top and a live tail of the guest serial console underneath.
+// Non-TTY callers (CI, log capture) still get plain slog output via the noop
+// board path. In --json mode we skip it entirely so the only stdout output is
+// the final JSON report.
+func (o *cliObserver) Progress(ctx context.Context, cfg *config.Config) vm.Progress {
+	if o.json {
+		return nil
 	}
+	brd, prog, tailCancel := startBootBoard(ctx, cfg)
+	o.board, o.tailCancel = brd, tailCancel
+	return prog
+}
 
-	if !jsonOutput {
-		fmt.Println(title("Starting Bladerunner VM..."))
-		fmt.Printf("  %s %s\n", key("Name:"), value(cfg.Name))
-		fmt.Printf("  %s %d\n", key("CPUs:"), cfg.CPUs)
-		fmt.Printf("  %s %d GiB\n", key("Memory:"), cfg.MemoryGiB)
-		fmt.Printf("  %s %s\n", key("Arch:"), value(runtime.GOARCH))
-		fmt.Printf("  %s %s\n", key("Incus VMs:"), nestedVirtBanner())
-		fmt.Println()
+// Failed tears the board down when the VM never started.
+func (o *cliObserver) Failed(error) {
+	if o.board != nil {
+		o.board.Stop()
 	}
+}
 
-	// Publish coarse, human-friendly boot phase to the bootstage file for the
-	// menubar's starting splash. Driven by the runner's own stage events — which
-	// fire in every mode (GUI, headless, detached menubar boot) and don't depend
-	// on racing/parsing the serial console — so a separate process that only sees
-	// the control socket can still show "Booting Linux… / Setting up… / Starting
-	// Incus…" as the guest comes up. Cleared on the way out.
-	bootPub := newBootStagePublisher(cfg.VMDir)
-	defer bootstage.Clear(cfg.VMDir)
+// Started reports a GUI-mode boot, which cannot wait for Incus first: the macOS
+// event loop must take the main thread immediately, so success is not yet known.
+func (o *cliObserver) Started(cfg *config.Config, endpoint string) {
+	o.report(cfg, endpoint, nil)
+}
 
-	// Build the buildx-style boot board when stderr is a TTY. It shows
-	// stage state on top and a live tail of the guest serial console
-	// underneath. Non-TTY callers (CI, log capture) still get plain slog
-	// output via the noop board path. In --json mode we skip it entirely so
-	// the only stdout output is the final JSON report.
-	var brd *board.Board
-	var boardProg vm.Progress
-	tailCancel := context.CancelFunc(func() {})
-	if !jsonOutput {
-		brd, boardProg, tailCancel = startBootBoard(ctx, cfg)
+// Ready reports a headless boot once the Incus readiness wait has finished.
+func (o *cliObserver) Ready(cfg *config.Config, endpoint string, bootErr error) {
+	o.report(cfg, endpoint, bootErr)
+}
+
+// report emits the running summary as JSON or human text, after tearing down
+// the boot board.
+func (o *cliObserver) report(cfg *config.Config, endpoint string, bootErr error) {
+	if o.board != nil {
+		o.board.Stop()
+		o.tailCancel()
 	}
-	defer tailCancel()
-
-	// Attach progress sinks: always the bootstage file publisher, plus the TTY
-	// board when present.
-	reporters := []vm.Progress{&bootStageProgress{pub: bootPub}}
-	if boardProg != nil {
-		reporters = append(reporters, boardProg)
+	if o.json {
+		_ = startReportJSON(cfg, endpoint, bootErr)
+		return
 	}
-	runner.SetProgress(teeProgress(reporters))
+	printRunningSummary(cfg, endpoint, bootErr)
+}
 
-	result, err := runner.StartVM(ctx)
-	if err != nil {
-		if brd != nil {
-			brd.Stop()
-		}
-		return fmt.Errorf("start vm: %w", err)
+// Waiting announces what the foreground is about to block on.
+func (o *cliObserver) Waiting(gui bool) {
+	if o.json {
+		return
 	}
-
-	// Now that the VM (and its vsock device) exists, teach `br status` to probe
-	// guest liveness instead of trusting the host run-state alone. A panicked
-	// or unreachable guest now reports "unreachable" rather than "running".
-	ctrl.SetProbe(func(ctx context.Context) error {
-		pctx, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
-		defer cancelProbe()
-		return runner.ProbeGuest(pctx)
-	})
-
-	// Publish the resolved nested-virt state so `br status` can report whether
-	// Incus VMs are available in this guest.
-	cfgHandler.Lock()
-	cfg.NestedVirt = runner.NestedVirtState()
-	cfgHandler.Unlock()
-
-	// Write SSH config after VM starts
-	sshConfigPath, err := ssh.WriteSSHConfig(cfg.LocalSSHPort, cfg.SSHUser, cfg.SSHPrivateKeyPath)
-	if err != nil {
-		logging.L().Warn("ssh config", "error", err)
-	} else {
-		cfgHandler.Lock()
-		cfg.SSHConfigPath = sshConfigPath
-		cfgHandler.Unlock()
+	if gui {
+		fmt.Println(subtle("Opening GUI window (runs on main thread)..."))
+		return
 	}
+	fmt.Println(subtle("Headless mode. Press Ctrl+C to stop."))
+}
 
-	// Start the host-side web-UI proxy. It terminates the browser's TLS WITHOUT
-	// requesting a client certificate (so the browser never shows the cert
-	// picker), forwarding to Incus over loopback with no client cert of its own
-	// — so Incus authenticates the browser via OIDC. `br web` points the browser
-	// here (LocalWebPort) instead of straight at Incus. Non-fatal: a failure just
-	// means `br web` falls back to the direct Incus URL (with the cert prompt).
-	if webProxy, werr := webproxy.New(webproxy.Options{
-		ListenAddr:   fmt.Sprintf("127.0.0.1:%d", cfg.LocalWebPort),
-		UpstreamAddr: fmt.Sprintf("127.0.0.1:%d", cfg.LocalAPIPort),
-		CertPath:     filepath.Join(cfg.VMDir, "webproxy.crt"),
-		KeyPath:      filepath.Join(cfg.VMDir, "webproxy.key"),
-	}); werr != nil {
-		logging.L().Warn("web proxy not created", "err", werr)
-	} else if werr := webProxy.Start(); werr != nil {
-		logging.L().Warn("web proxy not started", "err", werr)
-	} else {
-		defer func() { _ = webProxy.Close() }()
-	}
-
-	// In headless mode we block the foreground on Incus readiness so the
-	// board can render the full boot through to "ready" before yielding to
-	// the SIGINT wait. In GUI mode we tear the board down first because
-	// StartGUI takes over the macOS event loop and the user is watching
-	// the guest window, not the terminal.
-	// report emits the running summary as JSON or human text, depending on the
-	// --json flag, after tearing down the boot board.
-	report := func(bootErr error) {
-		if brd != nil {
-			brd.Stop()
-			tailCancel()
-		}
-		if jsonOutput {
-			_ = startReportJSON(cfg, result.Endpoint, bootErr)
-			return
-		}
-		printRunningSummary(cfg, result.Endpoint, bootErr)
-	}
-
-	if cfg.GUI {
-		// GUI mode can't block on Incus before opening the window — the
-		// macOS event loop must run on the main thread immediately. We
-		// don't yet know if boot will succeed, so don't claim it did.
-		report(nil)
-		go func() { _ = waitForGuestReady(ctx, cfg, runner) }()
-
-		if !jsonOutput {
-			fmt.Println(subtle("Opening GUI window (runs on main thread)..."))
-		}
-		if err := runner.StartGUI(); err != nil {
-			return fmt.Errorf("start gui: %w", err)
-		}
-	} else {
-		bootErr := waitForGuestReady(ctx, cfg, runner)
-		report(bootErr)
-		if !jsonOutput {
-			fmt.Println(subtle("Headless mode. Press Ctrl+C to stop."))
-		}
-		<-ctx.Done()
-	}
-
-	if !jsonOutput {
+// Stopping announces the shutdown.
+func (o *cliObserver) Stopping() {
+	if !o.json {
 		fmt.Println(subtle("\nShutting down..."))
 	}
-	return nil
+}
+
+// TeardownWarning surfaces a failed teardown step. Only the cartridge detach is
+// worth a user-visible line: everything else is either logged or harmless.
+func (o *cliObserver) TeardownWarning(step string, err error) {
+	if step == vmhost.StepCartridge && !o.json {
+		fmt.Printf("%s detach cartridge: %v\n", warning("⚠"), err)
+	}
+}
+
+// close stops the console tailer if the board never got torn down (a start that
+// failed before any report).
+func (o *cliObserver) close() {
+	if o.tailCancel != nil {
+		o.tailCancel()
+	}
 }
 
 // startReportJSON emits a one-line JSON object describing the running VM, used
@@ -554,18 +356,6 @@ func startReportJSON(cfg *config.Config, endpoint string, bootErr error) error {
 		r["console_log"] = cfg.ConsoleLogPath
 	}
 	return emitJSON(r)
-}
-
-// waitForGuestReady runs the Incus readiness wait. Returns nil if the guest
-// reached the Incus-ready state, or an error describing why it didn't. Errors
-// are non-fatal at the call site (partial reports are still useful) but the
-// caller should warn the user rather than pretend everything is fine.
-func waitForGuestReady(ctx context.Context, _ *config.Config, runner *vm.Runner) error {
-	if _, err := runner.WaitForIncus(ctx); err != nil {
-		logging.L().Error("wait for incus", "error", err)
-		return err
-	}
-	return nil
 }
 
 func printRunningSummary(cfg *config.Config, endpoint string, bootErr error) {
@@ -695,123 +485,4 @@ func tailConsoleIntoBoard(ctx context.Context, b *board.Board, path string) {
 			b.Complete(boardStageSSH)
 		}
 	}
-}
-
-// bootStagePublisher writes the coarse boot phase to the bootstage file,
-// advancing monotonically (rank-gated; Failed is terminal). Safe for the
-// concurrent Begin/Done calls the runner makes from its wait goroutines.
-type bootStagePublisher struct {
-	mu       sync.Mutex
-	stateDir string
-	cur      bootstage.Stage
-}
-
-// newBootStagePublisher creates the publisher and writes the initial Boot phase
-// immediately, so the menubar shows "Booting Linux…" the moment a start begins.
-func newBootStagePublisher(stateDir string) *bootStagePublisher {
-	p := &bootStagePublisher{stateDir: stateDir}
-	p.advance(bootstage.Boot)
-	return p
-}
-
-func (p *bootStagePublisher) advance(to bootstage.Stage) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if to != bootstage.Failed && bootstage.Rank(to) <= bootstage.Rank(p.cur) {
-		return
-	}
-	p.cur = to
-	_ = bootstage.Write(p.stateDir, to, time.Now())
-}
-
-// bootStageProgress is a vm.Progress sink that maps the runner's stage events
-// onto bootstage phases. VMBoot done -> Setup covers the guest's own boot
-// (kernel/cloud-init/ssh) between the VM reaching "running" and the Incus wait.
-type bootStageProgress struct{ pub *bootStagePublisher }
-
-func (p *bootStageProgress) Begin(stage, _ string, _ time.Duration) {
-	switch stage {
-	case vm.StageVMBoot:
-		p.pub.advance(bootstage.Boot)
-	case vm.StageIncusWait:
-		p.pub.advance(bootstage.Incus)
-	}
-}
-func (p *bootStageProgress) Substatus(string, string) {}
-func (p *bootStageProgress) Done(stage string) {
-	if stage == vm.StageVMBoot {
-		p.pub.advance(bootstage.Setup)
-	}
-}
-func (p *bootStageProgress) Fail(string, error) { p.pub.advance(bootstage.Failed) }
-
-// teeProgress fans every progress event out to several sinks (the bootstage
-// file publisher plus the optional TTY board).
-type teeProgress []vm.Progress
-
-func (t teeProgress) Begin(s, l string, b time.Duration) {
-	for _, p := range t {
-		p.Begin(s, l, b)
-	}
-}
-func (t teeProgress) Substatus(s, m string) {
-	for _, p := range t {
-		p.Substatus(s, m)
-	}
-}
-func (t teeProgress) Done(s string) {
-	for _, p := range t {
-		p.Done(s)
-	}
-}
-func (t teeProgress) Fail(s string, e error) {
-	for _, p := range t {
-		p.Fail(s, e)
-	}
-}
-
-// errOIDCDisabled signals that the OIDC provider was intentionally skipped
-// (e.g. LocalOIDCPort=0). Callers should treat it as a benign no-op.
-var errOIDCDisabled = fmt.Errorf("oidc disabled (LocalOIDCPort=0)")
-
-// startOIDCProvider boots the local OIDC server, registers the host's own SSH
-// public key as the bootstrap admin identity, and returns the running provider.
-// Returns errOIDCDisabled (with a nil provider) when OIDC is disabled by config;
-// other errors mean startup failed and the caller should log and continue.
-func startOIDCProvider(ctx context.Context, cfg *config.Config, hostPublicKey string) (*oidc.Provider, error) {
-	if cfg.LocalOIDCPort == 0 {
-		return nil, errOIDCDisabled
-	}
-
-	signingKey, err := oidc.LoadOrCreateSigningKey(cfg.OIDCStateDir)
-	if err != nil {
-		return nil, fmt.Errorf("signing key: %w", err)
-	}
-
-	store := oidc.NewStore(cfg.IdentityDir)
-	if err := store.Load(); err != nil {
-		return nil, fmt.Errorf("load identities: %w", err)
-	}
-
-	// Bootstrap: auto-import the host's SSH public key on first start.
-	if hostPublicKey != "" && store.Count() == 0 {
-		if _, err := store.Add(hostPublicKey); err != nil {
-			logging.L().Warn("auto-import host key failed", "err", err)
-		}
-	}
-
-	provider, err := oidc.NewProvider(oidc.Config{
-		ListenAddr: fmt.Sprintf("127.0.0.1:%d", cfg.LocalOIDCPort),
-		IssuerURL:  cfg.OIDCIssuerURL,
-		Audience:   cfg.OIDCAudience,
-		SigningKey: signingKey,
-		Store:      store,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := provider.Start(ctx); err != nil {
-		return nil, err
-	}
-	return provider, nil
 }

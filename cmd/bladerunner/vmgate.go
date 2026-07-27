@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/logging"
@@ -90,29 +91,16 @@ func confirmStartVMFrom(r io.Reader) bool {
 // until the VM publishes its SSH config path — the signal that StartVM has
 // returned and the VM is up — or the timeout elapses.
 func startVMDetachedAndWait(stateDir string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("locate br executable: %w", err)
-	}
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", os.DevNull, err)
 	}
 	defer func() { _ = devnull.Close() }()
 
-	// context.Background(): the child must outlive this short-lived command, so
-	// it is intentionally not bound to a cancelable context.
-	cmd := exec.CommandContext(context.Background(), exe, "start")
-	cmd.Stdin = devnull
-	cmd.Stdout = devnull
-	cmd.Stderr = devnull
-	detachProcess(cmd) // platform-specific: run in a new session
-	if err := cmd.Start(); err != nil {
+	pid, err := spawnDetached(detachedSpawn{Args: []string{"start"}, Stdio: devnull})
+	if err != nil {
 		return fmt.Errorf("start VM: %w", err)
 	}
-	pid := cmd.Process.Pid
-	// The started process is the long-lived VM host; do not wait on it.
-	_ = cmd.Process.Release()
 
 	fmt.Printf("%s Starting VM (pid %d)…\n", subtle("›"), pid)
 
@@ -128,4 +116,130 @@ func startVMDetachedAndWait(stateDir string) error {
 		time.Sleep(750 * time.Millisecond)
 	}
 	return errors.New("timed out waiting for the VM to start; check 'br status' and the log")
+}
+
+// detachedSpawn describes a re-exec of this very binary as a process that
+// outlives the caller.
+type detachedSpawn struct {
+	// Args is the argv tail handed to the re-executed `br`.
+	Args []string
+	// Stdio receives the child's stdin, stdout and stderr. It must be non-nil:
+	// a detached child inherits no terminal, and leaving stdio attached to the
+	// parent's would keep the parent's pipes open and block whatever is reading
+	// them.
+	Stdio *os.File
+}
+
+// spawnDetached re-execs this binary and returns the child's PID.
+//
+// Three things make the child survive the parent, and all three are required:
+//
+//   - setsid (detachProcess) puts it in a new session with no controlling
+//     terminal, so closing the terminal — which sends SIGHUP to the foreground
+//     process group — never reaches it;
+//   - stdio is redirected away from the parent's descriptors, so the child does
+//     not die on SIGPIPE and does not hold the parent's pipes open;
+//   - Process.Release drops the parent's handle, so nothing ever waits on it
+//     and the child is reparented to init when the parent exits.
+func spawnDetached(spawn detachedSpawn) (int, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return 0, fmt.Errorf("locate br executable: %w", err)
+	}
+	if spawn.Stdio == nil {
+		return 0, errors.New("detached spawn needs somewhere to send its output")
+	}
+
+	// context.Background(): the child must outlive this short-lived command, so
+	// it is intentionally not bound to a cancelable context.
+	cmd := exec.CommandContext(context.Background(), exe, spawn.Args...)
+	cmd.Stdin = spawn.Stdio
+	cmd.Stdout = spawn.Stdio
+	cmd.Stderr = spawn.Stdio
+	detachProcess(cmd) // platform-specific: run in a new session
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pid := cmd.Process.Pid
+	// The started process is the long-lived VM host; do not wait on it.
+	_ = cmd.Process.Release()
+	return pid, nil
+}
+
+// holderSpawn describes a `br vmd` launch: which instance to hold, and how.
+type holderSpawn struct {
+	// StateDir is the instance's state directory. Required — it is both the
+	// holder's only mandatory argument and where its log file goes.
+	StateDir string
+	// CartridgePath, when set, makes the holder attach and boot a cartridge.
+	CartridgePath string
+	// Name overrides the instance name derived from the state directory.
+	Name string
+	// GUI opens the VM console window.
+	GUI bool
+	// DrainTimeout bounds the orderly guest shutdown. Zero uses the default.
+	DrainTimeout time.Duration
+}
+
+// errHolderStateDir is returned when a holder is asked for without saying which
+// instance it should hold.
+var errHolderStateDir = errors.New("a holder needs a state directory")
+
+// args builds the argv tail for `br vmd`. It is pure, so the exact command line
+// a holder is launched with is testable without spawning anything.
+func (h holderSpawn) args() []string {
+	args := []string{"vmd", "--state-dir", h.StateDir}
+	if h.CartridgePath != "" {
+		args = append(args, "--cartridge", h.CartridgePath)
+	}
+	if h.Name != "" {
+		args = append(args, "--name", h.Name)
+	}
+	if h.GUI {
+		args = append(args, "--gui")
+	}
+	if h.DrainTimeout > 0 {
+		args = append(args, "--drain-timeout", h.DrainTimeout.String())
+	}
+	return args
+}
+
+// logName is the instance name this spawn's holder log is keyed on: the
+// explicit name, else the cartridge's own name (a cartridge holder is spawned
+// with the registry root as its state dir, so the name is the only thing that
+// separates its log from every other cartridge's), else "" for the flat
+// default.
+func (h holderSpawn) logName() string {
+	if h.Name != "" {
+		return h.Name
+	}
+	if h.CartridgePath == "" {
+		return ""
+	}
+	return cartridge.NameFromPath(h.CartridgePath)
+}
+
+// spawnHolder starts a detached `br vmd` for one instance and returns its PID.
+//
+// The holder is a re-exec of this same signed binary (see vmd.go for why), it
+// runs in its own session so nothing that happens to this process reaches it,
+// and its output goes to the instance's own holder log because it has no
+// terminal to write to. This function returns as soon as the child is running;
+// readiness is observed through the control socket and the instance registry
+// the holder publishes, not by waiting on the process.
+func spawnHolder(spawn holderSpawn) (int, error) {
+	if spawn.StateDir == "" {
+		return 0, errHolderStateDir
+	}
+	logFile, err := openVMDLog(spawn.StateDir, spawn.logName())
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = logFile.Close() }()
+
+	pid, err := spawnDetached(detachedSpawn{Args: spawn.args(), Stdio: logFile})
+	if err != nil {
+		return 0, fmt.Errorf("start holder: %w", err)
+	}
+	return pid, nil
 }

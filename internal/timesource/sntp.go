@@ -52,11 +52,22 @@ func NewResponder(addr string) (*Responder, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewResponderWithListener(ln), nil
+}
+
+// NewResponderWithListener wraps a listener that is ALREADY BOUND (see
+// internal/portalloc) instead of binding an address.
+//
+// Reserving a port, closing it, and re-binding later leaves a window in which
+// another process — typically a second bladerunner instance starting at the
+// same moment — takes the port. Handing the bound listener straight through
+// closes that window. The responder takes ownership: Stop closes it.
+func NewResponderWithListener(ln net.Listener) *Responder {
 	return &Responder{
 		ln:   ln,
 		stop: make(chan struct{}),
 		now:  time.Now,
-	}, nil
+	}
 }
 
 // Start spawns the accept loop. Returns immediately.

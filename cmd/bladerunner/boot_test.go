@@ -30,6 +30,23 @@ func TestClassifyBootArg(t *testing.T) {
 	}
 }
 
+func TestIsCartridgeArg(t *testing.T) {
+	tests := []struct {
+		arg  string
+		want bool
+	}{
+		{"/tmp/demo.sparseimage", true},
+		{"/tmp/demo.dmg", true},
+		{"/tmp/real.disk", false},
+		{"incus", false},
+	}
+	for _, tt := range tests {
+		if got := isCartridgeArg(tt.arg); got != tt.want {
+			t.Errorf("isCartridgeArg(%q) = %v, want %v", tt.arg, got, tt.want)
+		}
+	}
+}
+
 func TestSlotNameFromURL(t *testing.T) {
 	tests := []struct {
 		url  string

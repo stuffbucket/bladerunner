@@ -2,12 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 )
@@ -46,6 +43,11 @@ func runEject(_ *cobra.Command, args []string) error {
 	name := ejectFlags.disk
 	if name == "" && len(args) == 1 {
 		name = args[0]
+	}
+	if name == "" {
+		// The global --instance selector (or BLADERUNNER_INSTANCE) names the
+		// slot just as well as the positional argument does.
+		name = selectedInstanceName()
 	}
 
 	baseDir, slotName, err := resolveEjectSlot(name)
@@ -89,73 +91,61 @@ func runEject(_ *cobra.Command, args []string) error {
 const ejectWaitMargin = 15 * time.Second
 
 // resolveEjectSlot determines which slot to eject. An explicit name selects its
-// slot directly (a cartridge under mnt/<name>, a disk under disks/<name>, or the
-// flat default). Otherwise it scans for the single booted slot across attached
-// cartridges, disk slots, and the flat default: zero booted is an error, more
-// than one requires a name.
+// slot directly (a registered instance, a cartridge under mnt/<name>, a disk
+// under disks/<name>, or the flat default). Otherwise it scans for the single
+// booted instance across the registry and the legacy layouts: zero booted is an
+// error, more than one requires a name.
 func resolveEjectSlot(name string) (baseDir, slotName string, err error) {
+	scanner := defaultScanner()
+
 	if name != "" {
+		if target, rerr := scanner.resolveNamed(name); rerr == nil {
+			return target.StateDir, name, nil
+		}
+		// An unregistered name still addresses its legacy slot, so the caller
+		// reports "not booted" rather than "unknown instance".
 		return ejectSlotDirForName(name), name, nil
 	}
 
-	type booted struct {
-		baseDir string
-		name    string
-	}
-	var found []booted
-
-	// The flat default layout (a plain `br start`) counts as a booted slot.
-	flat := config.DefaultStateDir()
-	if control.NewClient(flat).IsRunning() {
-		found = append(found, booted{baseDir: flat, name: "default"})
-	}
-
-	// Disk slots under <state>/disks/*.
-	disksRoot := filepath.Join(config.DefaultStateDir(), "disks")
-	dirs, readErr := os.ReadDir(disksRoot)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		return "", "", fmt.Errorf("scan disk slots: %w", readErr)
-	}
-	for _, e := range dirs {
-		if !e.IsDir() {
-			continue
-		}
-		slot := filepath.Join(disksRoot, e.Name())
-		if control.NewClient(slot).IsRunning() {
-			found = append(found, booted{baseDir: slot, name: e.Name()})
-		}
-	}
-
-	// Attached cartridges under <state>/mnt/*.
-	for _, c := range listAttachedCartridges() {
-		if c.Booted {
-			found = append(found, booted{baseDir: c.Mountpoint, name: c.Name})
-		}
-	}
-
+	found := scanner.runningInstances()
 	switch len(found) {
 	case 0:
 		return "", "", fmt.Errorf("no booted VM to eject")
 	case 1:
-		return found[0].baseDir, found[0].name, nil
+		return found[0].StateDir, ejectSlotLabel(found[0]), nil
 	default:
 		names := make([]string, 0, len(found))
-		for _, b := range found {
-			names = append(names, b.name)
+		for i := range found {
+			names = append(names, ejectSlotLabel(found[i]))
 		}
 		return "", "", fmt.Errorf("multiple VMs booted (%v); name one to eject", names)
 	}
 }
 
-// ejectSlotDirForName resolves a slot name to its control-socket base dir: an
-// attached cartridge's mountpoint wins (it owns a live socket there), else the
-// disk slot under disks/<name>, else (for "default") the flat layout.
+// ejectSlotLabel is how a booted instance is named in eject's output. The flat
+// default has always been called "default" here, whereas the registry records
+// it under config.DefaultInstanceName; keep the familiar label.
+func ejectSlotLabel(r resolvedInstance) string {
+	if r.isDefaultSlot() {
+		return defaultSlotAlias
+	}
+	return r.Name
+}
+
+// ejectSlotDirForName resolves a slot name to its control-socket base dir when
+// the registry knows nothing about it: an attached cartridge's mountpoint wins
+// (it owns a live socket there), else the disk slot under disks/<name>, else
+// (for "default") the flat layout.
+//
+// The cartridge lookup covers both places a mount can be — the private
+// <state>/mnt/<name> and the browsable /Volumes/bladerunner-<name> macOS picks
+// — because a booted cartridge has not lived at the former since mounting
+// became browsable, and `br eject demo` has to keep working either way.
 func ejectSlotDirForName(name string) string {
-	if name == "default" {
+	if name == defaultSlotAlias {
 		return config.DefaultStateDir()
 	}
-	mp := cartridgeMountpoint(name)
-	if cartridge.IsAttached(mp) {
+	if mp, ok := attachedCartridgeMountpoint(config.DefaultStateDir(), name); ok {
 		return mp
 	}
 	return diskSlotDir(name)

@@ -18,8 +18,10 @@ package cartridge
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,7 +75,13 @@ const (
 	flagFormat = "-format"
 	flagQuiet  = "-quiet"
 	flagForce  = "-force"
+	flagPlist  = "-plist"
 )
+
+// devNodePrefix is the prefix every BSD disk device node carries. An attached
+// disk image is always backed by /dev/diskN[sM]; a synthetic mount (autofs,
+// devfs, a firmlink) is not, which is what makes this a usable identity test.
+const devNodePrefix = "/dev/disk"
 
 // Detach busy-retry tuning. hdiutil fails with exit 16 / "Resource busy" while a
 // process still holds the volume; we retry a few times with backoff, then fall
@@ -101,6 +109,30 @@ type Mount struct {
 	// Mountpoint is the resolved (symlink-evaluated) directory where the
 	// cartridge volume is mounted.
 	Mountpoint string
+	// DevNode is the BSD device node of the mounted volume (e.g.
+	// /dev/disk4s1), captured from `hdiutil attach -plist`. It is the handle
+	// DiskArbitration and `diskutil` address a volume by, so cartridge
+	// eject/unmount-request handling needs it. Best-effort: empty when hdiutil
+	// emitted no parseable plist and the kernel could not be asked either.
+	DevNode string
+	// Policy is the mount policy the volume was attached under. It is what
+	// tells a holder whether the user can Finder-eject this cartridge (and so
+	// whether an unmount-approval veto is worth registering) or whether the
+	// mount is private and can only go away because we said so.
+	Policy MountPolicy
+}
+
+// MountInfo is the kernel's own view of a mounted volume, obtained from statfs.
+// It is the authoritative answer to "what is actually mounted here?", unlike a
+// st.Dev comparison which merely says "this differs from its parent".
+type MountInfo struct {
+	// Mountpoint is the mount root the kernel reports (f_mntonname). It equals
+	// the queried path only when that path IS the root of a mount.
+	Mountpoint string
+	// DevNode is the backing device (f_mntfromname), e.g. /dev/disk4s1.
+	DevNode string
+	// FSType is the filesystem name (f_fstypename), e.g. "apfs".
+	FSType string
 }
 
 // commandRunner abstracts process execution so tests can inject a fake and run
@@ -160,18 +192,6 @@ func createArgs(path, name string, sizeGiB int) []string {
 	}
 }
 
-// attachArgs builds the `hdiutil attach` argument vector mounting at a known
-// mountpoint, avoiding the need to parse a plist.
-func attachArgs(path, mountpoint string) []string {
-	return []string{
-		cmdAttach, path,
-		"-mountpoint", mountpoint,
-		"-nobrowse",
-		"-owners", "on",
-		"-noverify",
-	}
-}
-
 // detachArgs builds the `hdiutil detach` argument vector for a mountpoint. When
 // force is true the -force flag is appended.
 func detachArgs(mountpoint string, force bool) []string {
@@ -204,17 +224,15 @@ func create(ctx context.Context, r commandRunner, path, name string, sizeGiB int
 	return resolveOutputPath(out, path, SparseExt), nil
 }
 
-// attach mounts the image at mountpoint (creating the dir first) and returns a
-// Mount whose Mountpoint is symlink-resolved for reliable later comparison.
-func attach(ctx context.Context, r commandRunner, path, mountpoint string) (*Mount, error) {
-	if err := os.MkdirAll(mountpoint, mountpointDirPerm); err != nil {
-		return nil, fmt.Errorf("create mountpoint %q: %w", mountpoint, err)
+// attach mounts the image according to req's policy and returns the resulting
+// Mount. Under MountPrivate the mountpoint is dictated by the caller; under
+// MountBrowsable macOS chooses and the real location is read back out of
+// hdiutil's plist (see mountpolicy.go).
+func attach(ctx context.Context, r commandRunner, req attachRequest) (*Mount, error) {
+	if req.policy.Private() {
+		return attachPrivate(ctx, r, req)
 	}
-	_, errOut, err := r.run(ctx, hdiutil, attachArgs(path, mountpoint)...)
-	if err != nil {
-		return nil, wrapHdiutil(cmdAttach, err, errOut)
-	}
-	return &Mount{Path: path, Mountpoint: resolvePath(mountpoint)}, nil
+	return attachBrowsable(ctx, r, req)
 }
 
 // detach unmounts the cartridge at mountpoint using the production backoff.
@@ -283,16 +301,42 @@ func convert(ctx context.Context, r commandRunner, src, format, dst, wantExt str
 	return resolveOutputPath(out, dst, wantExt), nil
 }
 
-// isAttached reports whether mountpoint currently has a mounted volume. It is
-// symlink-safe and treats a missing directory as not attached.
+// isAttached reports whether a real disk-image volume is mounted at mountpoint.
+//
+// The st.Dev comparison in isMountpoint is only a cheap first filter: a device
+// id that differs from the parent's is also true of firmlinks and of any
+// unrelated volume that happens to be mounted there, so on its own it cannot
+// distinguish a cartridge from, say, a stray USB stick or an autofs stub. We
+// therefore ask the kernel what is actually mounted and require both that it
+// agrees mountpoint IS the mount root (f_mntonname round-trips) and that the
+// volume is backed by a /dev/disk* node, which is what an attached image is.
 func isAttached(mountpoint string) bool {
 	resolved := resolvePath(mountpoint)
 	info, err := os.Stat(resolved)
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	// A mounted APFS volume sits on a different device than its parent dir.
-	return isMountpoint(resolved)
+	// Fast path: a mounted volume sits on a different device than its parent.
+	if !isMountpoint(resolved) {
+		return false
+	}
+	mi, err := lookupMount(resolved)
+	if err != nil {
+		return false
+	}
+	return mi.Mountpoint == resolved && strings.HasPrefix(mi.DevNode, devNodePrefix)
+}
+
+// isAttachedFrom reports whether mountpoint is the mount root of the volume
+// backed by exactly devNode — the strongest identity check available, used when
+// the caller already holds the Mount it created.
+func isAttachedFrom(mountpoint, devNode string) bool {
+	resolved := resolvePath(mountpoint)
+	mi, err := lookupMount(resolved)
+	if err != nil {
+		return false
+	}
+	return mi.Mountpoint == resolved && mi.DevNode == devNode
 }
 
 // wrapHdiutil decorates an exec error with the failing verb and hdiutil's
@@ -350,6 +394,224 @@ func resolvePath(p string) string {
 	return filepath.Clean(p)
 }
 
+// --- hdiutil attach -plist parsing ---------------------------------------
+//
+// `hdiutil attach -plist` emits an Apple property list whose "system-entities"
+// array holds one dict per device node the image produced. For an APFS sparse
+// cartridge that is typically four entries: the GUID partition scheme, the
+// Apple_APFS container, the synthesized APFS volume group, and the single
+// mounted volume — only the last of which carries a "mount-point". We want that
+// entry's "dev-entry".
+//
+// No plist library is a dependency of this module and we will not add one for
+// two keys, so the decoder below handles exactly the plist subset hdiutil emits
+// (dict/array/string/integer/data/true/false) on top of encoding/xml.
+
+// plist keys consumed from a system-entities entry.
+const (
+	plistKeyEntities   = "system-entities"
+	plistKeyDevEntry   = "dev-entry"
+	plistKeyMountPoint = "mount-point"
+	plistKeyVolumeKind = "volume-kind"
+)
+
+// plist element names the decoder distinguishes; everything else is treated as
+// a scalar whose character data is the value.
+const (
+	plistElemDict  = "dict"
+	plistElemArray = "array"
+	plistElemKey   = "key"
+	plistElemTrue  = "true"
+	plistElemFalse = "false"
+)
+
+// errNoPlistRoot is returned when the input carries no top-level plist dict —
+// e.g. hdiutil was run without -plist, or printed a bare status line.
+var errNoPlistRoot = errors.New("no plist dictionary in output")
+
+// systemEntity is one device node reported by `hdiutil attach -plist`. Entities
+// that are not mountable (the partition scheme, the APFS container) have an
+// empty MountPoint.
+type systemEntity struct {
+	// DevEntry is the BSD device node, e.g. /dev/disk4s1.
+	DevEntry string
+	// MountPoint is where hdiutil mounted this entity, or "" if unmounted.
+	MountPoint string
+	// VolumeKind is the filesystem kind, e.g. "apfs"; "" when not a volume.
+	VolumeKind string
+}
+
+// attachedDevNode returns the BSD device node of the volume hdiutil mounted at
+// mountpoint, or "" when the output carried no usable plist. It never errors:
+// the device node is additive information, and a cartridge that mounted fine
+// must not be rejected because its plist was unexpected.
+func attachedDevNode(stdout, mountpoint string) string {
+	entities, err := parseAttachEntities(stdout)
+	if err != nil {
+		return ""
+	}
+	return selectMountedDevNode(entities, mountpoint)
+}
+
+// selectMountedDevNode picks the entity mounted at mountpoint, comparing both
+// the literal and the symlink-resolved form (hdiutil reports /private/tmp/x for
+// a /tmp/x request). When no entity matches — an hdiutil that mounted somewhere
+// unexpected — it falls back to the first entity that is mounted at all, since
+// a single-volume cartridge has exactly one.
+func selectMountedDevNode(entities []systemEntity, mountpoint string) string {
+	want := resolvePath(mountpoint)
+	fallback := ""
+	for _, e := range entities {
+		if e.DevEntry == "" || e.MountPoint == "" {
+			continue
+		}
+		if e.MountPoint == mountpoint || resolvePath(e.MountPoint) == want {
+			return e.DevEntry
+		}
+		if fallback == "" {
+			fallback = e.DevEntry
+		}
+	}
+	return fallback
+}
+
+// parseAttachEntities decodes the system-entities array from `hdiutil attach
+// -plist` stdout.
+func parseAttachEntities(stdout string) ([]systemEntity, error) {
+	root, err := parsePlistRootDict(stdout)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := root[plistKeyEntities].([]any)
+	if !ok {
+		return nil, fmt.Errorf("plist has no %s array: %w", plistKeyEntities, errNoPlistRoot)
+	}
+	entities := make([]systemEntity, 0, len(raw))
+	for _, item := range raw {
+		dict, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		entities = append(entities, systemEntity{
+			DevEntry:   plistString(dict, plistKeyDevEntry),
+			MountPoint: plistString(dict, plistKeyMountPoint),
+			VolumeKind: plistString(dict, plistKeyVolumeKind),
+		})
+	}
+	return entities, nil
+}
+
+// plistString reads a string-valued key from a decoded plist dict, yielding ""
+// for a missing key or a non-string value.
+func plistString(dict map[string]any, key string) string {
+	s, _ := dict[key].(string)
+	return s
+}
+
+// parsePlistRootDict decodes the outermost <dict> of a property list.
+func parsePlistRootDict(s string) (map[string]any, error) {
+	dec := xml.NewDecoder(strings.NewReader(s))
+	// hdiutil emits a DOCTYPE referencing Apple's external DTD; never fetch it.
+	dec.Entity = xml.HTMLEntity
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return nil, errNoPlistRoot
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse plist: %w", err)
+		}
+		if start, ok := tok.(xml.StartElement); ok && start.Name.Local == plistElemDict {
+			return decodePlistDict(dec)
+		}
+	}
+}
+
+// decodePlistDict consumes tokens up to the </dict> that closes an already-read
+// <dict>, pairing each <key> with the value element that follows it.
+func decodePlistDict(dec *xml.Decoder) (map[string]any, error) {
+	out := map[string]any{}
+	pendingKey := ""
+	haveKey := false
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("parse plist dict: %w", err)
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			// The only EndElement reachable here closes this dict: </key> is
+			// consumed by DecodeElement and nested values by decodePlistValue.
+			if _, isEnd := tok.(xml.EndElement); isEnd {
+				return out, nil
+			}
+			continue
+		}
+		if start.Name.Local == plistElemKey {
+			if err := dec.DecodeElement(&pendingKey, &start); err != nil {
+				return nil, fmt.Errorf("parse plist key: %w", err)
+			}
+			haveKey = true
+			continue
+		}
+		value, err := decodePlistValue(dec, start)
+		if err != nil {
+			return nil, err
+		}
+		if haveKey {
+			out[pendingKey] = value
+			haveKey = false
+		}
+	}
+}
+
+// decodePlistArray consumes tokens up to the </array> that closes an
+// already-read <array>.
+func decodePlistArray(dec *xml.Decoder) ([]any, error) {
+	var out []any
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("parse plist array: %w", err)
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			if _, isEnd := tok.(xml.EndElement); isEnd {
+				return out, nil
+			}
+			continue
+		}
+		value, err := decodePlistValue(dec, start)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, value)
+	}
+}
+
+// decodePlistValue decodes the value element that start opens, leaving the
+// decoder positioned just past that element's closing tag.
+func decodePlistValue(dec *xml.Decoder, start xml.StartElement) (any, error) {
+	switch start.Name.Local {
+	case plistElemDict:
+		return decodePlistDict(dec)
+	case plistElemArray:
+		return decodePlistArray(dec)
+	case plistElemTrue, plistElemFalse:
+		if err := dec.Skip(); err != nil {
+			return nil, fmt.Errorf("parse plist bool: %w", err)
+		}
+		return start.Name.Local == plistElemTrue, nil
+	default:
+		// string, integer, real, date, data: character data is the value.
+		var s string
+		if err := dec.DecodeElement(&s, &start); err != nil {
+			return nil, fmt.Errorf("parse plist %s: %w", start.Name.Local, err)
+		}
+		return s, nil
+	}
+}
+
 // The public API below is platform-neutral but only functional where
 // hostSupported() reports true (darwin). On every other host each entry point
 // returns ErrUnsupported, and hostSupported()/isMountpoint() are provided by the
@@ -371,13 +633,23 @@ func Create(path, name string, sizeGiB int) (string, error) {
 
 // Attach mounts the cartridge image privately at mountpoint (-nobrowse) and
 // returns a Mount with the symlink-resolved mountpoint.
+//
+// This entry point is deliberately pinned to MountPrivate: it serves the
+// build-side flows (`br disk pack`, layout inspection) that need a
+// deterministic location and must never contend with a booted cartridge, which
+// lands under /Volumes. Use Open with a MountPolicy to attach a cartridge for
+// booting.
 func Attach(path, mountpoint string) (*Mount, error) {
 	if !hostSupported() {
 		return nil, ErrUnsupported
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), attachTimeout)
 	defer cancel()
-	return attach(ctx, defaultRunner, path, mountpoint)
+	return attach(ctx, defaultRunner, attachRequest{
+		path:       path,
+		mountpoint: mountpoint,
+		policy:     MountPrivate,
+	})
 }
 
 // Detach unmounts the cartridge at mountpoint, retrying on "Resource busy" and
@@ -425,9 +697,52 @@ func ConvertToSparse(src, dst string) (string, error) {
 
 // IsAttached reports whether a cartridge volume is currently mounted at
 // mountpoint. It is always false on unsupported hosts.
+//
+// This is an identity check, not a "something is here" check: the mountpoint
+// must be the mount root the kernel reports and must be backed by a /dev/disk*
+// device. Use IsAttachedFrom when the caller holds the Mount and can assert the
+// exact device, and Verify to additionally require a coherent cartridge layout.
 func IsAttached(mountpoint string) bool {
 	if !hostSupported() {
 		return false
 	}
 	return isAttached(mountpoint)
+}
+
+// IsAttachedFrom reports whether mountpoint is the mount root of the volume
+// backed by devNode (as captured in Mount.DevNode). This is the precise check
+// for "is MY cartridge still mounted where I put it" — it cannot be fooled by
+// an unrelated volume that was mounted over the same path. An empty devNode
+// is always false, since it asserts nothing.
+func IsAttachedFrom(mountpoint, devNode string) bool {
+	if !hostSupported() || devNode == "" {
+		return false
+	}
+	return isAttachedFrom(mountpoint, devNode)
+}
+
+// LookupMount returns the kernel's view of the volume mounted at mountpoint:
+// its true mount root, backing BSD device node, and filesystem type. It is the
+// bridge to DiskArbitration, which addresses volumes by BSD name rather than by
+// path. An error means nothing is mounted there (or the path is unreadable).
+func LookupMount(mountpoint string) (*MountInfo, error) {
+	if !hostSupported() {
+		return nil, ErrUnsupported
+	}
+	info, err := lookupMount(resolvePath(mountpoint))
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// DevNodeAt returns the BSD device node (e.g. /dev/disk4s1) backing the volume
+// mounted at mountpoint. Use it to recover a device node for a cartridge that
+// was attached by an earlier process, where no Mount value survives.
+func DevNodeAt(mountpoint string) (string, error) {
+	info, err := LookupMount(mountpoint)
+	if err != nil {
+		return "", err
+	}
+	return info.DevNode, nil
 }

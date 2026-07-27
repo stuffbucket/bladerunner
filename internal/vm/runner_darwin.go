@@ -23,14 +23,45 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
-// Eject tuning.
+// Guest drain tuning. Every shutdown path (Stop, Eject) goes through the same
+// drain: ACPI power request, then wait for a genuine stopped-state transition,
+// escalating to a forced stop only when the budget expires.
 const (
-	// ejectRequestStopAttempts is how many ACPI power-button requests Eject
+	// drainRequestStopAttempts is how many ACPI power-button requests a drain
 	// issues before relying on the wait/timeout to escalate.
-	ejectRequestStopAttempts = 3
-	// ejectForceStopGrace bounds the wait for the VM to reach stopped after a
-	// forced stop.
-	ejectForceStopGrace = 10 * time.Second
+	drainRequestStopAttempts = 3
+	// drainForceStopGrace bounds the wait for the VM to reach stopped after an
+	// escalation to a forced stop.
+	drainForceStopGrace = 10 * time.Second
+	// drainStatePollInterval is how often the drain re-reads the VM state while
+	// waiting, so a stopped transition is never missed just because another
+	// consumer of the shared state-change channel received it first.
+	drainStatePollInterval = 250 * time.Millisecond
+	// DefaultDrainTimeout is the budget Stop gives the guest to power itself off
+	// before escalating to a forced stop. A real guest has to stop Incus, unmount
+	// and flush filesystems, so the previous ~6s ceiling routinely cut power
+	// mid-write; 60s matches the eject/control-plane default and is long enough
+	// for an ordinary systemd shutdown while still bounding a wedged guest.
+	DefaultDrainTimeout = 60 * time.Second
+)
+
+// StopOutcome records how a shutdown path left the guest, so callers (and the
+// log) can tell a clean power-off from a power cut.
+type StopOutcome string
+
+const (
+	// StopOutcomeNotStarted means there was no VM to stop.
+	StopOutcomeNotStarted StopOutcome = "not-started"
+	// StopOutcomeAlreadyStopped means the VM had already reached the stopped
+	// state, so no ACPI request and no forced stop were issued.
+	StopOutcomeAlreadyStopped StopOutcome = "already-stopped"
+	// StopOutcomeClean means the guest powered itself off in response to the ACPI
+	// request, within the drain budget. The disk image is consistent.
+	StopOutcomeClean StopOutcome = "clean"
+	// StopOutcomeForced means the VMM was force-stopped (a power cut): either the
+	// caller asked for it, or the guest did not power off within the budget. The
+	// guest filesystem may need a check on next boot.
+	StopOutcomeForced StopOutcome = "forced"
 )
 
 type Runner struct {
@@ -57,6 +88,9 @@ type Runner struct {
 	nestedVirt        string // resolved nested-virt state: enabled|unsupported|disabled
 	stopOnce          sync.Once
 	stopErr           error
+	// stopOutcome records how the last drain left the guest. Written by the
+	// shutdown paths, read via LastStopOutcome once they have returned.
+	stopOutcome StopOutcome
 }
 
 // NestedVirtualizationSupported reports whether the host can run nested VMs
@@ -188,62 +222,128 @@ func (r *Runner) prepareRestore() error {
 // stopped state. If the guest does not power off in time, or force is set, it
 // escalates to a forced stop. It returns nil once the VM is stopped (or was
 // never running). The caller is then free to detach the cartridge image, which
-// the VMM has released. This composes the existing stop primitives rather than
-// reusing Stop() (which is sync.Once-guarded and combines graceful+force
-// unconditionally); a later deferred Stop() remains safe and idempotent.
+// the VMM has released. This shares the drain state machine with Stop but does
+// not consume the sync.Once guard, so a later deferred Stop() remains safe and
+// idempotent (and, finding the VM already stopped, will not force anything).
 func (r *Runner) Eject(ctx context.Context, timeout time.Duration, force bool) error {
 	if r.vm == nil {
 		return errors.New("vm not started")
 	}
-	log := logging.L()
+	outcome, err := drainGuest(ctx, r.vm, timeout, force, logging.L())
+	r.stopOutcome = outcome
+	logDrainOutcome(logging.L(), "eject", outcome, err)
+	return err
+}
 
-	if force {
-		r.forceStopVMIfNeeded(log)
-		return r.waitForStopped(ctx, timeout)
+// LastStopOutcome reports how the most recent shutdown path (Stop or Eject) left
+// the guest. It is meaningful once that call has returned; before any shutdown
+// it is the empty string.
+func (r *Runner) LastStopOutcome() StopOutcome { return r.stopOutcome }
+
+// drainTarget is the subset of *vz.VirtualMachine the drain state machine uses.
+// It exists so the wait/escalate decisions are testable without a real VM.
+type drainTarget interface {
+	State() vz.VirtualMachineState
+	CanRequestStop() bool
+	RequestStop() (bool, error)
+	CanStop() bool
+	Stop() error
+	StateChangedNotify() <-chan vz.VirtualMachineState
+}
+
+// drainGuest is the single orderly-shutdown implementation shared by Stop and
+// Eject. Unless force is set it presses the ACPI power button and waits up to
+// budget for a genuine transition to the stopped state; only when that budget
+// expires does it escalate to the destructive vz.Stop(), and it says so. A VM
+// that is already stopped is left alone. The returned outcome always describes
+// what was attempted, even when the accompanying error is non-nil.
+func drainGuest(ctx context.Context, vm drainTarget, budget time.Duration, force bool, log loggerLike) (StopOutcome, error) {
+	if vm.State() == vz.VirtualMachineStateStopped {
+		return StopOutcomeAlreadyStopped, nil
 	}
 
-	// Issue the ACPI power button a few times; the guest's logind powers off.
-	for i := 0; i < ejectRequestStopAttempts && r.vm.CanRequestStop(); i++ {
-		ok, err := r.vm.RequestStop()
-		log.Info("eject: sent ACPI stop request", "attempt", i+1, "accepted", ok, "err", err)
+	if force {
+		forceStopTarget(vm, log)
+		return StopOutcomeForced, waitForStoppedState(ctx, vm, budget)
+	}
+
+	// Press the ACPI power button; the guest's init powers the machine off.
+	for i := 0; i < drainRequestStopAttempts && vm.CanRequestStop(); i++ {
+		ok, err := vm.RequestStop()
+		log.Info("drain: sent ACPI stop request", "attempt", i+1, "accepted", ok, "err", err)
 		if err != nil {
 			break
 		}
 	}
 
-	if err := r.waitForStopped(ctx, timeout); err != nil {
-		// The guest did not power off in time (e.g. ACPI ignored / hung). Force it
-		// down so the cartridge can be detached.
-		log.Warn("eject: guest did not power off gracefully; forcing stop", "err", err)
-		r.forceStopVMIfNeeded(log)
-		return r.waitForStopped(ctx, ejectForceStopGrace)
+	if err := waitForStoppedState(ctx, vm, budget); err != nil {
+		// The guest did not power off in time (ACPI ignored, hung, or panicked).
+		// Escalating cuts power, so make it a loud, explicit event.
+		log.Warn("drain: guest did not power off within budget; escalating to a forced stop (power cut)", "budget", budget, "err", err)
+		forceStopTarget(vm, log)
+		return StopOutcomeForced, waitForStoppedState(ctx, vm, drainForceStopGrace)
 	}
-	return nil
+	return StopOutcomeClean, nil
 }
 
-// waitForStopped blocks until the VM reaches the stopped state, the timeout
-// elapses, or the VM enters the error state. It returns nil once stopped.
-func (r *Runner) waitForStopped(ctx context.Context, timeout time.Duration) error {
+// forceStopTarget cuts power to the VM when it can still be stopped.
+func forceStopTarget(vm drainTarget, log loggerLike) {
+	if !vm.CanStop() {
+		return
+	}
+	log.Warn("drain: forcing VM stop")
+	if err := vm.Stop(); err != nil {
+		log.Warn("drain: forced stop failed", "err", err)
+	}
+}
+
+// logDrainOutcome records, at the right severity, whether the guest powered off
+// cleanly or had its power cut, so an operator reading the log can tell which
+// happened without reconstructing it from timings.
+func logDrainOutcome(log loggerLike, path string, outcome StopOutcome, err error) {
+	switch outcome {
+	case StopOutcomeForced:
+		log.Warn("guest was force-stopped; its filesystem may need a check on next boot", "path", path, "outcome", string(outcome), "err", err)
+	case StopOutcomeNotStarted, StopOutcomeAlreadyStopped:
+		log.Info("no guest drain needed", "path", path, "outcome", string(outcome))
+	default:
+		log.Info("guest powered off cleanly", "path", path, "outcome", string(outcome))
+	}
+}
+
+// waitForStoppedState blocks until the VM reaches the stopped state, the
+// timeout elapses, or the VM enters the error state. It returns nil once
+// stopped.
+//
+// It also re-polls State() on a ticker rather than trusting the notification
+// channel alone: VZ hands every caller the *same* channel, so a concurrent
+// consumer (Runner.Wait) can take the stopped event, and a drain that only
+// selected on the channel would then sit out its whole budget behind an
+// already-stopped VM — and force-stop it.
+func waitForStoppedState(ctx context.Context, vm drainTarget, timeout time.Duration) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	poll := time.NewTicker(drainStatePollInterval)
+	defer poll.Stop()
 	for {
-		switch r.vm.State() {
+		switch vm.State() {
 		case vz.VirtualMachineStateStopped:
 			return nil
 		case vz.VirtualMachineStateError:
-			return errors.New("vm entered error state during eject")
+			return errors.New("vm entered error state during shutdown")
 		default:
 		}
 		select {
 		case <-waitCtx.Done():
 			return fmt.Errorf("vm did not stop within %s: %w", timeout, waitCtx.Err())
-		case st := <-r.vm.StateChangedNotify():
-			logging.L().Info("eject: vm state changed", "state", st.String())
+		case <-poll.C:
+		case st := <-vm.StateChangedNotify():
+			logging.L().Info("drain: vm state changed", "state", st.String())
 			switch st {
 			case vz.VirtualMachineStateStopped:
 				return nil
 			case vz.VirtualMachineStateError:
-				return errors.New("vm entered error state during eject")
+				return errors.New("vm entered error state during shutdown")
 			default:
 			}
 		}
@@ -473,71 +573,103 @@ func (r *Runner) Wait(ctx context.Context) error {
 	}
 }
 
+// Stop tears the VM down using the default drain budget (DefaultDrainTimeout).
+// It is idempotent: only the first call performs the shutdown, later calls
+// return the same error.
 func (r *Runner) Stop() error {
+	return r.StopWithTimeout(context.Background(), DefaultDrainTimeout)
+}
+
+// StopWithTimeout tears the VM down, giving the guest up to budget to power
+// itself off via ACPI before escalating to a forced stop. A budget <= 0 means
+// DefaultDrainTimeout. Ordering matters for integrity: the guest is drained and
+// the disk image flushed *before* the vsock forwarders and the console sink are
+// closed, so the guest keeps its host-side channels for the whole shutdown.
+// Like Stop, only the first call does the work.
+func (r *Runner) StopWithTimeout(ctx context.Context, budget time.Duration) error {
+	if budget <= 0 {
+		budget = DefaultDrainTimeout
+	}
 	r.stopOnce.Do(func() {
 		log := logging.L()
-		log.Info("stopping vm and forwarders")
+		log.Info("stopping vm", "drain_budget", budget)
+
+		// 1. Bring the guest down first, while its vsock channels are still up.
+		outcome, err := r.drain(ctx, budget, log)
+		r.stopOutcome = outcome
+		logDrainOutcome(log, "stop", outcome, err)
+		r.recordStopErr(err)
+
+		// 2. The guest is down, so the image is quiescent: flush it to stable
+		// storage before anything (e.g. a cartridge detach) can pull it away.
+		if r.cfg != nil {
+			if err := SyncDiskImage(r.cfg.DiskPath); err != nil {
+				log.Warn("could not flush disk image to stable storage", "path", r.cfg.DiskPath, "err", err)
+				r.recordStopErr(err)
+			}
+		}
+
+		// 3. Only now tear down the host-side plumbing.
 		r.closeForwarders()
-
 		if r.consoleLog != nil {
-			// Defer until after VM is stopped so we don't kill the
-			// serial sink while the guest is still writing.
-			defer func() {
-				if err := r.consoleLog.Close(); err != nil && r.stopErr == nil {
-					r.stopErr = err
-				}
-			}()
+			r.recordStopErr(r.consoleLog.Close())
 		}
-
-		if r.vm == nil {
-			return
-		}
-
-		r.requestStopVM(log)
-		r.forceStopVMIfNeeded(log)
 	})
 
 	return r.stopErr
 }
 
+// drain brings the guest down for Stop. A saved-state guest is paused with its
+// RAM already on disk and must not resume, so it is torn down directly instead
+// of being asked to power off.
+func (r *Runner) drain(ctx context.Context, budget time.Duration, log loggerLike) (StopOutcome, error) {
+	if r.vm == nil {
+		return StopOutcomeNotStarted, nil
+	}
+	if r.savedState {
+		log.Info("guest state already saved and paused; tearing the VMM down without an ACPI request")
+		return drainGuest(ctx, r.vm, budget, true, log)
+	}
+	return drainGuest(ctx, r.vm, budget, false, log)
+}
+
+// recordStopErr keeps the first error seen during shutdown, matching the
+// long-standing behavior that Stop reports the earliest failure.
+func (r *Runner) recordStopErr(err error) {
+	if err != nil && r.stopErr == nil {
+		r.stopErr = err
+	}
+}
+
+// SyncDiskImage flushes the VM's disk image at path to stable storage. On
+// darwin os.File.Sync issues F_FULLFSYNC, so this survives a host power loss,
+// not merely a process crash. Call it once the guest has stopped (the image is
+// then quiescent) and before the image can be detached or copied. An empty path
+// or a missing file is not an error: there is nothing to flush.
+func SyncDiskImage(path string) error {
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open disk image %s for sync: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync disk image %s: %w", path, err)
+	}
+	return nil
+}
+
 func (r *Runner) closeForwarders() {
 	for _, f := range r.forwarders {
-		if err := f.Close(); err != nil && r.stopErr == nil {
-			r.stopErr = err
-		}
+		r.recordStopErr(f.Close())
 	}
 	for _, f := range r.reverseForwarders {
-		if err := f.Close(); err != nil && r.stopErr == nil {
-			r.stopErr = err
-		}
-	}
-}
-
-func (r *Runner) requestStopVM(log loggerLike) {
-	if r.savedState {
-		// State already saved and the guest is paused; a graceful ACPI request
-		// would only stall. forceStopVMIfNeeded tears it down directly.
-		return
-	}
-	for i := 0; i < 3 && r.vm.CanRequestStop(); i++ {
-		ok, err := r.vm.RequestStop()
-		log.Info("sent stop request", "attempt", i+1, "accepted", ok, "err", err)
-		if err != nil && r.stopErr == nil {
-			r.stopErr = err
-		}
-		time.Sleep(2 * time.Second)
-	}
-}
-
-func (r *Runner) forceStopVMIfNeeded(log loggerLike) {
-	if !r.vm.CanStop() {
-		return
-	}
-	if err := r.vm.Stop(); err != nil {
-		log.Warn("forced stop failed", "err", err)
-		if r.stopErr == nil {
-			r.stopErr = err
-		}
+		r.recordStopErr(f.Close())
 	}
 }
 
@@ -629,34 +761,38 @@ func (r *Runner) startForwarders() error {
 		return device.Connect(port)
 	}
 
-	sshForward := newPortForwarder(
-		"ssh",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalSSHPort),
-		r.cfg.VsockSSHPort,
-		dial,
-	)
+	sshForward := r.hostForwarder("ssh", config.PortNameSSH, r.cfg.LocalSSHPort, r.cfg.VsockSSHPort, dial)
 	if err := sshForward.Start(); err != nil {
 		return fmt.Errorf("start ssh forwarder: %w", err)
 	}
 
-	apiForward := newPortForwarder(
-		"incus-api",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalAPIPort),
-		r.cfg.VsockAPIPort,
-		dial,
-	)
+	apiForward := r.hostForwarder("incus-api", config.PortNameAPI, r.cfg.LocalAPIPort, r.cfg.VsockAPIPort, dial)
 	if err := apiForward.Start(); err != nil {
 		_ = sshForward.Close()
 		return fmt.Errorf("start api forwarder: %w", err)
 	}
 
 	r.forwarders = []*portForwarder{sshForward, apiForward}
-	logging.L().Info("forwarders active", "ssh", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalSSHPort), "api", fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalAPIPort))
+	logging.L().Info("forwarders active", "ssh", config.LoopbackAddr(r.cfg.LocalSSHPort), "api", config.LoopbackAddr(r.cfg.LocalAPIPort))
 
 	r.startOIDCReverseForwarder(device)
 	r.startNTPReverseForwarder(device)
 
 	return nil
+}
+
+// hostForwarder builds the forwarder for one host loopback service, preferring
+// a listener the caller already bound for that port (parked on the config by
+// whoever reserved the instance's port set) over binding the address here.
+// Taking the pre-bound listener is what removes the window in which another
+// instance could steal the port between reservation and bind; falling back to
+// listenAddr keeps every existing caller — which reserves nothing — working
+// exactly as before.
+func (r *Runner) hostForwarder(name, portName string, hostPort int, guestPort uint32, dial func(uint32) (net.Conn, error)) *portForwarder {
+	if ln := r.cfg.TakeHostListener(portName); ln != nil {
+		return newPortForwarderWithListener(name, ln, guestPort, dial)
+	}
+	return newPortForwarder(name, config.LoopbackAddr(hostPort), guestPort, dial)
 }
 
 // startOIDCReverseForwarder wires the host-side OIDC provider so it is reachable
@@ -673,7 +809,7 @@ func (r *Runner) startOIDCReverseForwarder(device *vz.VirtioSocketDevice) {
 	}
 	oidcReverse := newReversePortForwarder(
 		"oidc",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalOIDCPort),
+		config.LoopbackAddr(r.cfg.LocalOIDCPort),
 		vsockLn,
 	)
 	if err := oidcReverse.Start(); err != nil {
@@ -698,7 +834,7 @@ func (r *Runner) startNTPReverseForwarder(device *vz.VirtioSocketDevice) {
 	}
 	ntpReverse := newReversePortForwarder(
 		"ntp",
-		fmt.Sprintf("127.0.0.1:%d", r.cfg.LocalNTPPort),
+		config.LoopbackAddr(r.cfg.LocalNTPPort),
 		vsockLn,
 	)
 	if err := ntpReverse.Start(); err != nil {
@@ -717,14 +853,19 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 	var sshCommand string
 	var sshConfigPath string
 	if r.cfg.SSHPrivateKeyPath != "" {
-		configPath, err := ssh.WriteSSHConfig(r.cfg.LocalSSHPort, r.cfg.SSHUser, r.cfg.SSHPrivateKeyPath)
+		// Per-instance: the default instance rewrites the shared aggregator (its
+		// legacy "Host bladerunner" block), any other instance writes its own
+		// config.d/<name> fragment. Before this split, a second instance's report
+		// overwrote the first's ssh config with its own port.
+		instance := r.cfg.InstanceName()
+		configPath, err := ssh.WriteConfigFor(instance, r.cfg.LocalSSHPort, r.cfg.SSHUser, r.cfg.SSHPrivateKeyPath)
 		if err != nil {
 			logging.L().Warn("failed to write SSH config", "err", err)
 			sshCommand = fmt.Sprintf("ssh -p %d -i %s %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHPrivateKeyPath, r.cfg.SSHUser)
 		} else {
 			sshConfigPath = configPath
 			r.cfg.SSHConfigPath = configPath
-			sshCommand = ssh.Command(configPath)
+			sshCommand = ssh.CommandFor(configPath, instance)
 		}
 	} else {
 		sshCommand = fmt.Sprintf("ssh -p %d %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHUser)

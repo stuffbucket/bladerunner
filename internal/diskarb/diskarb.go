@@ -1,0 +1,233 @@
+// Package diskarb is a thin, run-loop-free binding to macOS DiskArbitration.
+//
+// It exists so bladerunner can (a) notice when a cartridge DMG is mounted or
+// unmounted and (b) *veto* an unmount long enough to spin the guest down in an
+// orderly fashion. Both are impossible without DiskArbitration: the framework
+// is the only supported way to be asked for permission before a volume goes
+// away.
+//
+// # Why a dispatch queue and never a run loop
+//
+// DiskArbitration offers two ways to receive callbacks:
+// DASessionScheduleWithRunLoop and DASessionSetDispatchQueue. This package uses
+// the dispatch-queue form exclusively, and callers must not reach for the other
+// one.
+//
+// The reason is the holder process. When bladerunner runs a GUI VM, the
+// Virtualization framework's vz.StartGraphicApplication takes over the main
+// thread and its CFRunLoop for the entire life of the process and never
+// returns. Any DiskArbitration session scheduled on a run loop would therefore
+// either be starved (a secondary thread's run loop nobody spins) or would have
+// to contend for a run loop this package does not own. A private serial
+// dispatch queue (dispatch_queue_create with a NULL attr, i.e.
+// DISPATCH_QUEUE_SERIAL) is independent of every run loop in the process, so
+// the same code works in the headless holder and under the GUI.
+//
+// # Callback contract
+//
+// Every callback registered here is delivered on the session's private serial
+// queue — never on the goroutine that registered it, and never on the main
+// thread. Two rules follow:
+//
+//   - Callbacks must return promptly. In particular the unmount-approval
+//     callback must not block on a multi-second VM shutdown; its only job is to
+//     return a Dissent immediately and kick the drain off asynchronously (a
+//     later unmount attempt, or an explicit unmount once the drain finishes,
+//     then succeeds).
+//   - A callback must not call the CancelFunc of another watcher on the same
+//     session from a *different* goroutine and then wait for it, and must not
+//     panic: a panic crossing the cgo boundary takes the process down.
+//     Canceling from *inside* a callback is explicitly supported.
+package diskarb
+
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrUnsupported is returned by every entry point on non-darwin platforms.
+// It wraps errors.ErrUnsupported so callers can test with errors.Is.
+var ErrUnsupported = fmt.Errorf("diskarb: DiskArbitration is only available on macOS: %w", errors.ErrUnsupported)
+
+// ErrSessionClosed is returned when a Session is used after Close.
+var ErrSessionClosed = errors.New("diskarb: session is closed")
+
+// ErrNilCallback is returned when a watcher is registered without a function.
+var ErrNilCallback = errors.New("diskarb: callback must not be nil")
+
+// CancelFunc unregisters a watcher. It is idempotent, and it is safe to call it
+// after the owning Session has been closed (in which case it does nothing).
+//
+// When it returns, the watcher's function is guaranteed not to be running and
+// guaranteed never to run again — unless it is called from inside that very
+// callback, where waiting for the callback to finish would deadlock the
+// session's serial queue and the wait is therefore skipped.
+type CancelFunc func()
+
+// DiskInfo is a snapshot of the DiskArbitration description of one disk.
+//
+// Fields are best-effort: DiskArbitration omits keys that do not apply, so a
+// disk with no mounted filesystem has an empty VolumePath and a synthesized
+// APFS snapshot has no BSDName. Callers should treat "" / false as "not
+// reported" rather than as a positive assertion.
+type DiskInfo struct {
+	// BSDName is the device name without the /dev prefix, e.g. "disk4s1".
+	BSDName string
+	// VolumeName is the user-visible volume name, e.g. "bladerunner-cartridge".
+	VolumeName string
+	// VolumePath is the mount point, e.g. "/Volumes/bladerunner-cartridge".
+	// Empty when the disk carries no mounted volume.
+	VolumePath string
+	// VolumeKind is the filesystem type, e.g. "apfs" or "hfs".
+	VolumeKind string
+	// Ejectable reports whether the media can be ejected (true for a DMG).
+	Ejectable bool
+	// Removable reports whether the media itself can be removed.
+	Removable bool
+	// WholeDisk reports whether this is the whole disk rather than a slice.
+	WholeDisk bool
+	// NetworkVolume reports whether the volume is served over the network.
+	NetworkVolume bool
+	// DeviceModel is the media model string, e.g. "Disk Image".
+	DeviceModel string
+}
+
+// Mounted reports whether the disk currently carries a mounted volume.
+func (d DiskInfo) Mounted() bool { return d.VolumePath != "" }
+
+// trackingKey identifies a volume across the appeared/description-changed/
+// disappeared events that describe the same disk. The BSD device name is stable
+// for the life of an attachment; the mount point is only a fallback for the
+// synthesized descriptions (APFS snapshots) that carry no device name.
+func (d DiskInfo) trackingKey() string {
+	if d.BSDName != "" {
+		return d.BSDName
+	}
+	return d.VolumePath
+}
+
+// maxTrackedVolumes caps how many volumes a single watcher remembers as
+// mounted. Entries are removed as volumes unmount, so the map normally tracks
+// no more than the number of volumes attached to the machine; the cap only
+// exists so a pathological event stream cannot grow it without bound. Past the
+// cap, mounts are still announced but no longer remembered, which costs a
+// possible duplicate announcement and a missed unmount for the excess volumes.
+const maxTrackedVolumes = 512
+
+// mountState is the transition a single DiskArbitration event represents for
+// one watcher.
+type mountState int
+
+const (
+	// mountUnchanged means the event told the tracker nothing new: a
+	// description change that did not cross the mounted/unmounted line, or a
+	// repeat of a transition already reported.
+	mountUnchanged mountState = iota
+	// mountAppeared means a volume that was not mounted now is.
+	mountAppeared
+	// mountVanished means a volume that was mounted no longer is, either
+	// because it was unmounted or because its media went away.
+	mountVanished
+)
+
+// String makes a failing assertion on a transition readable.
+func (s mountState) String() string {
+	switch s {
+	case mountAppeared:
+		return "mountAppeared"
+	case mountVanished:
+		return "mountVanished"
+	case mountUnchanged:
+		return "mountUnchanged"
+	default:
+		return fmt.Sprintf("mountState(%d)", int(s))
+	}
+}
+
+// volumeTracker folds the DiskArbitration event stream into mount transitions.
+//
+// It exists because DiskArbitration reports *media*, not filesystems: the
+// appeared callback fires when the device node shows up, which is before
+// diskarbitrationd has mounted anything, so the appeared description has no
+// volume path. The mount point arrives milliseconds later on a
+// description-changed callback, and an unmount is likewise a description change
+// rather than a disappearance. Watching both and running them through this
+// tracker turns "media appeared", "description changed" and "media
+// disappeared" into "a mounted volume became available / went away", reported
+// exactly once each.
+//
+// A volumeTracker is not safe for concurrent use; callers serialize it.
+type volumeTracker struct {
+	mounted map[string]DiskInfo
+}
+
+// newVolumeTracker returns a tracker that has not yet seen any volume.
+func newVolumeTracker() *volumeTracker {
+	return &volumeTracker{mounted: make(map[string]DiskInfo)}
+}
+
+// observe folds one event into the tracker and reports the transition it
+// caused, along with the description to hand to the watcher.
+//
+// mountedNow is whether the disk carries a mounted volume *after* this event;
+// callers must pass false for a media-disappeared event even though the
+// retained description still names a mount point. For mountVanished the
+// returned description is the one recorded while the volume was mounted, so a
+// caller keyed on VolumePath can still tell which volume went away.
+func (t *volumeTracker) observe(info DiskInfo, mountedNow bool) (mountState, DiskInfo) {
+	key := info.trackingKey()
+	if key == "" || t.mounted == nil {
+		return mountUnchanged, DiskInfo{}
+	}
+	prev, known := t.mounted[key]
+
+	switch {
+	case mountedNow && !known:
+		if len(t.mounted) < maxTrackedVolumes {
+			t.mounted[key] = info
+		}
+		return mountAppeared, info
+	case !mountedNow && known:
+		delete(t.mounted, key)
+		return mountVanished, prev
+	case mountedNow && known:
+		// Still mounted, but the description may have moved on — renaming a
+		// volume changes its mount point in place. Keep the freshest one so a
+		// later unmount reports where the volume actually was.
+		t.mounted[key] = info
+		return mountUnchanged, DiskInfo{}
+	default:
+		return mountUnchanged, DiskInfo{}
+	}
+}
+
+// forget drops every remembered volume, releasing the tracker's memory once the
+// watcher it belongs to has been canceled. A forgotten tracker reports
+// mountUnchanged for everything, so a late event cannot resurrect it.
+func (t *volumeTracker) forget() {
+	t.mounted = nil
+}
+
+// Dissent is the answer to an unmount-approval request. The zero value
+// approves; see Approve and Deny.
+type Dissent struct {
+	// Deny vetoes the unmount. The requester (Finder, diskutil, hdiutil) sees a
+	// "volume is in use" style failure and may retry.
+	Deny bool
+	// Reason is a short human-readable explanation surfaced to the requester.
+	// Ignored when Deny is false.
+	Reason string
+}
+
+// Approve returns a Dissent that allows the unmount to proceed.
+func Approve() Dissent { return Dissent{} }
+
+// Deny returns a Dissent that vetoes the unmount with the given reason.
+//
+// Denying is only ever a delaying tactic: the caller is expected to start an
+// orderly VM drain and stop denying (or unmount itself) once the drain is done.
+func Deny(reason string) Dissent { return Dissent{Deny: true, Reason: reason} }
+
+// The watcher filter rule — which disks a watcher registered for one name is
+// delivered — is MatchesFilter, in bsdname.go with the rest of the BSD-name
+// domain.

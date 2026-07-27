@@ -1,11 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,20 +13,16 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/disk"
+	"github.com/stuffbucket/bladerunner/internal/instance"
+	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
 
-// Cartridge on-image layout. A mounted cartridge exposes a complete, self-
-// contained VM: the disk manifest, the bootable root disk, EFI + cloud-init
-// state, and the RW host<->guest share folder.
-const (
-	cartridgeManifestFile = "disk.json"
-	cartridgeRootImg      = "root.img"
-	cartridgeStateDir     = "state"
-	cartridgeShareDir     = "share"
-	cartridgeEFIVarsFile  = "efi-vars.bin"
-	cartridgeCloudInitDir = "cloud-init"
-)
+// This file is the CLI surface over internal/cartridge: `br disk pack` (build a
+// cartridge) and the `br boot <cartridge>` entry point. The cartridge semantics
+// themselves — the on-image layout, the pack layout writer, and the
+// convert/attach/verify open sequence — live in internal/cartridge so a holder
+// process can drive them without importing package main.
 
 // --- runner disk pack ----------------------------------------------------
 
@@ -158,11 +154,7 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	rootImg := filepath.Join(mount.Mountpoint, cartridgeRootImg)
-	shareTag := manifestShareTag(m)
-	shareGuestPath := manifestShareGuestPath(m)
-
-	if err := layoutCartridge(cmd, mount.Mountpoint, m, name, rootImg); err != nil {
+	if err := layoutCartridge(cmd, mount.Mountpoint, m, name); err != nil {
 		return jsonOrError(err)
 	}
 
@@ -173,10 +165,10 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 		Name:      name,
 		Cartridge: imgPath,
 		SizeGiB:   sizeGiB,
-		RootImg:   cartridgeRootImg,
+		RootImg:   cartridge.RootImageFile,
 		DiskGiB:   diskGiB,
-		ShareTag:  shareTag,
-		SharePath: shareGuestPath,
+		ShareTag:  cartridge.ShareTag(m),
+		SharePath: cartridge.ShareGuestPath(m),
 	}
 
 	// 3) Optionally ship: compress to a read-only DMG (the AirDrop artifact). The
@@ -185,7 +177,7 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 		if derr := cartridge.Detach(mount.Mountpoint); derr != nil {
 			return jsonOrError(fmt.Errorf("detach before ship: %w", derr))
 		}
-		dmgStem := trimCartridgeExt(imgPath)
+		dmgStem := cartridge.TrimExt(imgPath)
 		dmgPath, derr := cartridge.ConvertToDMG(imgPath, dmgStem)
 		if derr != nil {
 			return jsonOrError(fmt.Errorf("convert cartridge to dmg: %w", derr))
@@ -201,7 +193,7 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 	if report.DMG != "" {
 		fmt.Printf("  %s %s\n", key("AirDrop (dmg):"), value(report.DMG))
 	}
-	fmt.Printf("  %s %s mounted at %s in the guest\n", key("share:"), shareTag, shareGuestPath)
+	fmt.Printf("  %s %s mounted at %s in the guest\n", key("share:"), report.ShareTag, report.SharePath)
 	fmt.Printf("Boot it with %s\n", command("br boot "+report.cartridgeArg()))
 	return nil
 }
@@ -215,10 +207,14 @@ func (r cartridgePackReport) cartridgeArg() string {
 	return r.Cartridge
 }
 
-// layoutCartridge writes the disk.json manifest, materializes root.img from the
-// disk's image source, and creates the state/ and share/ directories inside a
-// mounted cartridge.
-func layoutCartridge(cmd *cobra.Command, mountpoint string, m *disk.Manifest, name, rootImg string) error {
+// layoutCartridge materializes the bootable root.img into a mounted cartridge
+// and then writes the cartridge layout around it (packed disk.json, state/ +
+// share/, the format stamp).
+//
+// The root.img half stays here because it needs the host's image cache and
+// qemu-img; everything that defines the cartridge *shape* is cartridge.Pack, so
+// the CLI and a holder process cannot drift apart.
+func layoutCartridge(cmd *cobra.Command, mountpoint string, m *disk.Manifest, name string) error {
 	// Resolve + materialize the bootable root image into the cartridge. We reuse
 	// the exact image cache/convert path boot uses, so packed bytes == booted bytes.
 	tmpCfg, err := config.Default("")
@@ -235,160 +231,136 @@ func layoutCartridge(cmd *cobra.Command, mountpoint string, m *disk.Manifest, na
 		return fmt.Errorf("resolve disk image: %w", err)
 	}
 	diskGiB := pickDiskGiB(0, m.VM.DiskSizeGiB)
-	if err := vm.MaterializeRawDisk(srcRaw, rootImg, diskGiB); err != nil {
+	if err := vm.MaterializeRawDisk(srcRaw, cartridge.NewLayout(mountpoint).RootImagePath(), diskGiB); err != nil {
 		return fmt.Errorf("materialize root.img: %w", err)
 	}
 
-	// The cartridge's disk.json points its image at the LOCAL root.img so boot
-	// never re-downloads; sizing and share carry through.
-	packed := cartridgeManifest(m, name)
-	if err := writeManifest(filepath.Join(mountpoint, cartridgeManifestFile), packed); err != nil {
-		return err
-	}
-
-	// State + share directories the boot path roots the VM under.
-	for _, d := range []string{
-		filepath.Join(mountpoint, cartridgeStateDir),
-		filepath.Join(mountpoint, cartridgeStateDir, cartridgeCloudInitDir),
-		filepath.Join(mountpoint, cartridgeShareDir),
-	} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("create cartridge dir %s: %w", d, err)
-		}
-	}
-	return nil
-}
-
-// cartridgeManifest rewrites a disk manifest for embedding in a cartridge: the
-// image becomes the local root.img (Path, relative to the mountpoint at boot
-// time we set BaseImagePath directly, but record root.img so the manifest is
-// self-describing) and a default RW share is ensured when absent.
-func cartridgeManifest(m *disk.Manifest, name string) *disk.Manifest {
-	cp := m.Clone()
-	cp.Name = name
-	// The cartridge carries its own bootable root.img; record it as a path image
-	// so disk.json honestly describes a local, self-contained source.
-	cp.Image = disk.ImageSpec{Path: cartridgeRootImg}
-	if cp.Share == nil {
-		cp.Share = &disk.ShareSpec{
-			Tag:       config.DefaultShareTag,
-			GuestPath: config.DefaultShareGuestPath,
-		}
-	}
-	return cp
-}
-
-// manifestShareTag returns the effective VirtioFS tag for a manifest's share,
-// defaulting cartridges to config.DefaultShareTag.
-func manifestShareTag(m *disk.Manifest) string {
-	if m.Share != nil && m.Share.Tag != "" {
-		return m.Share.Tag
-	}
-	return config.DefaultShareTag
-}
-
-// manifestShareGuestPath returns the effective in-guest mount path for a
-// manifest's share, defaulting to config.DefaultShareGuestPath.
-func manifestShareGuestPath(m *disk.Manifest) string {
-	if m.Share != nil && m.Share.GuestPath != "" {
-		return m.Share.GuestPath
-	}
-	return config.DefaultShareGuestPath
+	return cartridge.Pack(mountpoint, m, cartridge.PackOptions{Name: name, PackedBy: version})
 }
 
 // --- runner boot <cartridge> --------------------------------------------
 
-// bootCartridge stashes the attached cartridge state for the foreground runStart:
-// applyBootCartridge roots cfg inside the mount, and detachBootCartridge (a
-// deferred cleanup in runStart) releases the image after the VMM has stopped.
+// bootCartridge is the handoff from `br boot <cartridge>` into runStart, which
+// folds it into the vmhost.Spec and then hands the open cartridge itself to the
+// Host (see takeBootCartridge). The Host owns it from that moment: it applies
+// the rooting and detaches the image as the last step of its reverse-order
+// teardown, once the VMM has released root.img.
+//
+// Everything a cartridge boot needs — the mount and its dev node, the packed
+// manifest, the .dmg working copy, the layout — lives in the *cartridge.Opened
+// value below rather than in loose package globals, so two cartridges can be
+// open in one process. What is left here is only the argument-passing hop
+// between two cobra RunE functions.
 var bootCartridge struct {
 	mountpoint string
-	manifest   *disk.Manifest
-	name       string
-	// workingCopy is a temporary .sparseimage materialized from a shipped .dmg;
-	// removed after detach so a pristine .dmg is never mutated.
-	workingCopy string
+	opened     *cartridge.Opened
 }
 
 // cartridgeMountpoint returns the private mountpoint for a cartridge name:
-// <DefaultStateDir>/mnt/<name>. Not under /Volumes so the cartridge is invisible
-// in Finder and isolated per name.
+// <DefaultStateDir>/mnt/<name>. It is the mount target for the BUILD-side flows
+// (`br disk pack`), which need a deterministic location and must never contend
+// with a booted cartridge — a booted one is attached browsably, so macOS puts
+// it under /Volumes where the user can eject it.
 func cartridgeMountpoint(name string) string {
-	return filepath.Join(config.DefaultStateDir(), "mnt", name)
+	return cartridge.MountpointFor(config.DefaultStateDir(), name)
 }
 
-// cartridgeNameFromPath derives a slot/mount name from a cartridge file path by
-// trimming the cartridge extension from its basename.
-func cartridgeNameFromPath(p string) string {
-	return trimCartridgeExt(filepath.Base(p))
-}
-
-// trimCartridgeExt removes a trailing .sparseimage or .dmg extension from p.
-func trimCartridgeExt(p string) string {
-	if stem, ok := strings.CutSuffix(p, cartridge.SparseExt); ok {
-		return stem
+// cartridgeImageKey reduces a cartridge image path to the identity two boots of
+// the same cartridge share: the canonical path of the WORKING COPY they would
+// both attach. It is what makes "demo.dmg" and "demo.sparseimage" — and the
+// same file reached through a symlinked directory — one cartridge.
+func cartridgeImageKey(path string) string {
+	if path == "" {
+		return ""
 	}
-	return strings.TrimSuffix(p, cartridge.DMGExt)
+	return cartridge.CanonicalImagePath(cartridge.WorkingCopyPath(path))
 }
 
-// runBootCartridge boots a .sparseimage/.dmg cartridge. A .dmg is first converted
-// to a writable working .sparseimage (the read-only ship form stays pristine);
-// the image is attached privately, the VM is rooted inside it, and the foreground
-// runStart owns the mount — detaching it on exit.
+// bootedCartridgeInstance returns the live instance already booted from the same
+// cartridge image as path, if any.
+//
+// It matches on the IMAGE, never on a mountpoint. A booted cartridge is mounted
+// wherever macOS chose to put it, so "is <state>/mnt/<name> live?" — which is
+// what this used to ask — is always false now, and every already-booted check
+// built on it silently passed.
+func bootedCartridgeInstance(path string) (instance.Entry, bool) {
+	want := cartridgeImageKey(path)
+	if want == "" {
+		return instance.Entry{}, false
+	}
+	entries, err := instance.List(config.DefaultStateDir())
+	if err != nil {
+		logging.L().Debug("list instance registry for boot", "err", err)
+	}
+	for i := range entries {
+		e := &entries[i]
+		if !instance.Alive(*e) {
+			continue
+		}
+		if cartridgeImageKey(e.SourcePath) == want || cartridgeImageKey(e.WorkingCopy) == want {
+			return *e, true
+		}
+	}
+	return instance.Entry{}, false
+}
+
+// errCartridgeAlreadyBooted is the sentinel behind every "that cartridge is
+// already running" refusal, so callers can recognize one.
+var errCartridgeAlreadyBooted = errors.New("cartridge is already booted")
+
+// ensureCartridgeBootable refuses a boot of a cartridge that is already running,
+// with a message naming the instance to eject.
+//
+// Two checks, in order of friendliness. The registry knows the instance NAME,
+// which is what the user has to type next; the on-image claim knows about a
+// holder that has not published an entry yet (or one started by a build that
+// does not publish at all). Neither is the protection — cartridge.Open takes an
+// exclusive claim, and that is what actually makes the race safe — they exist
+// so the common case reads as a sentence instead of a lock error.
+func ensureCartridgeBootable(path, name string) error {
+	if e, ok := bootedCartridgeInstance(path); ok {
+		return fmt.Errorf("%w: %q is running as instance %q (pid %d); eject it with 'br eject %s'",
+			errCartridgeAlreadyBooted, name, e.Name, e.PID, e.Name)
+	}
+	if holder, busy := cartridge.Busy(path); busy {
+		return fmt.Errorf("%w: %q is held by %s; eject it first",
+			errCartridgeAlreadyBooted, name, holder)
+	}
+	return nil
+}
+
+// runBootCartridge boots a .sparseimage/.dmg cartridge. Opening it converts a
+// shipped .dmg to a writable working copy (the read-only ship form stays
+// pristine), attaches the image where the user can eject it, and verifies its
+// layout; the VM is then rooted inside the mount and the foreground runStart
+// owns it — detaching on exit.
 func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
-	name := cartridgeNameFromPath(path)
+	name := cartridge.NameFromPath(path)
 	if !disk.ValidName(name) {
 		return jsonOrError(fmt.Errorf("invalid cartridge name %q derived from %s", name, path))
 	}
 
-	baseDir := cartridgeMountpoint(name)
-	if control.NewClient(baseDir).IsRunning() {
-		return jsonOrError(fmt.Errorf("cartridge %q is already booted (use 'br eject' first)", name))
+	if err := ensureCartridgeBootable(path, name); err != nil {
+		return jsonOrError(err)
 	}
 
-	bootImg := path
-	var workingCopy string
-	if filepath.Ext(path) == cartridge.DMGExt {
-		// Materialize a writable working copy next to the DMG so the shipped,
-		// read-only artifact is never mutated. Clear any stale copy first (a prior
-		// boot that crashed before detach could have left one; hdiutil convert
-		// refuses to overwrite), so re-booting a .dmg always works.
-		work := trimCartridgeExt(path)
-		_ = os.Remove(work + cartridge.SparseExt)
-		converted, err := cartridge.ConvertToSparse(path, work)
-		if err != nil {
-			return jsonOrError(fmt.Errorf("convert cartridge dmg to working copy: %w", err))
-		}
-		bootImg = converted
-		workingCopy = converted
-	}
-
-	mount, err := cartridge.Attach(bootImg, baseDir)
+	// No mountpoint is passed: the default policy is browsable, so macOS picks
+	// the location (under /Volumes, visible and ejectable in Finder) and Open
+	// reports back where it landed. Predicting it here is exactly the mistake
+	// this file used to make.
+	opened, err := cartridge.Open(path, cartridge.OpenOptions{Name: name})
 	if err != nil {
-		if workingCopy != "" {
-			_ = os.Remove(workingCopy)
-		}
-		return jsonOrError(fmt.Errorf("attach cartridge: %w", err))
+		return jsonOrError(err)
 	}
 
-	manifestPath := filepath.Join(mount.Mountpoint, cartridgeManifestFile)
-	m, err := disk.Load(manifestPath)
-	if err != nil {
-		_ = cartridge.Detach(mount.Mountpoint)
-		if workingCopy != "" {
-			_ = os.Remove(workingCopy)
-		}
-		return jsonOrError(fmt.Errorf("load cartridge manifest %s: %w", manifestPath, err))
-	}
+	// Stash for the foreground runStart, which hands the open cartridge to the
+	// vmhost.Host: the Host roots cfg inside the mount as the last overlay of
+	// its config step, and detachBootCartridge is the safety net that releases
+	// the mount if the handoff never happens.
+	bootCartridge.opened = opened
+	bootCartridge.mountpoint = opened.Mountpoint()
 
-	// Stash for the foreground runStart: applyBootCartridge roots cfg inside the
-	// mount, detachBootCartridge releases it after the VMM stops.
-	bootCartridge.mountpoint = mount.Mountpoint
-	bootCartridge.manifest = m
-	bootCartridge.name = name
-	bootCartridge.workingCopy = workingCopy
-
-	guiMode := m.Boot.Mode == disk.BootModeGUI
+	guiMode := opened.GUI()
 	switch {
 	case bootFlags.gui:
 		guiMode = true
@@ -398,7 +370,8 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 
 	// Cartridges cold-boot by design (no host-bound RAM snapshot), so never set
 	// restoreFrom. The mount roots state inside the cartridge.
-	startFlags.stateDir = mount.Mountpoint
+	m := opened.Manifest
+	startFlags.stateDir = opened.Mountpoint()
 	startFlags.cpus = pickCPUs(bootFlags.cpus, m.VM.CPUs)
 	startFlags.memory = pickMemoryGiB(bootFlags.memory, m.VM.MemoryGiB)
 	startFlags.disk = pickDiskGiB(bootFlags.disk, m.VM.DiskSizeGiB)
@@ -409,7 +382,9 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	startFlags.noNested = false
 	startFlags.restoreFrom = ""
 
-	// bootManifest stays nil: applyBootCartridge sets the cfg paths directly.
+	// bootManifest stays nil: a cartridge boot carries its manifest inside
+	// cartridge.Opened, and the vmhost.Host applies it (paths included) when it
+	// overlays the cartridge onto the config.
 	bootManifest = nil
 
 	if !jsonOutput {
@@ -418,49 +393,31 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	return runStart(cmd, args)
 }
 
-// applyBootCartridge roots cfg inside the mounted cartridge: the bootable
-// root.img, EFI + cloud-init state under state/, and the RW share under share/.
-// No-op for a non-cartridge boot (bootCartridge.mountpoint == "").
-func applyBootCartridge(cfg *config.Config) {
-	mp := bootCartridge.mountpoint
-	if mp == "" {
-		return
-	}
-	m := bootCartridge.manifest
-
-	cfg.BaseImagePath = filepath.Join(mp, cartridgeRootImg)
-	cfg.BaseImageURL = ""
-	cfg.BaseImageSHA512 = ""
-	cfg.BaseImageExpectedSHA256 = ""
-	// The materialized root.img is already the resized disk; DiskPath IS root.img
-	// so the VM boots the cartridge's disk in place (no copy/resize on boot).
-	cfg.DiskPath = filepath.Join(mp, cartridgeRootImg)
-
-	state := filepath.Join(mp, cartridgeStateDir)
-	cfg.EFIVarsPath = filepath.Join(state, cartridgeEFIVarsFile)
-	cfg.CloudInitDir = filepath.Join(state, cartridgeCloudInitDir)
-
-	// The RW host<->guest share lives inside the cartridge.
-	cfg.ShareDir = filepath.Join(mp, cartridgeShareDir)
-	cfg.ShareTag = manifestShareTag(m)
-	cfg.ShareGuestPath = manifestShareGuestPath(m)
+// takeBootCartridge hands the open cartridge over to whoever will own it from
+// here on (the vmhost.Host that runs the VM), clearing the stash so the
+// deferred detachBootCartridge safety net in runStart becomes a no-op. Returns
+// nil for a non-cartridge boot.
+func takeBootCartridge() *cartridge.Opened {
+	opened := bootCartridge.opened
+	bootCartridge.opened = nil
+	bootCartridge.mountpoint = ""
+	return opened
 }
 
-// detachBootCartridge releases the cartridge image the foreground boot owned. It
-// runs as the LAST deferred cleanup in runStart — after runner.Stop() has torn
-// the VMM down and released root.img — so the detach is not blocked by the VMM.
-// No-op for a non-cartridge boot.
+// detachBootCartridge releases a cartridge image that was opened but never
+// handed to a vmhost.Host — a spec rejected before the handoff, say. On the
+// normal path takeBootCartridge has already cleared the stash and the Host owns
+// the detach, so this is a no-op. It is also a no-op for a non-cartridge boot.
 func detachBootCartridge() {
-	mp := bootCartridge.mountpoint
-	if mp == "" {
+	opened := bootCartridge.opened
+	if opened == nil {
 		return
 	}
-	if err := cartridge.Detach(mp); err != nil && !jsonOutput {
-		fmt.Printf("%s detach cartridge %s: %v\n", warning("⚠"), bootCartridge.name, err)
+	if err := opened.Close(); err != nil && !jsonOutput {
+		fmt.Printf("%s detach cartridge %s: %v\n", warning("⚠"), opened.Name, err)
 	}
-	if bootCartridge.workingCopy != "" {
-		_ = os.Remove(bootCartridge.workingCopy)
-	}
+	bootCartridge.opened = nil
+	bootCartridge.mountpoint = ""
 }
 
 // --- cartridge listing for `br disks` --------------------------------
@@ -472,30 +429,63 @@ type cartridgeStatus struct {
 	Booted     bool   `json:"booted"`
 }
 
-// listAttachedCartridges scans <DefaultStateDir>/mnt/* for attached cartridges
-// and reports each one's boot state (a live control socket => booted, else
-// ejected/idle). A missing mnt dir yields an empty list (no error).
+// listAttachedCartridges reports every cartridge currently attached to this
+// host along with its boot state (a live control socket => booted, else
+// ejected/idle). Nothing attached yields an empty list (no error).
+//
+// Two sources, unioned and deduplicated by mountpoint:
+//
+//  1. the instance registry, which is the only thing that knows about a booted
+//     cartridge now that one is mounted under /Volumes rather than at a path
+//     bladerunner picked;
+//  2. the legacy <state>/mnt scan, which still finds a privately mounted
+//     cartridge (a scripted boot, or one attached by an older build).
+//
+// The registry comes first so a booted cartridge is reported under the name the
+// user typed.
 func listAttachedCartridges() []cartridgeStatus {
-	mntRoot := filepath.Join(config.DefaultStateDir(), "mnt")
-	entries, err := os.ReadDir(mntRoot)
-	if err != nil {
-		return nil
-	}
+	root := config.DefaultStateDir()
 	var out []cartridgeStatus
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	seen := make(map[string]bool)
+
+	add := func(name, mountpoint string) {
+		if name == "" || mountpoint == "" {
+			return
 		}
-		mp := filepath.Join(mntRoot, e.Name())
-		if !cartridge.IsAttached(mp) {
-			continue
+		key := filepath.Clean(mountpoint)
+		if seen[key] {
+			return
 		}
+		seen[key] = true
 		out = append(out, cartridgeStatus{
-			Name:       e.Name(),
-			Mountpoint: mp,
-			Booted:     control.NewClient(mp).IsRunning(),
+			Name:       name,
+			Mountpoint: mountpoint,
+			Booted:     control.NewClient(mountpoint).IsRunning(),
 		})
 	}
+
+	entries, err := instance.List(root)
+	if err != nil {
+		logging.L().Debug("list instance registry for disks", "err", err)
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.Kind != instance.KindCartridge || !instance.Alive(*e) {
+			continue
+		}
+		mountpoint := e.Mountpoint
+		if mountpoint == "" {
+			// A cartridge instance is rooted AT its mountpoint.
+			mountpoint = e.StateDir
+		}
+		add(e.Name, mountpoint)
+	}
+	for _, a := range cartridge.ListAttached(root) {
+		add(a.Name, a.Mountpoint)
+	}
+
+	// Stay nil when there is nothing, so `br disks --json` keeps reporting null
+	// rather than [].
 	return out
 }
 

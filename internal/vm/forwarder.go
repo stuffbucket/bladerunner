@@ -41,12 +41,32 @@ func newPortForwarder(name, listenAddr string, guestPort uint32, dialer func(uin
 	}
 }
 
-func (f *portForwarder) Start() error {
-	ln, err := net.Listen("tcp", f.listenAddr)
-	if err != nil {
-		return err
+// newPortForwarderWithListener builds a forwarder around a listener that is
+// ALREADY BOUND (see internal/portalloc). Start then skips the bind entirely.
+//
+// This is what closes the reserve/close/re-bind race: resolving a free port and
+// re-binding it later leaves a window in which another process — most likely a
+// second bladerunner instance starting at the same moment — takes it. The
+// forwarder owns the listener from here on and closes it in Close.
+func newPortForwarderWithListener(name string, ln net.Listener, guestPort uint32, dialer func(uint32) (net.Conn, error)) *portForwarder {
+	return &portForwarder{
+		name:       name,
+		listenAddr: ln.Addr().String(),
+		guestPort:  guestPort,
+		ln:         ln,
+		dialer:     dialer,
+		stop:       make(chan struct{}),
 	}
-	f.ln = ln
+}
+
+func (f *portForwarder) Start() error {
+	if f.ln == nil {
+		ln, err := net.Listen("tcp", f.listenAddr)
+		if err != nil {
+			return err
+		}
+		f.ln = ln
+	}
 	logging.L().Info("started port forwarder", "name", f.name, "listen", f.listenAddr, "guest_vsock_port", f.guestPort)
 
 	f.wg.Go(func() {

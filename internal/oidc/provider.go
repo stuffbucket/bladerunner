@@ -40,6 +40,11 @@ const (
 	idleTimeout = 60 * time.Second
 	// maxTokenRequestBytes bounds the body size for /token POSTs.
 	maxTokenRequestBytes = 16 * 1024
+
+	// defaultListenAddr is where the provider binds when the caller supplies
+	// neither a ListenAddr nor a pre-bound Listener. It matches
+	// config.DefaultLocalOIDCPort for the default instance.
+	defaultListenAddr = "127.0.0.1:15556"
 )
 
 // Provider is a minimal OIDC server. It exposes discovery, JWKS, and a token
@@ -78,6 +83,13 @@ type Config struct {
 	Store *Store
 	// TokenTTL is the lifetime of issued tokens. Zero means DefaultTokenTTL.
 	TokenTTL time.Duration
+	// Listener, when non-nil, is an ALREADY BOUND loopback listener the
+	// provider serves on instead of binding ListenAddr itself (see
+	// internal/portalloc). Handing over a bound listener removes the window
+	// between resolving a free port and binding it, in which another process
+	// can take the port. The provider takes ownership: Stop closes it. When set,
+	// it also defines the effective address, so ListenAddr is ignored.
+	Listener net.Listener
 }
 
 // NewProvider constructs a Provider but does not start the HTTP server.
@@ -95,8 +107,12 @@ func NewProvider(cfg Config) (*Provider, error) {
 	if cfg.Audience == "" {
 		cfg.Audience = oidcClientID
 	}
+	if cfg.Listener != nil {
+		// The bound listener is the authority on where we are reachable.
+		cfg.ListenAddr = cfg.Listener.Addr().String()
+	}
 	if cfg.ListenAddr == "" {
-		cfg.ListenAddr = "127.0.0.1:15556"
+		cfg.ListenAddr = defaultListenAddr
 	}
 
 	issuer, err := NewIssuer(cfg.SigningKey, cfg.IssuerURL, cfg.Audience, cfg.TokenTTL)
@@ -105,11 +121,12 @@ func NewProvider(cfg Config) (*Provider, error) {
 	}
 
 	return &Provider{
-		issuer:  issuer,
-		store:   cfg.Store,
-		sso:     newSSOState(),
-		addr:    cfg.ListenAddr,
-		baseURL: cfg.IssuerURL,
+		issuer:   issuer,
+		store:    cfg.Store,
+		sso:      newSSOState(),
+		listener: cfg.Listener,
+		addr:     cfg.ListenAddr,
+		baseURL:  cfg.IssuerURL,
 	}, nil
 }
 
@@ -153,12 +170,18 @@ func (p *Provider) Start(ctx context.Context) error {
 		return errors.New("oidc: already started")
 	}
 
-	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(ctx, "tcp", p.addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", p.addr, err)
+	// A listener handed in via Config.Listener is already bound; only bind here
+	// when the caller left that to us.
+	ln := p.listener
+	if ln == nil {
+		lc := &net.ListenConfig{}
+		bound, err := lc.Listen(ctx, "tcp", p.addr)
+		if err != nil {
+			return fmt.Errorf("listen %s: %w", p.addr, err)
+		}
+		ln = bound
+		p.listener = bound
 	}
-	p.listener = ln
 	p.server = &http.Server{
 		Handler:      p.Handler(),
 		ReadTimeout:  readTimeout,

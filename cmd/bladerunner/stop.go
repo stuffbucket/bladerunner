@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 )
 
@@ -18,16 +17,28 @@ var stopFlags struct {
 }
 
 // Force-stop timing. A panicked guest ignores ACPI shutdown, so the normal
-// graceful path hangs; --force bounds that by escalating to SIGTERM then
-// SIGKILL on the host process.
+// graceful path hangs; --force bounds that by asking for an immediate forced
+// stop and, if even that stalls, escalating to SIGTERM then SIGKILL on the host
+// process.
 const (
-	// forceGracePeriod is how long --force waits for graceful shutdown before
-	// escalating.
+	// forceGracePeriod is how long --force waits for the forced shutdown to
+	// complete before escalating to signals.
 	forceGracePeriod = 5 * time.Second
 	// sigtermGrace / sigkillGrace bound how long we wait for the process to
 	// exit after each signal.
 	sigtermGrace = 3 * time.Second
 	sigkillGrace = 2 * time.Second
+	// stopTeardownMargin is added to the guest drain budget when waiting for the
+	// control socket to disappear: after the guest powers off the host still has
+	// to flush the disk image, close the forwarders and exit.
+	stopTeardownMargin = 15 * time.Second
+	// maxDrainRequest caps the drain budget we ask the server for, staying under
+	// the control client's per-command read timeout (10 minutes) so a very large
+	// --timeout cannot turn into a client-side transport error.
+	maxDrainRequest = 9 * time.Minute
+	// stopPollInterval is how often the shutdown wait re-checks the control
+	// socket.
+	stopPollInterval = 500 * time.Millisecond
 )
 
 var stopCmd = &cobra.Command{
@@ -35,20 +46,28 @@ var stopCmd = &cobra.Command{
 	Short: "Stop the running VM",
 	Long: `Stop the running Bladerunner VM.
 
-By default sends a graceful shutdown signal and waits. If the guest is
-unresponsive (e.g. a kernel panic), graceful shutdown never completes; use
---force to escalate to terminating the host process after a short grace
-period.`,
+By default the guest is asked to power itself off (ACPI) and the host waits for
+it to actually reach the stopped state, so the disk image is left consistent.
+--timeout bounds that guest drain: when it expires the VM is force-stopped (a
+power cut) and that is reported. If the guest is unresponsive (e.g. a kernel
+panic), use --force to skip straight to the forced stop, escalating to
+terminating the host process if even that stalls.`,
 	RunE: runStop,
 }
 
 func init() {
-	stopCmd.Flags().IntVarP(&stopFlags.timeout, "timeout", "t", config.DefaultStopTimeout, "Seconds to wait for graceful shutdown")
-	stopCmd.Flags().BoolVarP(&stopFlags.force, "force", "f", false, "Force-stop: terminate the host process if graceful shutdown stalls (e.g. panicked guest)")
+	// The drain budget has to cover a real guest shutdown (stopping Incus,
+	// unmounting and flushing filesystems), so default to the same 60s the
+	// control plane uses for eject rather than a shorter ceiling.
+	stopCmd.Flags().IntVarP(&stopFlags.timeout, "timeout", "t", control.DefaultEjectTimeoutSeconds, "Seconds to let the guest power itself off before forcing the stop")
+	stopCmd.Flags().BoolVarP(&stopFlags.force, "force", "f", false, "Force-stop: cut power to the guest immediately, terminating the host process if that stalls (e.g. panicked guest)")
 }
 
 func runStop(_ *cobra.Command, _ []string) error {
-	stateDir := config.DefaultStateDir()
+	stateDir, err := targetStateDir()
+	if err != nil {
+		return err
+	}
 
 	client := control.NewClient(stateDir)
 
@@ -64,35 +83,35 @@ func runStop(_ *cobra.Command, _ []string) error {
 	// --force needs it even if the server later wedges.
 	hostPID := readHostPID(client)
 
+	drain := drainBudget(stopFlags.timeout)
 	if !jsonOutput {
-		fmt.Println("Stopping VM (sending graceful shutdown signal)...")
-	}
-	if err := client.StopVM(); err != nil {
-		// Under --force a wedged server is exactly the case we handle below;
-		// don't abort, fall through to the PID escalation.
-		if !stopFlags.force {
-			if jsonOutput {
-				emitJSONError(err)
-			}
-			return err
-		}
-		if !jsonOutput {
-			fmt.Printf("Graceful stop request failed (%v); will force-terminate.\n", err)
+		if stopFlags.force {
+			fmt.Println("Stopping VM (forced: cutting power to the guest)...")
+		} else {
+			fmt.Printf("Stopping VM (asking the guest to power off, up to %s)...\n", drain.Round(time.Second))
 		}
 	}
+	// The server answers a shutdown request only once the guest has drained, so
+	// issue it in the background: the control socket disappearing is the real
+	// completion signal, and this keeps a wedged server from outlasting our own
+	// budget (its per-command read timeout is measured in minutes).
+	reqErr := make(chan error, 1)
+	go func() { reqErr <- requestStop(client, drain, stopFlags.force) }()
 
 	socketPath := control.SocketPath(stateDir)
 
-	// Graceful wait. With --force this is just the short grace period before
-	// escalating; otherwise it is the full user-specified timeout.
-	graceful := time.Duration(stopFlags.timeout) * time.Second
-	if stopFlags.force && graceful > forceGracePeriod {
-		graceful = forceGracePeriod
+	// The server drains the guest and only then tears the VMM down, so allow the
+	// drain budget plus the teardown margin. With --force this is just the short
+	// grace period before escalating to signals.
+	wait := drain + stopTeardownMargin
+	if stopFlags.force {
+		wait = forceGracePeriod
 	}
 	if !jsonOutput {
-		fmt.Printf("Waiting up to %s for shutdown...\n", graceful.Round(time.Second))
+		fmt.Printf("Waiting up to %s for shutdown...\n", wait.Round(time.Second))
 	}
-	if waitForSocketGone(socketPath, graceful) {
+	stopped, err := waitForStop(socketPath, wait, reqErr)
+	if stopped {
 		if jsonOutput {
 			return emitJSON(stopResult{Status: control.StatusStopped})
 		}
@@ -100,15 +119,80 @@ func runStop(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	if err == nil {
+		err = fmt.Errorf("timeout waiting for VM to stop (use 'br stop --force' to terminate a hung/panicked VM)")
+	}
 	if !stopFlags.force {
-		err := fmt.Errorf("timeout waiting for VM to stop (use 'br stop --force' to terminate a hung/panicked VM)")
 		if jsonOutput {
 			emitJSONError(err)
 		}
 		return err
 	}
+	if !jsonOutput {
+		fmt.Printf("Stop did not complete (%v); force-terminating.\n", err)
+	}
 
 	return forceTerminate(socketPath, hostPID)
+}
+
+// drainBudget converts a --timeout value in seconds into the budget the guest
+// gets to power itself off, clamped to something the control client can
+// actually wait for.
+func drainBudget(timeoutSeconds int) time.Duration {
+	budget := time.Duration(timeoutSeconds) * time.Second
+	if budget <= 0 {
+		budget = control.DefaultEjectTimeoutSeconds * time.Second
+	}
+	if budget > maxDrainRequest {
+		budget = maxDrainRequest
+	}
+	return budget
+}
+
+// waitForStop waits for the shutdown to complete: the control socket
+// disappearing means the server drained the guest and exited (stopped=true). If
+// the stop request itself comes back with an error first, nothing more is going
+// to happen, so report it instead of burning the whole budget.
+func waitForStop(socketPath string, within time.Duration, reqErr <-chan error) (bool, error) {
+	deadline := time.Now().Add(within)
+	for {
+		if socketGone(socketPath) {
+			return true, nil
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		select {
+		case err := <-reqErr:
+			reqErr = nil // drained: keep waiting on the socket, not this channel
+			if err != nil {
+				return socketGone(socketPath), err
+			}
+		case <-time.After(stopPollInterval):
+		}
+	}
+}
+
+// socketGone reports whether the control socket has been removed.
+func socketGone(socketPath string) bool {
+	_, err := os.Stat(socketPath)
+	return os.IsNotExist(err)
+}
+
+// requestStop asks the server to shut the guest down, carrying our drain budget
+// so --timeout bounds the guest's power-off rather than only our own wait. The
+// budget rides on the eject-shaped control command, the only shutdown command in
+// the protocol that takes a timeout; a server that does not understand it falls
+// back to the plain stop command, which drains with the server-side default.
+func requestStop(client *control.Client, drain time.Duration, force bool) error {
+	err := client.Eject(force, int(drain/time.Second))
+	if err == nil {
+		return nil
+	}
+	if fallbackErr := client.StopVM(); fallbackErr != nil {
+		return fmt.Errorf("stop request failed: %w (fallback stop: %w)", err, fallbackErr)
+	}
+	return nil
 }
 
 // stopResult is the JSON payload emitted by `br stop --json` on success.
@@ -136,13 +220,12 @@ func readHostPID(client *control.Client) int {
 func waitForSocketGone(socketPath string, within time.Duration) bool {
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		if socketGone(socketPath) {
 			return true
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(stopPollInterval)
 	}
-	_, err := os.Stat(socketPath)
-	return os.IsNotExist(err)
+	return socketGone(socketPath)
 }
 
 // forceTerminate escalates SIGTERM then SIGKILL on the host PID, then cleans up
