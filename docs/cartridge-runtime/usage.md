@@ -39,6 +39,16 @@ br disk pack incus --ship     # also -> ./incus.dmg (compressed, read-only, AirD
 Packing downloads and materializes the base image, so the first pack of a given
 disk is slow and every later one is fast.
 
+**A cartridge is named after its own file, not after the disk it came from.**
+`br disk pack incus --out blue.sparseimage` produces a volume named
+`bladerunner-blue`, stamps `blue` into the cartridge, and `br boot
+blue.sparseimage` runs it as instance `blue`. That is what lets several
+cartridges packed from one base disk mount and run side by side (§4) instead of
+all claiming `/Volumes/bladerunner-incus`. With `--out` omitted the output is
+`./<disk>.sparseimage`, so the two names coincide. The name must be lowercase
+letters, digits and dashes — an `--out` whose base name is not is refused before
+anything is written.
+
 ## 2. Ship it
 
 AirDrop, `scp`, a USB stick — it is one file. Ship the `.dmg` (`--ship`): it is

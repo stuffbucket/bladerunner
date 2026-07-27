@@ -319,8 +319,11 @@ deleted: the reasoning is why the mitigation exists.
   `O_EXCL` lock file before the dial-then-bind (removing the TOCTOU hole between
   two racing starts on one state dir); `br disk pack` and `br boot` no longer
   share a mountpoint (§6); and the mount watcher skips a volume an instance
-  already holds. Two *different* processes attaching the same image file
-  remains possible.
+  already holds. A fourth, later: `br disk pack` names the APFS volume after the
+  cartridge's own file rather than after the source disk, so two cartridges
+  packed from one base disk no longer claim one `/Volumes` path — which had made
+  this reachable in ordinary use, not just through a user-initiated mount. Two
+  *different* processes attaching the same image file remains possible.
 - **GUI mode constrains holder threading** — the design depends on
   `DASessionSetDispatchQueue`, not `DASessionScheduleWithRunLoop`.
   *Retired.* `internal/diskarb` uses a serial dispatch queue and never touches a
