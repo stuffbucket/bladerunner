@@ -132,6 +132,26 @@ func TestSettingsSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+// settings.json holds only user preferences, but it is written by the atomic
+// writer in internal/util, which publishes the mode it is HANDED — os.CreateTemp
+// makes the staging file 0600 and the writer widens it to the caller's mode
+// before the rename. An existing installation must keep the 0600 file it has,
+// so the mode is pinned here rather than left to whatever the writer defaults
+// to.
+func TestSettingsSaveKeepsOwnerOnlyMode(t *testing.T) {
+	dir := t.TempDir()
+	if err := DefaultSettings().Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(SettingsPath(dir))
+	if err != nil {
+		t.Fatalf("stat settings: %v", err)
+	}
+	if got := info.Mode().Perm(); got != settingsFilePerm {
+		t.Errorf("settings.json mode = %v, want %v", got, settingsFilePerm)
+	}
+}
+
 func TestLoadSettingsInvalidErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, settingsFileName)

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 const (
@@ -271,7 +272,7 @@ func generateCert() (certPEM, keyPEM []byte, err error) {
 }
 
 // writeCertFiles persists the cert (0644) and key (0600) atomically via
-// temp-file + rename, creating the parent directory (0755) if needed.
+// util.WriteFileAtomic, creating the parent directory (0755) if needed.
 func writeCertFiles(certPath, keyPath string, certPEM, keyPEM []byte) error {
 	if err := os.MkdirAll(filepath.Dir(certPath), dirPerm); err != nil {
 		return fmt.Errorf("webproxy: mkdir cert dir: %w", err)
@@ -279,36 +280,11 @@ func writeCertFiles(certPath, keyPath string, certPEM, keyPEM []byte) error {
 	if err := os.MkdirAll(filepath.Dir(keyPath), dirPerm); err != nil {
 		return fmt.Errorf("webproxy: mkdir key dir: %w", err)
 	}
-	if err := writeFileAtomic(certPath, certPEM, certFilePerm); err != nil {
+	if err := util.WriteFileAtomic(certPath, certPEM, certFilePerm); err != nil {
 		return fmt.Errorf("webproxy: write cert: %w", err)
 	}
-	if err := writeFileAtomic(keyPath, keyPEM, keyFilePerm); err != nil {
+	if err := util.WriteFileAtomic(keyPath, keyPEM, keyFilePerm); err != nil {
 		return fmt.Errorf("webproxy: write key: %w", err)
 	}
 	return nil
-}
-
-// writeFileAtomic writes data to a temp file in the destination's directory and
-// renames it into place so readers never observe a partial file.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once renamed
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

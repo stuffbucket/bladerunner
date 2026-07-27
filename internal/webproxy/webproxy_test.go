@@ -89,6 +89,44 @@ func TestReusesExistingCert(t *testing.T) {
 	}
 }
 
+// The private key must stay owner-only and the certificate world-readable. The
+// atomic writer in internal/util publishes the mode it is HANDED — os.CreateTemp
+// stages every file at 0600 — so a wrong argument at the call site silently
+// leaks the key or hides the cert. Both modes are pinned here, and no temp
+// residue may survive the write.
+func TestWritesKeyOwnerOnlyAndCertReadable(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "proxy.crt")
+	keyPath := filepath.Join(dir, "proxy.key")
+
+	if _, err := New(Options{
+		ListenAddr:   "127.0.0.1:0",
+		UpstreamAddr: "127.0.0.1:18443",
+		CertPath:     certPath,
+		KeyPath:      keyPath,
+	}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for path, want := range map[string]os.FileMode{certPath: certFilePerm, keyPath: keyFilePerm} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %v, want %v", filepath.Base(path), got, want)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("state dir holds %d files, want exactly the cert and the key", len(entries))
+	}
+}
+
 func TestProxiesPreservingHostAndNoClientCert(t *testing.T) {
 	var gotHost string
 	var gotPeerCerts int
