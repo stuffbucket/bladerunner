@@ -27,6 +27,7 @@ Run these commands from the repository root.
 | `make sign` | Sign the binary. Do this before you start a VM |
 | `make check` | Run format, vet, lint and test. Run this before each commit |
 | `make test` | Run all tests |
+| `make test-linux` | Run all tests on Linux in a container. Docker must be in operation |
 | `make lint` | Run golangci-lint |
 | `make security` | Run govulncheck and trivy |
 | `make smoke-cartridge` | Test a cartridge on real hardware |
@@ -42,6 +43,8 @@ Rules:
    Virtualization.framework.
 4. Run `make clonedetect` before you add a helper. Read section 3 first. The
    report shows the owner package for a rule that is already in the tree.
+5. Run `make test-linux` before you push. CI runs the tests on Linux. A test
+   that passes on macOS can fail there.
 
 ---
 
