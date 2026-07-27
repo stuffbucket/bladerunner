@@ -31,6 +31,7 @@ Run these commands from the repository root.
 | `make security` | Run govulncheck and trivy |
 | `make smoke-cartridge` | Test a cartridge on real hardware |
 | `make smoke-holder` | Test that a holder stays alive after its parent stops |
+| `make clonedetect` | Find duplicated concepts across packages |
 | `./scripts/mutation-test.sh` | Run gremlins mutation tests |
 
 Rules:
@@ -39,6 +40,8 @@ Rules:
 2. To run one test, use `go test ./internal/vm/ -run TestName -v`.
 3. Sign the binary before you start a VM. An unsigned binary cannot use
    Virtualization.framework.
+4. Run `make clonedetect` before you add a helper. Read section 3 first. The
+   report shows the owner package for a rule that is already in the tree.
 
 ---
 

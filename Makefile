@@ -21,7 +21,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help setup cache deps tidy fmt fmt-check vet test build build-release run sign check clean distclean lint vulncheck trivy security release snapshot smoke-cartridge smoke-holder
+.PHONY: help setup cache deps tidy fmt fmt-check vet test build build-release run sign check clean distclean lint vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -92,6 +92,15 @@ smoke-cartridge: ## Live end-to-end cartridge smoke (pack -> boot -> RW share ->
 
 smoke-holder: ## Live end-to-end holder smoke (spawn -> kill the spawner -> VM survives -> drain); needs codesign+network, ~5-15min
 	@./scripts/smoke-holder.sh
+
+# clonedetect lives in its own module under tools/, so the parent module's
+# "./..." never loads it and `make check` is unaffected. Run it with -C rather
+# than a package path for the same reason.
+clonedetect: cache ## Rank duplicated concepts across packages (pass ARGS='-json')
+	@$(GO_ENV) $(GO) -C tools/clonedetect run . -root ../.. $(ARGS)
+
+clonedetect-test: cache ## Run the clonedetect tool's own tests
+	@$(GO_ENV) $(GO) -C tools/clonedetect test ./...
 
 check: fmt-check vet lint test ## Run fast checks (format, vet, lint, test)
 
