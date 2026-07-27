@@ -136,9 +136,15 @@ lint: ## Run golangci-lint
 vulncheck: ## Run govulncheck with suppression list
 	@./scripts/govulncheck.sh
 
-trivy: ## Run Trivy filesystem vulnerability scan
+# trivy must gate on exactly what CI gates on, or `make security` goes red while
+# the PR goes green and people learn to ignore it. CI excludes the same lockfile
+# (.github/workflows/ci.yml, "Run Trivy vulnerability scanner"): ./site is a
+# separate static sub-project whose npm deps are build-time tooling only, nothing
+# ships at runtime, and pages.yml validates them on its own. The Go modules — the
+# code that actually ships — are still scanned here.
+trivy: ## Run Trivy filesystem vulnerability scan (same gate as CI)
 	@command -v trivy >/dev/null 2>&1 || { echo "Install: brew install trivy"; exit 1; }
-	@trivy fs --severity HIGH,CRITICAL --exit-code 1 --skip-dirs .cache,.git .
+	@trivy fs --severity HIGH,CRITICAL --exit-code 1 --skip-dirs .cache,.git --skip-files site/package-lock.json .
 
 security: vulncheck trivy ## Run all security scans (govulncheck + Trivy)
 
