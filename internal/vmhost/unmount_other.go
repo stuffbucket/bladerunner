@@ -25,6 +25,3 @@ func (h *Host) startUnmountWatch() error {
 	logging.L().Debug("unmount protection is macOS-only; continuing without it")
 	return nil
 }
-
-// stopUnmountWatch is a no-op off darwin; nothing was ever registered.
-func (h *Host) stopUnmountWatch() error { return nil }

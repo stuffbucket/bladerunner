@@ -553,7 +553,26 @@ func (h *Host) setUnmountProtection(why UnprotectedReason) {
 // The session type the veto registers on, the constructor that opens it and the
 // bail-out helper that records a lost veto all live in unmount_darwin.go: they
 // are DiskArbitration's, and DiskArbitration is macOS-only. What stays here is
-// what both platforms share — the recorded reason, the filter, and the decision.
+// what both platforms share — the recorded reason, the filter, the decision, and
+// the release below.
+
+// stopUnmountWatch releases the unmount-approval registration, exactly once
+// however many times it is called: teardown runs it, and a failed start may have
+// run it already.
+//
+// It is platform-independent on purpose. Only h.unmountCancel is touched, and
+// the DiskArbitration work is inside that closure, captured when the watch was
+// registered. Off darwin the field is never set, so this is a no-op — but the
+// invariant "stopUnmountWatch releases the cancel exactly once" then holds on
+// every platform, rather than being a darwin-only promise.
+func (h *Host) stopUnmountWatch() error {
+	if h.unmountCancel == nil {
+		return nil
+	}
+	cancel := h.unmountCancel
+	h.unmountCancel = nil
+	return cancel()
+}
 
 // unmountFilter is the BSD name the unmount-approval watcher registers for, or
 // "" when there is nothing to protect: no cartridge, or a recorded device node

@@ -112,17 +112,3 @@ func (h *Host) unprotect(why UnprotectedReason, args ...any) error {
 	logging.L().Warn(string(why)+"; unmount protection is off", args...)
 	return nil
 }
-
-// stopUnmountWatch unregisters the approval callback and closes the session.
-//
-// Teardown order puts this immediately before the cartridge is detached, which
-// is what it has to be: our own hdiutil detach is an unmount like any other and
-// would otherwise be handed to our own callback.
-func (h *Host) stopUnmountWatch() error {
-	if h.unmountCancel == nil {
-		return nil
-	}
-	cancel := h.unmountCancel
-	h.unmountCancel = nil
-	return cancel()
-}
