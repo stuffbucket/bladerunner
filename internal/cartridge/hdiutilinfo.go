@@ -128,6 +128,52 @@ func backingImageFor(ctx context.Context, r commandRunner, ref string) (*ImageBa
 	return backing, nil
 }
 
+// attachedImageAt is the REVERSE lookup of backingImageFor: it resolves an
+// image FILE path to the attachment macOS is currently serving from it, or
+// wraps ErrNoBackingImage when that file is not attached at all.
+//
+// It exists because the mountpoint of a volume attached by a process that is no
+// longer around cannot be derived: under the browsable policy macOS chooses it
+// (and suffixes it on a name collision), and the Mount value that recorded it
+// died with the process. The image path is the only handle that survives, and
+// `hdiutil info -plist` is the one place macOS publishes the
+// image-path <-> device-node correspondence.
+func attachedImageAt(ctx context.Context, r commandRunner, imagePath string) (*ImageBacking, error) {
+	if imagePath == "" {
+		return nil, ErrNoImageRef
+	}
+	images, err := listAttachedImages(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	want := resolvePath(imagePath)
+	for _, img := range images {
+		// hdiutil reports the path it was handed, which may be spelled
+		// differently (/tmp vs /private/tmp) than the one we hold.
+		if img.path != imagePath && resolvePath(img.path) != want {
+			continue
+		}
+		return img.backing(img.principalEntity()), nil
+	}
+	return nil, fmt.Errorf("%s: %w", imagePath, ErrNoBackingImage)
+}
+
+// principalEntity is the entity that best represents an image in a lookup that
+// matched the IMAGE rather than one of its devices: the first mounted one when
+// there is one (that is what a user has to eject), else the first device the
+// image produced (an image attached -nomount still has to be detached).
+func (img attachedImage) principalEntity() systemEntity {
+	for _, e := range img.entities {
+		if e.MountPoint != "" {
+			return e
+		}
+	}
+	if len(img.entities) > 0 {
+		return img.entities[0]
+	}
+	return systemEntity{}
+}
+
 // listAttachedImages runs `hdiutil info -plist` and decodes its images array.
 func listAttachedImages(ctx context.Context, r commandRunner) ([]attachedImage, error) {
 	out, errOut, err := r.run(ctx, hdiutil, infoArgs()...)

@@ -39,6 +39,14 @@ func attachResult(mountpoint string) fakeResult {
 	return fakeResult{stdout: attachPlistFor(resolvePath(mountpoint), openTestDevNode)}
 }
 
+// attachedImageResult scripts an `hdiutil info -plist` reporting imagePath as
+// attached and mounted at mountpoint — the shape a cartridge left behind by a
+// dead holder produces. The plist itself is built by detect_test.go's
+// infoPlistFor, which drives the real parser.
+func attachedImageResult(imagePath, devNode, mountpoint string) fakeResult {
+	return fakeResult{stdout: infoPlistFor(mountpoint, devNode, imagePath, true)}
+}
+
 // privateOpen is the option set every legacy test uses: the pre-inversion
 // behavior, where the caller dictates the mountpoint.
 func privateOpen(mountpoint string) OpenOptions {
@@ -255,6 +263,7 @@ func TestOpenRemovesTheWorkingCopyWhenAttachFails(t *testing.T) {
 	work := filepath.Join(tmp, "demo"+SparseExt)
 	writeFixtureFile(t, work, "converted-bytes")
 	f := &fakeRunner{results: []fakeResult{
+		{stdout: emptyInfoPlist}, // nothing attached: the stale copy is clearable
 		{},
 		{stderr: "hdiutil: attach failed", err: errors.New("exit 1")},
 	}}
@@ -307,6 +316,80 @@ func TestOpenRefusesACartridgeAnotherProcessBooted(t *testing.T) {
 	data, err := os.ReadFile(work)
 	if err != nil || string(data) != "live-guest-bytes" {
 		t.Fatalf("the running VM's disk was destroyed: %q, %v", data, err)
+	}
+}
+
+// TestOpenRefusesAWorkingCopyLeftAttachedByADeadHolder is the other half of the
+// data-loss regression above, and the half the flock claim CANNOT cover.
+//
+// flock is a kernel lock: when a holder is SIGKILLed (or force-terminated by
+// `br stop --force`, which only removes the control socket) the kernel drops the
+// claim, but nothing detaches the cartridge volume or removes the working copy.
+// The next boot therefore acquires the now-free claim and used to unconditionally
+// unlink the working copy — the backing store of a volume the kernel is still
+// serving — which is the same destruction the claim was added to prevent.
+func TestOpenRefusesAWorkingCopyLeftAttachedByADeadHolder(t *testing.T) {
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
+	openFixture(t, mp)
+	dmg := filepath.Join(tmp, "demo"+DMGExt)
+	work := filepath.Join(tmp, "demo"+SparseExt)
+	writeFixtureFile(t, work, "live-guest-bytes")
+
+	// The dead holder's volume: still attached, claimed by nobody.
+	const orphanMount = "/Volumes/bladerunner-demo"
+	f := &fakeRunner{results: []fakeResult{attachedImageResult(work, openTestDevNode, orphanMount)}}
+
+	_, err := open(context.Background(), f, dmg, privateOpen(mp))
+	if !errors.Is(err, ErrWorkingCopyAttached) {
+		t.Fatalf("open = %v, want ErrWorkingCopyAttached", err)
+	}
+	// A refusal the user cannot act on is its own bug: name the volume and the
+	// way to release it.
+	for _, want := range []string{orphanMount, openTestDevNode, "hdiutil detach"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	data, readErr := os.ReadFile(work)
+	if readErr != nil || string(data) != "live-guest-bytes" {
+		t.Fatalf("the orphaned VM's disk was destroyed: %q, %v", data, readErr)
+	}
+	// Only the attachment probe ran: no convert, no attach.
+	if len(f.calls) != 1 || f.calls[0][1] != cmdInfo {
+		t.Fatalf("hdiutil calls = %v, want a single info probe", f.calls)
+	}
+	// And the refusal released the claim, so fixing the mount and retrying works.
+	if holder, busy := Busy(dmg); busy {
+		t.Fatalf("a refused open left the cartridge claimed by %s", holder)
+	}
+}
+
+// The guard must not break the case it guards: a working copy left behind by a
+// boot that crashed AFTER its volume was detached is stale, not live, and
+// re-booting the .dmg still has to clear it (hdiutil convert refuses to
+// overwrite).
+func TestOpenClearsADetachedStaleWorkingCopy(t *testing.T) {
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
+	openFixture(t, mp)
+	dmg := filepath.Join(tmp, "demo"+DMGExt)
+	work := filepath.Join(tmp, "demo"+SparseExt)
+	writeFixtureFile(t, work, "stale-bytes")
+
+	f := &fakeRunner{results: []fakeResult{
+		attachedImageResult("/private/tmp/someone-elses.dmg", "/dev/disk4s1", "/Volumes/other"),
+		{}, // convert
+		attachResult(mp),
+	}}
+
+	o, err := open(context.Background(), f, dmg, privateOpen(mp))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { o.releaseClaim() })
+	if len(f.calls) != 3 || f.calls[0][1] != cmdInfo || f.calls[1][1] != cmdConvert {
+		t.Fatalf("hdiutil calls = %v, want info then convert then attach", f.calls)
 	}
 }
 

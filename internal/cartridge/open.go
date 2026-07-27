@@ -157,8 +157,10 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 // .dmg is converted to a writable working copy (recorded for Close); anything
 // else is attached as-is.
 //
-// It is only ever reached with the working copy claimed (see Opened.claim), so
-// the removal below can never unlink an image another process is booted from.
+// It is only ever reached with the working copy claimed (see Opened.claim), and
+// it additionally refuses to clear a working copy that is still attached (see
+// clearStaleWorkingCopy), so the removal below can never unlink an image
+// anything is still running from.
 func (o *Opened) materialize(parent context.Context, r commandRunner, path string) (string, error) {
 	// Extension matching is case-sensitive on purpose: it mirrors HasImageExt,
 	// which is what decided this path was a cartridge in the first place.
@@ -169,7 +171,9 @@ func (o *Opened) materialize(parent context.Context, r commandRunner, path strin
 	// detach could have left one, and hdiutil convert refuses to overwrite, so
 	// re-booting the same .dmg must not depend on a clean exit last time.
 	work := TrimExt(path)
-	_ = os.Remove(work + SparseExt)
+	if err := clearStaleWorkingCopy(parent, r, work+SparseExt); err != nil {
+		return "", err
+	}
 
 	ctx, cancel := context.WithTimeout(parent, convertTimeout)
 	defer cancel()
@@ -179,6 +183,66 @@ func (o *Opened) materialize(parent context.Context, r commandRunner, path strin
 	}
 	o.WorkingCopy = converted
 	return converted, nil
+}
+
+// ErrWorkingCopyAttached reports that the working copy a boot would convert
+// over is STILL ATTACHED: a volume the kernel serves from that file is mounted,
+// even though no live process claims it. Booting anyway would unlink the
+// backing store of a live mount, so it is refused.
+var ErrWorkingCopyAttached = errors.New("cartridge working copy is still attached")
+
+// clearStaleWorkingCopy removes the working copy left behind by an earlier
+// boot, but only once nothing is reading from it any more.
+//
+// The flock claim is already held here, so no LIVE holder owns this image. That
+// is not enough. flock is a KERNEL lock: when a holder is SIGKILLed (or
+// force-terminated by `br stop --force`, which only cleans up the control
+// socket) the kernel drops the lock, while nothing detaches the volume or
+// removes the working copy. The image is then unclaimed AND attached, and
+// unlinking it is the same data loss the claim exists to prevent, arriving
+// through a different door.
+//
+// hdiutil is the only authority on the question, because the dead holder's
+// mountpoint is not derivable — under the browsable policy macOS chose it. A
+// lookup that cannot be completed is treated as "do not touch it": an unlink
+// here is unrecoverable, and a boot that is refused with a reason is not.
+func clearStaleWorkingCopy(parent context.Context, r commandRunner, work string) error {
+	if _, err := os.Stat(work); errors.Is(err, os.ErrNotExist) {
+		return nil // nothing left behind, so nothing can be attached from it
+	}
+
+	ctx, cancel := context.WithTimeout(parent, infoTimeout)
+	defer cancel()
+	attached, err := attachedImageAt(ctx, r, work)
+	switch {
+	case err == nil:
+		return attachedWorkingCopyError(work, attached)
+	case !errors.Is(err, ErrNoBackingImage):
+		return fmt.Errorf("check whether %s is still attached: %w", work, err)
+	}
+
+	if err := os.Remove(work); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale working copy %s: %w", work, err)
+	}
+	return nil
+}
+
+// attachedWorkingCopyError refuses the boot in words the user can act on. A
+// refusal that named neither the volume nor the way to release it would only
+// trade one dead end for another: the whole point is that the user can detach
+// the orphaned volume and boot again.
+func attachedWorkingCopyError(work string, at *ImageBacking) error {
+	where := "attached with no mounted volume"
+	if at.Mountpoint != "" {
+		where = "still mounted at " + at.Mountpoint
+	}
+	release := at.DevNode
+	if release == "" {
+		release = at.Mountpoint
+	}
+	return fmt.Errorf("%w: %s is %s, left behind by a holder that exited without detaching it; "+
+		"eject that volume in Finder or run 'hdiutil detach %s', then boot again",
+		ErrWorkingCopyAttached, work, where, release)
 }
 
 // inspect verifies the mounted volume really is a cartridge this build can read
@@ -202,8 +266,9 @@ func (o *Opened) inspect() error {
 // store of the mount, so it can only be removed once the volume is gone.
 //
 // Close is idempotent and safe on a partially-opened cartridge. It returns the
-// detach error (removal of the working copy is best-effort: a leftover file is
-// a wasted gigabyte, not a correctness problem, and the next Open clears it).
+// detach error; the working copy is removed only once the volume it backs is
+// genuinely gone, so a leftover file after a failed detach is deliberate — the
+// next Open clears it, or refuses if it is somehow still attached.
 func (o *Opened) Close() error {
 	if o == nil {
 		return nil
@@ -220,16 +285,24 @@ func (o *Opened) Close() error {
 // closeWith is the platform-neutral worker behind Close, taking the runner so
 // the unwind path (and tests) can drive detach without a real hdiutil.
 //
+// A FAILED detach keeps the working copy: it is the backing store of a volume
+// the kernel is still serving, so removing it would be the same data loss
+// clearStaleWorkingCopy refuses at the other end. The Mount is kept too, so a
+// later Close retries the detach rather than pretending the volume is gone.
+//
 // The claim on the working copy is released LAST, after the volume is gone and
 // the working copy has been removed: until then another process must still be
 // refused, or it would convert a fresh image over one this VMM is using.
 func (o *Opened) closeWith(ctx context.Context, r commandRunner) error {
 	var err error
 	if o.Mount.Mountpoint != "" {
-		err = detach(ctx, r, o.Mount.Mountpoint)
-		o.Mount = Mount{}
+		if err = detach(ctx, r, o.Mount.Mountpoint); err == nil {
+			o.Mount = Mount{}
+		}
 	}
-	o.removeWorkingCopy()
+	if o.Mount.Mountpoint == "" || !o.StillAttached() {
+		o.removeWorkingCopy()
+	}
 	o.releaseClaim()
 	return err
 }
