@@ -21,8 +21,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/diskarb"
 )
 
 // cmdInfo is the hdiutil subcommand listing every attached disk image.
@@ -41,13 +42,6 @@ const (
 	plistKeyWritable  = "writeable"
 	plistKeyRemovable = "removable"
 )
-
-// devDir is the directory BSD device nodes live in.
-const devDir = "/dev/"
-
-// bsdNamePrefix is the prefix of a bare BSD disk name as DiskArbitration
-// reports it ("disk4s1"), without the /dev directory hdiutil prints.
-const bsdNamePrefix = "disk"
 
 // ErrNoBackingImage reports that no attached disk image owns the device node or
 // mountpoint that was asked about — i.e. the volume is real storage (or an
@@ -251,8 +245,13 @@ func plistBool(dict map[string]any, key string) bool {
 // Finder-mounted volume is usually only known by its /Volumes path. Matching
 // the WHOLE-disk entity counts too, so "/dev/disk9" resolves to the same image
 // as its mounted "/dev/disk9s1" slice.
+//
+// diskarb.DevPath is what tells the two forms apart: it renders every spelling
+// of a device (bare "disk9s1", block "/dev/disk9s1", raw "/dev/rdisk9s1") in
+// the one form hdiutil records, and answers "" for a mountpoint — so the empty
+// answer IS the "ref is not a device" test. The rule lives there, once.
 func matchImage(images []attachedImage, ref string) (*ImageBacking, bool) {
-	dev := normalizeDevNode(ref)
+	dev := diskarb.DevPath(ref)
 	want := resolvePath(ref)
 	for _, img := range images {
 		for _, e := range img.entities {
@@ -306,27 +305,7 @@ func (img attachedImage) firstMountpoint() string {
 	return ""
 }
 
-// normalizeDevNode returns the /dev-prefixed form of a BSD device reference,
-// accepting hdiutil's "/dev/disk4s1" and DiskArbitration's bare "disk4s1". It
-// returns "" for anything that is not a device reference (a mountpoint), so
-// callers can tell the two apart without a second predicate.
-func normalizeDevNode(ref string) string {
-	if strings.HasPrefix(ref, devNodePrefix) {
-		return ref
-	}
-	if isBareBSDName(ref) {
-		return devDir + ref
-	}
-	return ""
-}
-
-// isBareBSDName reports whether ref is DiskArbitration's device-name form:
-// "disk" followed by at least one digit. The digit test matters — without it
-// any relative path beginning "disk..." would be mistaken for a device.
-func isBareBSDName(ref string) bool {
-	rest, ok := strings.CutPrefix(ref, bsdNamePrefix)
-	if !ok || rest == "" {
-		return false
-	}
-	return rest[0] >= '0' && rest[0] <= '9'
-}
+// The BSD device-name rule — which spellings name a device, and what the
+// canonical /dev form of each one is — belongs to internal/diskarb. This file
+// carried its own copy and the copy disagreed on the raw-device spelling;
+// matchImage now calls diskarb.DevPath.

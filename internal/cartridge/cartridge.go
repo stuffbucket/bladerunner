@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/diskarb"
 )
 
 // File-name extensions for the two cartridge forms.
@@ -77,11 +79,6 @@ const (
 	flagForce  = "-force"
 	flagPlist  = "-plist"
 )
-
-// devNodePrefix is the prefix every BSD disk device node carries. An attached
-// disk image is always backed by /dev/diskN[sM]; a synthetic mount (autofs,
-// devfs, a firmlink) is not, which is what makes this a usable identity test.
-const devNodePrefix = "/dev/disk"
 
 // Detach busy-retry tuning. hdiutil fails with exit 16 / "Resource busy" while a
 // process still holds the volume; we retry a few times with backoff, then fall
@@ -314,7 +311,9 @@ func convert(ctx context.Context, r commandRunner, src, format, dst, wantExt str
 // distinguish a cartridge from, say, a stray USB stick or an autofs stub. We
 // therefore ask the kernel what is actually mounted and require both that it
 // agrees mountpoint IS the mount root (f_mntonname round-trips) and that the
-// volume is backed by a /dev/disk* node, which is what an attached image is.
+// volume is backed by a BSD disk node, which is what an attached image is. A
+// synthetic mount (autofs, devfs, a firmlink) names no disk device, so
+// diskarb.BSDName answers "" for it — that is the identity test.
 func isAttached(mountpoint string) bool {
 	resolved := resolvePath(mountpoint)
 	info, err := os.Stat(resolved)
@@ -329,7 +328,7 @@ func isAttached(mountpoint string) bool {
 	if err != nil {
 		return false
 	}
-	return mi.Mountpoint == resolved && strings.HasPrefix(mi.DevNode, devNodePrefix)
+	return mi.Mountpoint == resolved && diskarb.BSDName(mi.DevNode) != ""
 }
 
 // isAttachedFrom reports whether mountpoint is the mount root of the volume

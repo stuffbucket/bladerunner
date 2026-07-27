@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/stuffbucket/bladerunner/internal/diskarb"
 )
 
 // fakeRunner records the commands it receives and returns scripted results. A
@@ -812,8 +814,8 @@ func TestLookupMountOnRoot(t *testing.T) {
 	if info.Mountpoint != "/" {
 		t.Errorf("Mountpoint = %q, want /", info.Mountpoint)
 	}
-	if !strings.HasPrefix(info.DevNode, devNodePrefix) {
-		t.Errorf("DevNode = %q, want a %s* node", info.DevNode, devNodePrefix)
+	if diskarb.BSDName(info.DevNode) == "" {
+		t.Errorf("DevNode = %q, want a BSD disk node", info.DevNode)
 	}
 	dev, err := DevNodeAt("/")
 	if err != nil {
@@ -865,8 +867,8 @@ func TestAttachRealImageCapturesDevNode(t *testing.T) {
 		}
 	})
 
-	if !strings.HasPrefix(m.DevNode, devNodePrefix) {
-		t.Fatalf("Mount.DevNode = %q, want a %s* node", m.DevNode, devNodePrefix)
+	if diskarb.BSDName(m.DevNode) == "" {
+		t.Fatalf("Mount.DevNode = %q, want a BSD disk node", m.DevNode)
 	}
 	// The plist's dev-entry must agree with what the kernel says backs the mount.
 	info, err := LookupMount(m.Mountpoint)

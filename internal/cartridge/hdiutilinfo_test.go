@@ -3,7 +3,16 @@ package cartridge
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/stuffbucket/bladerunner/internal/diskarb"
 )
 
 // sampleInfoPlist is a real capture of `hdiutil info -plist` on macOS 15 with
@@ -411,23 +420,148 @@ func TestListAttachedImagesReportsEveryImagePath(t *testing.T) {
 	}
 }
 
-func TestNormalizeDevNode(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{sampleCartridgeDev, sampleCartridgeDev},
-		{"disk9s1", sampleCartridgeDev},
-		{"disk0", "/dev/disk0"},
-		{sampleCartridgeMount, ""},
-		{"", ""},
-		{"disk", ""},
-		{"disk-images/foo.dmg", ""},
-		{"/Volumes/disk9", ""},
+// The BSD device-name rule this package resolves a lookup with is
+// internal/diskarb's, not a local copy. The table therefore covers every
+// spelling macOS uses for a device — including the raw "/dev/rdiskN" form the
+// deleted local copy did NOT recognize — and every spelling that is not a
+// device, including a MOUNTPOINT whose last element reads like a device name.
+//
+// wantDev is the canonical node the rule reduces ref to ("" when ref names no
+// device), and wantImage is the attached image matchImage then finds ("" when
+// nothing attached sits at that node).
+func TestMatchImageResolvesEverySpellingThroughDiskarb(t *testing.T) {
+	images, err := parseInfoImages(sampleInfoPlist)
+	if err != nil {
+		t.Fatalf("parseInfoImages: %v", err)
 	}
+
+	tests := []struct {
+		name      string
+		ref       string
+		wantDev   string
+		wantImage string
+	}{
+		{name: "bare whole disk", ref: "disk4", wantDev: "/dev/disk4", wantImage: sampleUnrelatedDMG},
+		{name: "bare slice", ref: "disk4s1", wantDev: "/dev/disk4s1", wantImage: sampleUnrelatedDMG},
+		{name: "block device path", ref: "/dev/disk4s1", wantDev: "/dev/disk4s1", wantImage: sampleUnrelatedDMG},
+		// The local copy read this as a mountpoint and matched nothing.
+		{name: "raw device path", ref: "/dev/rdisk4s1", wantDev: "/dev/disk4s1", wantImage: sampleUnrelatedDMG},
+		{name: "apfs sub slice", ref: "disk4s1s2", wantDev: "/dev/disk4s1s2", wantImage: ""},
+		{name: "empty", ref: "", wantDev: "", wantImage: ""},
+		{name: "not a device at all", ref: "not-a-device", wantDev: "", wantImage: ""},
+		// A volume may be named after a device. The directory decides.
+		{name: "mountpoint that reads like a device", ref: "/Volumes/disk4", wantDev: "", wantImage: ""},
+	}
+
 	for _, tt := range tests {
-		if got := normalizeDevNode(tt.in); got != tt.want {
-			t.Errorf("normalizeDevNode(%q) = %q, want %q", tt.in, got, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			if got := diskarb.DevPath(tt.ref); got != tt.wantDev {
+				t.Errorf("diskarb.DevPath(%q) = %q, want %q", tt.ref, got, tt.wantDev)
+			}
+			got, ok := matchImage(images, tt.ref)
+			if tt.wantImage == "" {
+				if ok {
+					t.Fatalf("matchImage(%q) = %+v, want no match", tt.ref, got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("matchImage(%q) found nothing, want %s", tt.ref, tt.wantImage)
+			}
+			if got.ImagePath != tt.wantImage {
+				t.Errorf("matchImage(%q).ImagePath = %q, want %q", tt.ref, got.ImagePath, tt.wantImage)
+			}
+			if got.DevNode != tt.wantDev {
+				t.Errorf("matchImage(%q).DevNode = %q, want %q", tt.ref, got.DevNode, tt.wantDev)
+			}
+		})
+	}
+}
+
+// devLiteralAllowList holds the string literals in this package that may
+// mention a device without being a second copy of the rule. It is empty: there
+// is no such literal, and a new one must be justified by editing this list.
+var devLiteralAllowList = map[string]bool{}
+
+// This package must never grow its own BSD device-name parsing again. It did
+// once, the copy disagreed with internal/diskarb on the raw-device spelling,
+// and a divergent copy of this rule is what shipped an unmount veto registered
+// under a name DiskArbitration could never match.
+//
+// A copy needs the vocabulary: the "/dev" directory, or the bare "disk" /
+// "rdisk" prefix. This test reads the package's own source and fails on any of
+// them, so the reintroduction is caught at `make test` rather than at review.
+func TestPackageDeclaresNoDeviceNameVocabulary(t *testing.T) {
+	sources, err := packageSourceFiles(".")
+	if err != nil {
+		t.Fatalf("list package source: %v", err)
+	}
+	if len(sources) == 0 {
+		t.Fatal("found no package source; the guard would pass vacuously")
+	}
+
+	fset := token.NewFileSet()
+	for _, name := range sources {
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, lit := range deviceVocabularyLiterals(file) {
+			t.Errorf("%s declares the device-name literal %s; call internal/diskarb instead "+
+				"(BSDName, WholeDiskName, DevPath)", name, lit)
 		}
 	}
 }
+
+// packageSourceFiles lists the package's own .go files in dir, excluding the
+// test files (this one holds device literals on purpose, as fixtures). Build
+// tags are deliberately ignored: a copy of the rule in a _darwin.go file is
+// still a copy, and the guard must see it from the Linux test run too.
+func packageSourceFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var sources []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		sources = append(sources, filepath.Join(dir, name))
+	}
+	return sources, nil
+}
+
+// deviceVocabularyLiterals returns every string literal in file that names the
+// device directory or a BSD name prefix. Import paths are skipped — the point
+// is to REQUIRE importing internal/diskarb, not to forbid naming it.
+func deviceVocabularyLiterals(file *ast.File) []string {
+	imports := make(map[*ast.BasicLit]bool, len(file.Imports))
+	for _, spec := range file.Imports {
+		imports[spec.Path] = true
+	}
+	var found []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING || imports[lit] {
+			return true
+		}
+		value, err := strconv.Unquote(lit.Value)
+		if err != nil || devLiteralAllowList[value] {
+			return true
+		}
+		if strings.Contains(value, devDirFragment) || value == bsdPrefix || value == rawBSDPrefix {
+			found = append(found, lit.Value)
+		}
+		return true
+	})
+	return found
+}
+
+// The vocabulary a reintroduced copy of the rule would have to spell out.
+const (
+	devDirFragment = "/dev"
+	bsdPrefix      = "disk"
+	rawBSDPrefix   = "rdisk"
+)

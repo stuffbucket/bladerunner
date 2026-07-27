@@ -1,9 +1,6 @@
 package diskarb
 
-import (
-	"path/filepath"
-	"strings"
-)
+import "strings"
 
 // BSD device names, and the one place in the tree that knows how to read them.
 //
@@ -33,6 +30,9 @@ const (
 	// rawDevicePrefix marks the character ("raw") device node — "rdisk4s1" is
 	// the same device as "disk4s1" and reduces to it.
 	rawDevicePrefix = "r"
+	// pathSeparator separates the directory of a device reference from its
+	// name. A reference that carries one must name DevDir to be a device node.
+	pathSeparator = '/'
 )
 
 // BSDName reduces any spelling of a BSD disk device to the bare name
@@ -110,15 +110,27 @@ func MatchesFilter(filter, bsdName string) bool {
 	return wantUnit == gotUnit
 }
 
-// bareDeviceName strips the surrounding whitespace, any directory and the
-// raw-device "r" from a device reference, leaving the candidate bare name. It
-// makes no claim that the result IS a device name; unitEnd decides that.
+// bareDeviceName strips the surrounding whitespace, the DevDir directory and
+// the raw-device "r" from a device reference, leaving the candidate bare name.
+// It makes no claim that the result IS a device name; unitEnd decides that.
+//
+// A reference that carries a directory other than DevDir is not a device node,
+// however its last element is spelled, so it reduces to "". That is what stops
+// a MOUNTPOINT from being read as the device its volume is named after:
+// "/Volumes/disk9" is a directory in /Volumes, not the disk9 device. Callers
+// hand these two kinds of reference to the same function — hdiutil reports a
+// dev-entry and a mount point side by side — so the distinction has to be made
+// here, or a lookup by mountpoint silently matches an unrelated device.
 func bareDeviceName(ref string) string {
-	trimmed := strings.TrimSpace(ref)
-	if trimmed == "" {
-		return ""
+	name := strings.TrimSpace(ref)
+	if strings.ContainsRune(name, pathSeparator) {
+		rest, ok := strings.CutPrefix(name, DevDir)
+		if !ok || strings.ContainsRune(rest, pathSeparator) {
+			return ""
+		}
+		name = rest
 	}
-	return strings.TrimPrefix(filepath.Base(trimmed), rawDevicePrefix)
+	return strings.TrimPrefix(name, rawDevicePrefix)
 }
 
 // unitEnd returns the index just past the unit number in a bare BSD name
