@@ -68,7 +68,7 @@ func init() {
 	f.StringVar(&startFlags.imagePath, "image-path", "", "Local base image path")
 	f.BoolVar(&startFlags.hostedImage, "hosted-image", false, "Force the pre-baked hosted guest image (guest-image-latest release); the default already resolves to it (also settable via BLADERUNNER_FORCE_HOSTED_IMAGE=1)")
 	f.BoolVar(&startFlags.debianImage, "debian-image", false, "Escape hatch: force the Debian Trixie genericcloud + cloud-init path instead of the pre-baked default (also settable via BLADERUNNER_FORCE_DEBIAN_IMAGE=1)")
-	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
+	f.DurationVar(&startFlags.timeout, "timeout", config.DefaultTimeout, "How long to wait for the guest's Incus API to come up and authorize this client")
 	f.BoolVar(&startFlags.noNested, "no-nested-virt", false, "Disable nested virtualization even if the host supports it (Incus VMs will be unavailable)")
 	f.StringVar(&startFlags.restoreFrom, "restore", "", "Restore the guest from a saved-state file (see 'br save') instead of cold-booting")
 }
@@ -93,8 +93,8 @@ func nestedVirtBanner() string {
 // resource lives in vmhost so a holder process — which cannot import package
 // main — can run the exact same sequence.
 func runStart(cmd *cobra.Command, _ []string) error {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	ctx, stop := signalContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Safety net for a cartridge boot that never reaches the Host (a rejected
 	// spec, say): the mount must not be stranded. Once ownership is handed over
@@ -112,6 +112,55 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	host.SetObserver(obs)
 
 	return explainHostError(host.Run(ctx))
+}
+
+// errSignaled is the cause signalContext records, so a caller can ask "was this
+// process killed?" with errors.Is instead of parsing a string.
+var errSignaled = errors.New("received signal")
+
+// signalContext is signal.NotifyContext with the SIGNAL RECORDED AS THE CAUSE.
+//
+// # Why not just use signal.NotifyContext
+//
+// Because on the Go version this project pins it does not do this. Naming the
+// signal in context.Cause landed in the standard library AFTER go 1.25 (a
+// go1.26 toolchain reports "terminated signal received"; go1.25.6 — what go.mod
+// asks for, what the CI container runs and what releases are built with —
+// reports a bare "context canceled"). Relying on it would mean the diagnosis
+// below works on a developer's newer local toolchain and silently vanishes in
+// CI and in shipped builds, which is worse than not having it. Ten lines here
+// make it true everywhere.
+//
+// # Why it is worth those ten lines
+//
+// Everything downstream of this context — the Incus readiness wait above all —
+// can only observe "context canceled" when it is cut short, and that is
+// indistinguishable from the wait's own budget expiring. A cartridge boot killed
+// by an outer process timeout therefore read exactly like a guest that booted
+// too slowly, and telling the two apart cost a full VM run. With a cause the
+// same log line reads "canceled after 2m26s ... (cause: received signal:
+// terminated)" and the question is already answered. vmhost.cancelReason is what
+// renders it.
+//
+// The returned stop function releases the signal registration and cancels the
+// context, exactly as NotifyContext's does.
+func signalContext(parent context.Context, sigs ...os.Signal) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, sigs...)
+	go func() {
+		select {
+		case sig := <-ch:
+			// The cause is set BEFORE Done closes (cancel does both, in that
+			// order), so anyone woken by Done always sees it. No race, no wait.
+			cancel(fmt.Errorf("%w: %s", errSignaled, sig))
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(ch)
+		cancel(nil)
+	}
 }
 
 // A Host declines to start for two reasons that are not really errors so much
@@ -363,15 +412,38 @@ func printRunningSummary(cfg *config.Config, endpoint string, bootErr error) {
 	if bootErr == nil {
 		fmt.Println(success("✓ VM is running"))
 	} else {
-		fmt.Println(warning("⚠ VM is running but the guest did not finish booting"))
+		fmt.Println(warning(bootSummaryHeadline(bootErr)))
 		fmt.Printf("  %s %v\n", key("Reason:"), bootErr)
 		fmt.Printf("  %s %s\n", key("Console:"), value(cfg.ConsoleLogPath))
-		fmt.Printf("  %s %s\n", key("Hint:"), subtle("`br shell` and `br ssh` will fail until cloud-init completes."))
+		fmt.Printf("  %s %s\n", key("Hint:"), subtle(bootSummaryHint(bootErr)))
 	}
 	fmt.Printf("  %s %s\n", key("SSH:"), command("br ssh"))
 	fmt.Printf("  %s %s\n", key("Shell:"), command("br shell"))
 	fmt.Printf("  %s %s\n", key("API:"), value(endpoint))
 	fmt.Println()
+}
+
+// bootSummaryHeadline and bootSummaryHint say which of the two boot failures
+// happened, because they call for opposite responses and the summary used to
+// describe both as the first one.
+//
+// A boot that ran out of budget left a VM up that the user can go and inspect.
+// A boot that was INTERRUPTED — Ctrl-C, `br stop`, a killed process group — is
+// already shutting down: "VM is running" is false by the time it is printed,
+// the console log is not evidence of anything wrong, and telling the user to
+// wait for cloud-init sends them after a guest that is being powered off.
+func bootSummaryHeadline(bootErr error) string {
+	if errors.Is(bootErr, context.Canceled) {
+		return "⚠ Boot was interrupted before the guest was ready; shutting down"
+	}
+	return "⚠ VM is running but the guest did not finish booting"
+}
+
+func bootSummaryHint(bootErr error) string {
+	if errors.Is(bootErr, context.Canceled) {
+		return "Nothing is wrong with the guest — it was still coming up when the boot was stopped. Boot it again to finish."
+	}
+	return "`br shell` and `br ssh` will fail until cloud-init completes."
 }
 
 // Board stage IDs (kept as constants so they're referenced consistently across

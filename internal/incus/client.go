@@ -2,6 +2,7 @@ package incus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -53,7 +54,10 @@ func WaitForServer(ctx context.Context, endpoint string, certPEM, keyPEM []byte,
 	start := time.Now()
 	attempt := 0
 
-	logging.L().Info("waiting for Incus API readiness", "endpoint", endpoint, "retry_every", retryEvery.String())
+	// The budget is logged because it is the only way a reader of this log can
+	// tell what --timeout was actually in force. Without it, a wait that ends
+	// early is impossible to attribute from the log alone.
+	logging.L().Info("waiting for Incus API readiness", "endpoint", endpoint, "retry_every", retryEvery.String(), "budget", budgetOf(ctx))
 
 	for {
 		attempt++
@@ -76,12 +80,70 @@ func WaitForServer(ctx context.Context, endpoint string, certPEM, keyPEM []byte,
 
 		select {
 		case <-ctx.Done():
-			waitErr := fmt.Errorf("wait for incus server: %w", ctx.Err())
-			logging.L().Error("Incus API readiness timed out", "endpoint", endpoint, "attempts", attempt, "elapsed", time.Since(start).Round(time.Second).String(), "err", waitErr)
-			return nil, fmt.Errorf("wait for incus server: %w", ctx.Err())
+			return nil, waitEnded(ctx, endpoint, attempt, time.Since(start), err)
 		case <-ticker.C:
 		}
 	}
+}
+
+// budgetOf renders the wait budget the caller bounded ctx with, or "none" for an
+// unbounded context.
+func budgetOf(ctx context.Context) string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return "none"
+	}
+	return time.Until(deadline).Round(time.Second).String()
+}
+
+// waitEnded turns a finished wait into a log line and an error that say WHICH of
+// the two possible endings happened.
+//
+// They are not the same event and they must not read the same way:
+//
+//   - the budget ran out (context.DeadlineExceeded). The guest never got Incus
+//     up in the time it was given. Acting on it means raising --timeout or
+//     fixing the guest.
+//   - the wait was canceled (context.Canceled). Something released the run — a
+//     signal, a `br stop`, a killed process group — while the guest was still
+//     coming up. The budget is irrelevant; raising --timeout changes nothing.
+//
+// Both used to be logged as "Incus API readiness timed out" with an err of
+// "context canceled", which reports a timeout that did not happen and hides a
+// cancellation that did. The last probe error is carried into the returned error
+// too: it is the one piece of evidence about the guest, and it used to be
+// dropped on the floor at exactly the moment it mattered.
+func waitEnded(ctx context.Context, endpoint string, attempts int, elapsed time.Duration, lastErr error) error {
+	elapsedStr := elapsed.Round(time.Second).String()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		logging.L().Error("Incus API readiness timed out",
+			"endpoint", endpoint, "attempts", attempts, "elapsed", elapsedStr, "last_probe_error", lastErr)
+		return fmt.Errorf("wait for incus server: budget exhausted after %s and %d attempts%s: %w",
+			elapsedStr, attempts, lastProbeSuffix(lastErr), ctx.Err())
+	}
+	logging.L().Error("Incus API readiness canceled before the budget ran out",
+		"endpoint", endpoint, "attempts", attempts, "elapsed", elapsedStr,
+		"cause", causeOf(ctx), "last_probe_error", lastErr)
+	return fmt.Errorf("wait for incus server: canceled after %s and %d attempts (cause: %w)%s: %w",
+		elapsedStr, attempts, causeOf(ctx), lastProbeSuffix(lastErr), ctx.Err())
+}
+
+// causeOf is context.Cause with a floor: a context canceled without one still
+// reports something, so the message never renders a nil.
+func causeOf(ctx context.Context) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return ctx.Err()
+}
+
+// lastProbeSuffix appends the last probe failure to a wait error, or nothing
+// when the wait ended before any probe failed.
+func lastProbeSuffix(lastErr error) string {
+	if lastErr == nil {
+		return ""
+	}
+	return fmt.Sprintf("; last probe error: %v", lastErr)
 }
 
 func connectAndGet(endpoint string, certPEM, keyPEM []byte) (*ServerInfo, error) {

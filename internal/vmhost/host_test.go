@@ -3,6 +3,8 @@ package vmhost
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -311,6 +313,48 @@ func TestHostInfoUsesTheCartridgeNameNotTheMountpointBasename(t *testing.T) {
 	}
 }
 
+// TestCartridgeInstanceNameMatchesTheVolumeItIsMountedFrom closes the loop on
+// the pack-time volume-name fix from the boot end.
+//
+// `br disk pack <disk> --out <file>` names the APFS volume after the OUTPUT
+// FILE, and `br boot <file>` derives the cartridge name from that same file, so
+// for a cartridge packed from a differently-named disk all three names — the
+// browsable mountpoint macOS produced, the name a boot registers under, and the
+// name mount detection reads back off the volume — must be the one name.
+//
+// Before the fix the volume carried the SOURCE DISK's name, so `br watch`
+// offered "debian-trixie-gui" while the boot it triggered registered
+// "smoke-cartridge", and `br eject <what the user was shown>` missed.
+func TestCartridgeInstanceNameMatchesTheVolumeItIsMountedFrom(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
+
+	// Packed from disk "debian-trixie-gui" into smoke-cartridge.sparseimage.
+	const file = "/Users/someone/Downloads/smoke-cartridge.sparseimage"
+	name := cartridge.NameFromPath(file) // what `br boot <file>` derives
+	mount := filepath.Join(cartridge.VolumesRoot, cartridge.VolumeName(name))
+
+	h, err := New(Spec{Kind: instance.KindCartridge, CartridgePath: file, Mountpoint: mount})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.AdoptCartridge(&cartridge.Opened{
+		Name:       name,
+		SourcePath: file,
+		Mount:      cartridge.Mount{Mountpoint: mount, DevNode: "/dev/disk9s1", Policy: cartridge.MountBrowsable},
+	})
+	h.cfg = &config.Config{VMDir: mount}
+
+	if got := h.instanceName(); got != "smoke-cartridge" {
+		t.Fatalf("instanceName() = %q, want smoke-cartridge", got)
+	}
+	// The name mount detection recovers from the volume is the same name, so
+	// what `br watch` offers is what `br eject` then addresses.
+	if got := cartridge.NameFromVolume(filepath.Base(mount)); got != h.instanceName() {
+		t.Errorf("detection would call it %q, the instance registered as %q", got, h.instanceName())
+	}
+}
+
 // The name resolution order, and its fallbacks.
 func TestHostInstanceNamePrecedence(t *testing.T) {
 	t.Setenv(config.ForceHostedImageEnvVar, "")
@@ -523,5 +567,83 @@ func TestEjectForceFromArgs(t *testing.T) {
 	}
 	if ejectForceFromArgs(control.NewRequest("eject")) {
 		t.Error("absent args should be false")
+	}
+}
+
+// --- why a run ended -------------------------------------------------------
+
+// cancelReason is what turns "context canceled" into something a reader can act
+// on: did WE release the run, or did something outside the process end it?
+// Getting that wrong is what made a killed cartridge boot read as a guest that
+// booted too slowly.
+func TestCancelReason(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+		want  string
+	}{
+		{
+			name:  "no cause recorded",
+			cause: nil,
+			want:  "cause not recorded",
+		},
+		{
+			name:  "released from inside",
+			cause: ErrStopRequested,
+			want:  ErrStopRequested.Error(),
+		},
+		{
+			name:  "wrapped stop request",
+			cause: fmt.Errorf("eject: %w", ErrStopRequested),
+			want:  ErrStopRequested.Error(),
+		},
+		{
+			name:  "plain cancellation from the caller",
+			cause: context.Canceled,
+			want:  "canceled by the caller: a signal, or the parent shutting down",
+		},
+		{
+			name:  "a caller that named its reason keeps it",
+			cause: errors.New("received signal: terminated"),
+			want:  "received signal: terminated",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cancelReason(tc.cause); got != tc.want {
+				t.Errorf("cancelReason(%v) = %q, want %q", tc.cause, got, tc.want)
+			}
+		})
+	}
+}
+
+// A control-plane stop must be recorded as the CAUSE of the run context, so
+// anything waiting on it (the Incus readiness wait above all) can say that the
+// host was asked to stop rather than report an anonymous cancellation.
+func TestStopRecordsItselfAsTheCancelCause(t *testing.T) {
+	h, err := New(flatSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for Run's context wiring, which is what publishes h.cancel.
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	h.mu.Lock()
+	h.cancel = func() { cancel(ErrStopRequested) }
+	h.mu.Unlock()
+
+	h.stop()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("stop() did not release the run context")
+	}
+	if cause := context.Cause(ctx); !errors.Is(cause, ErrStopRequested) {
+		t.Fatalf("context.Cause = %v, want %v", cause, ErrStopRequested)
+	}
+	if got := cancelReason(context.Cause(ctx)); got != ErrStopRequested.Error() {
+		t.Errorf("cancelReason = %q, want %q", got, ErrStopRequested.Error())
 	}
 }

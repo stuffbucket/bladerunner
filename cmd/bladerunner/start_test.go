@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/vmhost"
@@ -100,5 +103,107 @@ func TestLockHolderPID(t *testing.T) {
 				t.Errorf("lockHolderPID() = (%d, %v), want (%d, %v)", got, ok, tt.want, tt.ok)
 			}
 		})
+	}
+}
+
+// --- the signal that ended the run -----------------------------------------
+
+// A killed `br start` / `br boot` must record WHICH signal killed it as the
+// cancel cause. Everything downstream can only see "context canceled", which is
+// indistinguishable from the Incus readiness budget expiring — and that
+// ambiguity is what made a cartridge boot killed from outside look exactly like
+// a guest that booted too slowly.
+//
+// This asserts OUR helper rather than signal.NotifyContext's behavior on
+// purpose: the standard library only names the signal on a toolchain newer than
+// the one go.mod pins, so a test written against it passes on a developer's
+// machine and fails (correctly) in the CI container. See signalContext.
+func TestSignalContextRecordsTheSignalAsTheCause(t *testing.T) {
+	ctx, stop := signalContext(context.Background(), syscall.SIGUSR1)
+	defer stop()
+
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGUSR1); err != nil {
+		t.Fatalf("kill(self, SIGUSR1): %v", err)
+	}
+
+	// cancel sets the cause before it closes Done, so waking on Done is enough:
+	// there is nothing to poll for and nothing to sleep on.
+	select {
+	case <-ctx.Done():
+	case <-time.After(30 * time.Second):
+		t.Fatal("signalContext did not cancel on the signal")
+	}
+
+	cause := context.Cause(ctx)
+	if !errors.Is(cause, errSignaled) {
+		t.Fatalf("context.Cause = %v, want it to wrap %v", cause, errSignaled)
+	}
+	if errors.Is(cause, context.Canceled) {
+		t.Fatalf("context.Cause = %v; an anonymous cancellation cannot name what killed the run", cause)
+	}
+	if !strings.Contains(cause.Error(), syscall.SIGUSR1.String()) {
+		t.Errorf("context.Cause = %q, want it to name %q", cause, syscall.SIGUSR1)
+	}
+}
+
+// The stop function releases the run the way NotifyContext's does, recording a
+// plain cancellation: nobody was signaled, so nothing must claim they were.
+func TestSignalContextStopCancelsWithoutASignal(t *testing.T) {
+	ctx, stop := signalContext(context.Background(), syscall.SIGUSR2)
+	stop()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(30 * time.Second):
+		t.Fatal("stop() did not cancel the context")
+	}
+	cause := context.Cause(ctx)
+	if !errors.Is(cause, context.Canceled) || errors.Is(cause, errSignaled) {
+		t.Errorf("context.Cause = %v, want a plain cancellation", cause)
+	}
+}
+
+// A parent that is already done is inherited, cause and all: a holder or a test
+// that hands in a dead context must not be told a signal arrived.
+func TestSignalContextInheritsAParentCause(t *testing.T) {
+	parent, cancelParent := context.WithCancelCause(context.Background())
+	parentCause := errors.New("parent went away")
+	cancelParent(parentCause)
+
+	ctx, stop := signalContext(parent, syscall.SIGUSR1)
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(30 * time.Second):
+		t.Fatal("a context derived from a canceled parent is not done")
+	}
+	if cause := context.Cause(ctx); !errors.Is(cause, parentCause) {
+		t.Errorf("context.Cause = %v, want the parent's %v", cause, parentCause)
+	}
+}
+
+// The running summary must not describe an interrupted boot the same way it
+// describes one that ran out of budget: the first is already shutting down, so
+// "VM is running" and "wait for cloud-init" are both wrong and both send the
+// reader after the guest instead of after whoever stopped the boot.
+func TestBootSummaryDistinguishesInterruptionFromTimeout(t *testing.T) {
+	interrupted := fmt.Errorf("boot interrupted (received signal): %w", context.Canceled)
+	timedOut := fmt.Errorf("wait for incus server: budget exhausted: %w", context.DeadlineExceeded)
+
+	if h := bootSummaryHeadline(interrupted); !strings.Contains(h, "interrupted") {
+		t.Errorf("bootSummaryHeadline(interrupted) = %q, want it to say the boot was interrupted", h)
+	}
+	if h := bootSummaryHeadline(interrupted); strings.Contains(h, "VM is running") {
+		t.Errorf("bootSummaryHeadline(interrupted) = %q, must not claim the VM is running", h)
+	}
+	if h := bootSummaryHeadline(timedOut); !strings.Contains(h, "did not finish booting") {
+		t.Errorf("bootSummaryHeadline(timedOut) = %q, want the unchanged timeout wording", h)
+	}
+	if hint := bootSummaryHint(interrupted); strings.Contains(hint, "cloud-init completes") {
+		t.Errorf("bootSummaryHint(interrupted) = %q, must not send the user to wait on cloud-init", hint)
+	}
+	if hint := bootSummaryHint(timedOut); !strings.Contains(hint, "cloud-init completes") {
+		t.Errorf("bootSummaryHint(timedOut) = %q, want the unchanged timeout hint", hint)
 	}
 }

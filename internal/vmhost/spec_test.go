@@ -1,6 +1,7 @@
 package vmhost
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -497,5 +498,123 @@ func TestValidateImageOverrideConflicts(t *testing.T) {
 				t.Errorf("expected error to mention %q, got %v", tt.wantErrText, err)
 			}
 		})
+	}
+}
+
+// --- the readiness budget --------------------------------------------------
+
+// resolveWaitBudget is the ONE place the Incus readiness budget is decided, so
+// its precedence is asserted exhaustively rather than through a boot.
+func TestResolveWaitBudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		override time.Duration
+		base     time.Duration
+		want     time.Duration
+	}{
+		{name: "user timeout wins over the baseline", override: 12 * time.Minute, base: 3 * time.Minute, want: 12 * time.Minute},
+		{name: "user timeout wins over nothing", override: 12 * time.Minute, want: 12 * time.Minute},
+		{name: "no override keeps the baseline", base: 3 * time.Minute, want: 3 * time.Minute},
+		{name: "no override and no baseline falls back to the default", want: config.DefaultTimeout},
+		{name: "a zero override is not a zero budget", override: 0, base: 3 * time.Minute, want: 3 * time.Minute},
+		{name: "a negative override is not a budget either", override: -time.Second, base: 3 * time.Minute, want: 3 * time.Minute},
+		{name: "a negative baseline falls back to the default", base: -time.Second, want: config.DefaultTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveWaitBudget(tt.override, tt.base); got != tt.want {
+				t.Errorf("resolveWaitBudget(%v, %v) = %v, want %v", tt.override, tt.base, got, tt.want)
+			}
+		})
+	}
+}
+
+// The user's --timeout must reach the config the readiness wait is bounded by,
+// on both shapes of start: a plain `br start --timeout` (only changed flags are
+// applied) and a driven `br boot`/cartridge start (everything applied verbatim).
+// This is the property the flag exists for, so it is asserted directly rather
+// than inferred from a boot.
+func TestApplyOverridesTimeoutReachesTheReadinessBudget(t *testing.T) {
+	const userTimeout = 11 * time.Minute
+
+	tests := []struct {
+		name string
+		spec Spec
+	}{
+		{name: "plain start", spec: changedSpec(Overrides{Timeout: userTimeout}, false, "timeout")},
+		{name: "driven boot", spec: changedSpec(Overrides{Timeout: userTimeout}, true)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.Default(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A persisted Settings baseline the flag has to beat.
+			s := config.DefaultSettings()
+			s.WaitForIncus = config.Duration(2 * time.Minute)
+			s.ApplyTo(cfg)
+
+			tt.spec.applyOverrides(cfg)
+
+			if cfg.WaitForIncus != userTimeout {
+				t.Errorf("WaitForIncus = %v, want the user's --timeout %v", cfg.WaitForIncus, userTimeout)
+			}
+		})
+	}
+}
+
+// A driven Spec that carries NO timeout must keep the resolved baseline, not
+// hand the readiness wait a budget of zero.
+//
+// Zero is the normal state of the field, not an exotic one: Overrides.Timeout is
+// `omitempty`, so it does not survive the JSON round trip a holder process is
+// handed, and a driven Spec applies its overrides verbatim. Writing that zero
+// onto the config expires the wait's context before its first probe, and the
+// failure surfaces far from here — as an instant "deadline exceeded", or as
+// config.Validate rejecting wait-for-incus — with nothing naming the timeout.
+func TestApplyOverridesDrivenWithoutTimeoutKeepsTheBaseline(t *testing.T) {
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := config.DefaultSettings()
+	s.WaitForIncus = config.Duration(4 * time.Minute)
+	s.ApplyTo(cfg)
+
+	// Driven, sizing resolved, timeout absent — exactly what survives a JSON
+	// round trip of a `br boot` spec whose timeout was never set.
+	spec := changedSpec(Overrides{
+		CPUs:        config.DefaultCPUs,
+		MemoryGiB:   config.DefaultMemoryGiB,
+		DiskSizeGiB: config.DefaultDiskSizeGiB,
+	}, true)
+	spec.applyOverrides(cfg)
+
+	if cfg.WaitForIncus != 4*time.Minute {
+		t.Errorf("WaitForIncus = %v, want the persisted 4m baseline", cfg.WaitForIncus)
+	}
+	// config.Validate is the far-away failure a zero budget used to produce
+	// ("wait-for-incus must be at least 1s"), so assert it passes here. The ssh
+	// key is the only other thing Validate wants and the Host supplies it in a
+	// later step.
+	cfg.SetSSHKeys("ssh-ed25519 AAAA test@bladerunner", filepath.Join(t.TempDir(), "id_ed25519"))
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("resolved config is invalid after a driven start with no timeout: %v", err)
+	}
+}
+
+// A Spec whose base config carries no budget at all still gets a usable one.
+func TestApplyOverridesNeverLeavesAZeroBudget(t *testing.T) {
+	cfg, err := config.Default(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.WaitForIncus = 0
+
+	changedSpec(Overrides{}, false).applyOverrides(cfg)
+
+	if cfg.WaitForIncus != config.DefaultTimeout {
+		t.Errorf("WaitForIncus = %v, want the package default %v", cfg.WaitForIncus, config.DefaultTimeout)
 	}
 }

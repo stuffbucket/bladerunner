@@ -97,8 +97,12 @@ func runVMD(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(cmd.Context())
-	defer cancel()
+	// WithCancelCause: the holder's run context records WHY it was released, so a
+	// wait cut short by the escalation path says "forced down" rather than
+	// reporting a bare cancellation that reads like a boot timeout.
+	ctx, cancelCause := context.WithCancelCause(cmd.Context())
+	defer cancelCause(nil)
+	cancel := context.CancelFunc(func() { cancelCause(errForcedShutdown) })
 
 	// SIGTERM ONLY. A holder is started with setsid and has no controlling
 	// terminal, so SIGINT is not a signal it can meaningfully receive; SIGTERM
@@ -165,6 +169,12 @@ func vmdChangedFlags() []string {
 	}
 	return nil
 }
+
+// errForcedShutdown is the cause recorded when a second shutdown signal cuts the
+// guest's power. It is never returned; it is what context.Cause reports on the
+// holder's run context, so anything waiting on that context can say what ended
+// it (see vmhost.ErrStopRequested for the orderly counterpart).
+var errForcedShutdown = errors.New("forced shutdown: a second shutdown signal cut the guest's power")
 
 // vmdSignalBuffer sizes the signal channel. Two is the meaningful capacity: the
 // first SIGTERM starts the drain and the second escalates, and anything beyond

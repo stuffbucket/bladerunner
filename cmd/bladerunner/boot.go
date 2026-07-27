@@ -59,7 +59,7 @@ func init() {
 	f.BoolVar(&bootFlags.gui, "gui", false, "Force a GUI window (override boot.mode)")
 	f.BoolVar(&bootFlags.headless, "headless", false, "Force headless boot (override boot.mode)")
 	f.BoolVar(&bootFlags.noRestore, "no-restore", false, "Cold-boot even if the slot holds saved guest RAM")
-	f.DurationVar(&bootFlags.timeout, "timeout", config.DefaultTimeout, "Wait timeout for Incus")
+	f.DurationVar(&bootFlags.timeout, "timeout", config.DefaultTimeout, "How long to wait for the guest's Incus API to come up and authorize this client")
 }
 
 // bootTargetKind classifies how a boot argument is to be resolved.

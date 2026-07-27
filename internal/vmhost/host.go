@@ -111,6 +111,16 @@ var ErrNotStarted = errors.New("VM is not started yet")
 // instance's control socket.
 var ErrAlreadyRunning = errors.New("VM is already running (use 'br stop' first)")
 
+// ErrStopRequested is the CAUSE recorded on the run context when the instance
+// is released from inside this process — the control-plane stop, an eject, or
+// an unmount-triggered drain — rather than by the caller's own context.
+//
+// It is never returned to anyone. It exists so a wait that ends early can say
+// which of the two things happened, because "context canceled" alone reads
+// exactly like a boot timeout in a log and is the reason a cut-short boot took
+// a whole VM run to diagnose. See cancelReason.
+var ErrStopRequested = errors.New("stop requested through the control plane")
+
 // errOIDCDisabled signals that the OIDC provider was intentionally skipped
 // (e.g. LocalOIDCPort=0). Callers should treat it as a benign no-op.
 var errOIDCDisabled = errors.New("oidc disabled (LocalOIDCPort=0)")
@@ -418,11 +428,14 @@ func (h *Host) Info() instance.Entry {
 // It must be called on the main thread: GUI mode hands that thread to
 // Virtualization.framework's event loop and never gives it back.
 func (h *Host) Run(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// WithCancelCause, not WithCancel: whoever releases the run records WHY, so
+	// a readiness wait that ends early can name it instead of reporting a bare
+	// "context canceled" that is indistinguishable from its own budget expiring.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 
 	h.mu.Lock()
-	h.cancel = cancel
+	h.cancel = func() { cancel(ErrStopRequested) }
 	h.mu.Unlock()
 
 	h.startedAt = time.Now()
@@ -766,12 +779,46 @@ func (h *Host) block(ctx context.Context) error {
 // reached the Incus-ready state, or an error describing why it didn't. Errors
 // are non-fatal at the call site (partial reports are still useful) but the
 // caller should warn the user rather than pretend everything is fine.
+//
+// The two ways it can fail are reported differently on purpose. A budget that
+// ran out is a boot problem — the guest was too slow, or never came up. A
+// CANCELED wait is not a boot problem at all: something released the run while
+// the guest was still coming up, and the guest may well have been seconds away
+// from ready. Both used to surface as "...: context canceled" under a log line
+// that said "timed out", which is a lie in one direction and unactionable in
+// the other.
 func (h *Host) waitForGuestReady(ctx context.Context) error {
-	if _, err := h.activeRunner().WaitForIncus(ctx); err != nil {
-		logging.L().Error("wait for incus", "error", err)
-		return err
+	_, err := h.activeRunner().WaitForIncus(ctx)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if errors.Is(err, context.Canceled) {
+		reason := cancelReason(context.Cause(ctx))
+		logging.L().Warn("guest readiness wait was canceled before the guest was ready", "reason", reason, "error", err)
+		return fmt.Errorf("boot interrupted (%s): %w", reason, err)
+	}
+	logging.L().Error("wait for incus", "error", err)
+	return err
+}
+
+// cancelReason renders the cause of a released run context in words worth
+// putting in front of a user. It is pure so the mapping is testable without a
+// Host, and it is the whole point of recording a cause: it answers "did we ask
+// for this?" — a control-plane stop, versus something outside the process
+// (a signal, a killed process group, a parent shutting down).
+func cancelReason(cause error) string {
+	switch {
+	case cause == nil:
+		return "cause not recorded"
+	case errors.Is(cause, ErrStopRequested):
+		return ErrStopRequested.Error()
+	case errors.Is(cause, context.Canceled):
+		return "canceled by the caller: a signal, or the parent shutting down"
+	default:
+		// A caller that cancels with a cause of its own (the CLI names the
+		// signal it received) says it better than this package can.
+		return cause.Error()
+	}
 }
 
 // onStopErr routes a teardown failure to the Observer.
