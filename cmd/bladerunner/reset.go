@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
 var resetCmd = &cobra.Command{
@@ -14,6 +13,10 @@ var resetCmd = &cobra.Command{
 	Short: "Reset VM to baseline state",
 	Long: `Reset the Bladerunner VM by removing its disk and cloud-init files, allowing a fresh start.
 This keeps the base image, SSH keys, and client certificates intact.
+
+Reset acts on the instance selected by --instance (or the single running one),
+and refuses to delete the disk of a VM that is still running — stop it first, or
+pass --force.
 
 Use --full to also remove the base image (will be re-downloaded on next start).
 Use --all to remove everything including keys and certificates.`,
@@ -24,16 +27,35 @@ var resetFlags struct {
 	full    bool
 	all     bool
 	confirm bool
+	force   bool
 }
 
 func init() {
 	resetCmd.Flags().BoolVar(&resetFlags.full, "full", false, "Also remove the base image")
 	resetCmd.Flags().BoolVar(&resetFlags.all, "all", false, "Remove everything (complete reset)")
 	resetCmd.Flags().BoolVarP(&resetFlags.confirm, "yes", "y", false, "Skip confirmation prompt")
+	resetCmd.Flags().BoolVarP(&resetFlags.force, "force", "f", false, "Reset even if the VM is running (deletes its disk out from under it)")
 }
 
 func runReset(_ *cobra.Command, _ []string) error {
-	stateDir := config.DefaultStateDir()
+	// Reset deletes an instance's disk, so it must target the same instance
+	// every other verb does — hard-coding the default state dir would silently
+	// wipe the wrong VM on a multi-instance host.
+	target, err := resolveInstanceTarget()
+	if err != nil {
+		return jsonOrError(err)
+	}
+	return resetInstance(target, resetFlags.force)
+}
+
+// resetInstance is runReset with the instance already resolved, so the
+// running-VM guard and the deletion below are exercisable without a live
+// control socket.
+func resetInstance(target resolvedInstance, force bool) error {
+	if err := ensureResetSafe(target, force); err != nil {
+		return jsonOrError(err)
+	}
+	stateDir := target.StateDir
 
 	if _, err := os.Stat(stateDir); os.IsNotExist(err) {
 		if jsonOutput {
@@ -96,6 +118,35 @@ func runReset(_ *cobra.Command, _ []string) error {
 
 	reportResetHuman(outcome, resetFlags.all)
 	return nil
+}
+
+// ensureResetSafe refuses to reset a VM that is still running.
+//
+// The disk file this deletes is the one the VMM has open: unlinking it under a
+// live guest loses everything written since boot and leaves the VM running on
+// an inode nothing can reach. --force is offered because the same situation is
+// also how a wedged instance is recovered, and it follows `br stop --force`:
+// same flag, same shorthand, same "I know, do it anyway" meaning.
+func ensureResetSafe(target resolvedInstance, force bool) error {
+	if !target.Running {
+		return nil
+	}
+	name := resetTargetName(target)
+	if !force {
+		return fmt.Errorf("%q is running; stop it first with 'br stop' (or reset it anyway with 'br reset --force')", name)
+	}
+	if !jsonOutput {
+		fmt.Printf("%s %s is running; resetting anyway (--force)\n", warning("!"), value(name))
+	}
+	return nil
+}
+
+// resetTargetName is how the guard names the instance it is protecting.
+func resetTargetName(target resolvedInstance) string {
+	if name := target.instanceName(); name != "" {
+		return name
+	}
+	return target.StateDir
 }
 
 // resetFileList returns the files to remove for the requested reset level and a
