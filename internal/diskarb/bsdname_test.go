@@ -33,6 +33,12 @@ func TestBSDNameRuleOverEverySpelling(t *testing.T) {
 		{name: "prefix with no unit number", in: "disk", bare: "", unit: "", path: ""},
 		{name: "unrelated device", in: "/dev/null", bare: "", unit: "", path: ""},
 		{name: "mountpoint", in: "/Volumes/bladerunner-demo", bare: "", unit: "", path: ""},
+		// A volume may legally be NAMED after a device. Only DevDir holds
+		// device nodes, so the directory decides, not the last element.
+		{name: "mountpoint named like a device", in: "/Volumes/disk9", bare: "", unit: "", path: ""},
+		{name: "mountpoint named like a raw device", in: "/Volumes/rdisk9s1", bare: "", unit: "", path: ""},
+		{name: "device name nested below dev", in: "/dev/disk/disk4s1", bare: "", unit: "", path: ""},
+		{name: "prefix with no unit number under dev", in: "/dev/diskfoo", bare: "", unit: "", path: ""},
 		{name: "relative path that merely starts with disk", in: "diskimages/demo.dmg", bare: "", unit: "", path: ""},
 		{name: "garbage", in: "not-a-device", bare: "", unit: "", path: ""},
 	}

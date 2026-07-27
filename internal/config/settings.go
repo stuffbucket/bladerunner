@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 // settingsFileName is the persisted user-settings document, stored host-wide
@@ -14,6 +17,11 @@ import (
 // user-settable subset of configuration; derived paths, ports, secrets, and
 // resolved runtime values live on Config and are never persisted here.
 const settingsFileName = "settings.json"
+
+// settingsFilePerm is the mode settings.json is published with. It is the mode
+// os.CreateTemp gave the staging file that Save used to rename into place, so
+// an upgraded installation keeps the file it already has.
+const settingsFilePerm fs.FileMode = 0o600
 
 // settingsSchemaVersion is bumped when the on-disk shape changes incompatibly.
 // Load tolerates an absent/zero version (treated as v1) so first run and older
@@ -279,9 +287,11 @@ func LoadSettings(stateDir string) (Settings, error) {
 	return s, nil
 }
 
-// Save validates and atomically writes the settings to the given state dir
-// (temp file + rename) so a concurrent reader never observes a partial write
-// and a crashed writer never corrupts the document.
+// Save validates and atomically writes the settings to the given state dir, so
+// a concurrent reader never observes a partial write and a crashed writer never
+// corrupts the document. util.WriteFileAtomic owns the temp-file-and-rename
+// rule, including the parent-directory fsync a hand-rolled copy omits — without
+// it the rename itself can be lost after a host crash.
 func (s Settings) Save(stateDir string) error {
 	if err := s.Validate(); err != nil {
 		return fmt.Errorf("refusing to save invalid settings: %w", err)
@@ -299,27 +309,8 @@ func (s Settings) Save(stateDir string) error {
 	}
 	b = append(b, '\n')
 
-	path := SettingsPath(stateDir)
-	tmp, err := os.CreateTemp(stateDir, settingsFileName+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp settings: %w", err)
-	}
-	tmpName := tmp.Name()
-	// Best-effort cleanup if we bail before the rename succeeds.
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp settings: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync temp settings: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp settings: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename settings into place: %w", err)
+	if err := util.WriteFileAtomic(SettingsPath(stateDir), b, settingsFilePerm); err != nil {
+		return fmt.Errorf("write settings: %w", err)
 	}
 	return nil
 }
