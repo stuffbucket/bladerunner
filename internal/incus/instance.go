@@ -55,11 +55,6 @@ func ConnectFromFiles(endpoint, certPath, keyPath string) (*Client, error) {
 	return Connect(ClientConfig{Endpoint: endpoint, CertPEM: certPEM, KeyPEM: keyPEM})
 }
 
-// Server exposes the underlying InstanceServer for callers needing custom calls.
-func (c *Client) Server() incusclient.InstanceServer {
-	return c.server
-}
-
 // ListInstances returns all instances (containers and VMs) with full state info.
 // The Incus SDK does not currently expose a context-aware variant, so ctx is only
 // consulted before issuing the request.

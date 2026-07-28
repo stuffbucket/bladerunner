@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -52,16 +51,6 @@ func NewClientWithConfig(cfg ClientConfig) *Client {
 // Deprecated: Use Transport interface instead.
 type Dialer interface {
 	Dial(network, address string, timeout time.Duration) (net.Conn, error)
-}
-
-// NetDialer is the default Dialer using net.DialTimeout.
-//
-// Deprecated: Use Transport interface instead.
-type NetDialer struct{}
-
-// Dial implements Dialer using net.DialTimeout.
-func (NetDialer) Dial(network, address string, timeout time.Duration) (net.Conn, error) {
-	return net.DialTimeout(network, address, timeout)
 }
 
 // NewClientWithDialer creates a client with a custom dialer for testing.
@@ -259,22 +248,4 @@ func (c *Client) SetConfig(key, value string) error {
 		return fmt.Errorf("config error: %s", resp.Error)
 	}
 	return nil
-}
-
-// GetConfigKeys retrieves a list of all available config keys.
-func (c *Client) GetConfigKeys() ([]string, error) {
-	resp, err := c.sendCommand(CmdConfigKeys, clientCmdTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("get config keys: %w", err)
-	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("config error: %s", resp.Error)
-	}
-	keys := strings.Fields(resp.Response)
-	return keys, nil
-}
-
-// Send sends an arbitrary command and returns the response.
-func (c *Client) Send(cmd string) (*Message, error) {
-	return c.sendCommand(cmd, clientCmdTimeout)
 }

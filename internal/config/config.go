@@ -79,8 +79,7 @@ const (
 	archAMD64 = "amd64"
 
 	// Validation constraints
-	MinDiskSizeGiB     = 16
-	DefaultStopTimeout = 30 // seconds
+	MinDiskSizeGiB = 16
 
 	// XDG directory structure
 	xdgLocalDir     = ".local"
