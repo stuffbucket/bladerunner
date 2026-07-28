@@ -5,10 +5,13 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -556,4 +559,98 @@ func TestConcurrentWriteDistinctNames(t *testing.T) {
 // nameForIndex builds a registry-legal name from a loop index.
 func nameForIndex(i int) string {
 	return "inst-" + strings.Repeat("x", i%4) + string(rune('a'+i))
+}
+
+// liveGroupSeconds is how long the process-group helper below is asked to live.
+// The test kills it in a cleanup; the duration only has to outlast the probes.
+const liveGroupSeconds = 60
+
+// liveProcessGroup starts a child in a process group of its own and returns
+// that group's id, which equals the child's PID. It is a group the test is
+// certainly permitted to signal, so kill(-gid, 0) succeeds — exactly the case
+// an unguarded liveness probe misreads as a live process.
+//
+// The test process's OWN group is not usable for this: under a container init
+// the test can be process 1 in group 1, and -1 is a value Go's os package
+// rejects before kill(2) ever sees it.
+func liveProcessGroup(t *testing.T) int {
+	t.Helper()
+	child := exec.Command("sleep", strconv.Itoa(liveGroupSeconds))
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := child.Start(); err != nil {
+		t.Fatalf("start process-group helper: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+	return child.Process.Pid
+}
+
+// A PID is a process, never a process group. kill(2) reads a negative argument
+// as a process GROUP id: kill(-N, 0) succeeds whenever group N exists and the
+// caller may signal it, so an unguarded signal-0 probe reports "alive" for a
+// PID the registry could never have meant.
+//
+// Go's own os package rejects exactly two of these values — (*Process).Signal
+// returns "process already released" for -1 and "process not initialized" for
+// 0 — so those two read as dead with or without our guard. Everything at -2 and
+// below reaches kill(2) unfiltered, which is why the guard has to be ours.
+//
+// A record misjudged as alive is unreapable: livenessWith returns ProcessOnly
+// and Prune removes only Dead entries, so the entry is stranded forever.
+func TestProcessAliveRejectsNonPositivePIDs(t *testing.T) {
+	// spawnedDead is a PID that was real and has been reaped.
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run true: %v", err)
+	}
+	spawnedDead := cmd.Process.Pid
+
+	group := liveProcessGroup(t)
+
+	tests := []struct {
+		name string
+		pid  int
+		want bool
+	}{
+		{"a live process group, negated", -group, false},
+		{"minus two is a process group, not a process", -2, false},
+		{"minus one is every signalable process", -1, false},
+		{"zero is the caller's own process group", 0, false},
+		{"the leader of that group, as a process", group, true},
+		{"pid one always exists", 1, true},
+		{"the test process itself", os.Getpid(), true},
+		{"a pid above pid_max cannot exist", deadPID, false},
+		{"a reaped child", spawnedDead, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProcessAlive(tt.pid); got != tt.want {
+				t.Errorf("ProcessAlive(%d) = %v, want %v", tt.pid, got, tt.want)
+			}
+		})
+	}
+}
+
+// The consequence, stated as the caller sees it: a record whose PID is not a
+// process must be Dead, so Prune can reap it.
+func TestEntryWithAGroupPIDIsDeadAndPrunable(t *testing.T) {
+	dir := t.TempDir()
+	e := sampleEntry("stranded")
+	e.PID = -liveProcessGroup(t)
+	e.StateDir = t.TempDir() // no control socket in it
+	if err := Write(dir, e); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := LivenessOf(e); got != Dead {
+		t.Fatalf("LivenessOf(entry whose pid is a process group) = %v, want %v", got, Dead)
+	}
+	removed, err := Prune(dir)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if !slices.Contains(removed, "stranded") {
+		t.Errorf("Prune removed %v, want it to contain %q", removed, "stranded")
+	}
 }
