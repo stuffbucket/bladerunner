@@ -31,11 +31,13 @@ var watchCmd = &cobra.Command{
 	Short: "Notice cartridges being inserted and offer to boot them",
 	Long: `Watch for bladerunner cartridges being mounted and offer to boot each one.
 
-A cartridge is a single .dmg holding one whole VM. AirDrop one to this Mac (or
-double-click it) and macOS mounts it; this command notices the mount, checks
-that the volume really is a bootable cartridge, and asks whether to boot it. On
-accept the read-only view is unmounted and a holder process is started with the
-image file itself, so the shipped artifact stays pristine.
+A cartridge is a single file holding one whole VM, built by 'br disk pack': the
+runnable .sparseimage, or the compressed .dmg that --ship produces for AirDrop.
+AirDrop one to this Mac (or double-click it) and macOS mounts it; this command
+notices the mount, checks that the volume really is a bootable cartridge, and
+asks whether to boot it. On accept the read-only view is unmounted and a holder
+process is started with the image file itself, so the shipped artifact stays
+pristine.
 
 Volumes already held by a running instance are ignored — a booted cartridge's
 own mount looks exactly like a fresh insertion — and a cartridge that cannot be

@@ -2,9 +2,12 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/disk"
 )
 
 func TestClassifyBootArg(t *testing.T) {
@@ -94,5 +97,57 @@ func TestSizingPrecedence(t *testing.T) {
 	}
 	if pickMemoryGiB(0, 0) != config.DefaultMemoryGiB || pickMemoryGiB(0, 16) != 16 || pickMemoryGiB(32, 16) != 32 {
 		t.Fatal("pickMemoryGiB precedence wrong")
+	}
+}
+
+// A mistyped cartridge PATH used to be answered with the disk catalog: the
+// cartridge branch of classifyBootArg requires the file to exist, so
+// "./typo.dmg" fell through to the catalog lookup and the user who had passed a
+// path was told to consult a shelf of names ("unknown disk \"./typo.dmg\";
+// available disks: ..."). The extension says what was meant, so say that.
+func TestResolveBootManifestNamesAMissingCartridgePath(t *testing.T) {
+	cat := &disk.Catalog{}
+	for _, arg := range []string{"./typo" + cartridge.DMGExt, "/tmp/missing" + cartridge.SparseExt} {
+		_, err := resolveBootManifest(bootTarget{kind: bootTargetName, arg: arg}, cat)
+		if err == nil {
+			t.Fatalf("resolveBootManifest(%q) succeeded, want a not-found error", arg)
+		}
+		if strings.Contains(err.Error(), "available disks") || strings.Contains(err.Error(), "no disks available") {
+			t.Errorf("a missing cartridge path was answered with the disk catalog: %v", err)
+		}
+		for _, want := range []string{arg, "cartridge", "br disk pack"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	}
+
+	// A plain mistyped NAME still gets the catalog, which is the right answer
+	// for it.
+	_, err := resolveBootManifest(bootTarget{kind: bootTargetName, arg: "incuss"}, cat)
+	if err == nil || !strings.Contains(err.Error(), "disks") {
+		t.Errorf("a mistyped catalog name should still be answered with the catalog: %v", err)
+	}
+}
+
+// `br boot demo.dmg` is the flagship gesture (scripts/smoke-cartridge.sh boots
+// a cartridge by path) and appeared nowhere in `br boot --help`, which
+// documented resolution as URL / .disk / catalog name only.
+func TestBootHelpDocumentsCartridges(t *testing.T) {
+	for _, want := range []string{"cartridge", cartridge.SparseExt, cartridge.DMGExt, "br disk pack"} {
+		if !strings.Contains(bootCmd.Long, want) {
+			t.Errorf("'br boot --help' does not mention %q", want)
+		}
+	}
+}
+
+// 'br watch' called a cartridge "a single .dmg" while 'br disk pack' writes a
+// .sparseimage — the inconsistency that steers a user into '--out demo.dmg'.
+// Both forms are named wherever a cartridge is described.
+func TestWatchHelpNamesBothCartridgeForms(t *testing.T) {
+	for _, want := range []string{cartridge.SparseExt, cartridge.DMGExt} {
+		if !strings.Contains(watchCmd.Long, want) {
+			t.Errorf("'br watch --help' does not mention %q", want)
+		}
 	}
 }
