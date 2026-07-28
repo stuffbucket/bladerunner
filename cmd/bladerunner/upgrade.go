@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 )
 
@@ -26,7 +25,10 @@ This becomes the new long-lived server (foreground), like 'br start'.`,
 }
 
 func runUpgrade(cmd *cobra.Command, args []string) error {
-	stateDir := config.DefaultStateDir()
+	stateDir, err := requireDefaultInstance("upgrade")
+	if err != nil {
+		return jsonOrError(err)
+	}
 	client := control.NewClient(stateDir)
 	if !client.IsRunning() {
 		return jsonOrError(fmt.Errorf("no running server to upgrade (use 'br start')"))

@@ -14,7 +14,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
-	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 )
@@ -24,33 +23,43 @@ import (
 // and was not started. The underlying socket error is logged at debug level.
 var errVMNotRunning = errors.New("VM is not running; start it with 'br start'")
 
+// notRunningError reports that the instance a verb targets is not running.
+func notRunningError(target resolvedInstance) error {
+	if target.isDefaultSlot() {
+		return errVMNotRunning
+	}
+	return fmt.Errorf("instance %q is not running", target.instanceName())
+}
+
 // vmStartReadyTimeout bounds how long requireRunningVM waits for an auto-started
 // VM to publish its readiness signal.
 const vmStartReadyTimeout = 3 * time.Minute
 
-// requireRunningVM returns a control client for a running VM. If the VM is not
-// running it offers to start it when attached to an interactive terminal;
-// otherwise (or if the user declines) it returns errVMNotRunning. The raw
-// control-socket dial failure is logged, never printed, so the terminal stays
-// clean. Commands that need the VM (all except `status`) should funnel through
-// this rather than touching the control client directly.
-func requireRunningVM() (*control.Client, error) {
-	stateDir := config.DefaultStateDir()
-	client := control.NewClient(stateDir)
+// requireRunningVM returns a control client for the instance a verb resolved.
+//
+// When that instance is not running and it is the flat default, it offers to
+// start it on an interactive terminal; otherwise (or if the user declines) it
+// returns notRunningError. Every other instance — a disk slot, a cartridge — is
+// never auto-started, because bringing one back needs its own source and
+// 'br boot' owns that. The raw control-socket dial failure is logged, never
+// printed, so the terminal stays clean.
+//
+// Commands that need a VM funnel through requireRunningTarget, which resolves
+// --instance and then calls this, rather than touching the control client
+// directly.
+func requireRunningVM(target resolvedInstance) (*control.Client, error) {
+	client := control.NewClient(target.StateDir)
 	if client.IsRunning() {
 		return client, nil
 	}
 	// Log the detail for `BLADERUNNER_LOG_LEVEL=debug`; keep it off the terminal.
 	logging.L().Debug("VM control socket unreachable; VM not running",
-		"socket", control.SocketPath(stateDir))
+		"instance", target.instanceName(), "socket", control.SocketPath(target.StateDir))
 
-	if !interactiveTerminal() {
-		return nil, errVMNotRunning
+	if !target.isDefaultSlot() || !interactiveTerminal() || !confirmStartVM() {
+		return nil, notRunningError(target)
 	}
-	if !confirmStartVM() {
-		return nil, errVMNotRunning
-	}
-	if err := startVMDetachedAndWait(stateDir); err != nil {
+	if err := startVMDetachedAndWait(target.StateDir); err != nil {
 		return nil, err
 	}
 	return client, nil

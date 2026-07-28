@@ -98,7 +98,7 @@ func init() {
 // trusted to silence the "not private" warning. Falls back to the Incus API
 // port when the proxy port isn't published (older engine).
 func webHostPort() (string, error) {
-	client, err := requireRunningVM()
+	client, target, err := requireRunningTarget()
 	if err != nil {
 		return "", err
 	}
@@ -108,7 +108,7 @@ func webHostPort() (string, error) {
 	port, err := client.GetConfig(control.ConfigKeyLocalAPIPort)
 	if err != nil || port == "" {
 		logging.L().Debug("get local-api-port failed", "err", err)
-		return "", errVMNotRunning
+		return "", notRunningError(target)
 	}
 	return "127.0.0.1:" + port, nil
 }
@@ -178,7 +178,7 @@ func runWebUntrust(_ *cobra.Command, _ []string) error {
 // OIDC redirect itself so the browser lands authenticated without the user
 // having to click "Login with SSO" on the Incus login page.
 func webEndpoints() (providerBase, incusUI, incusLogin, keyPath string, err error) {
-	client, err := requireRunningVM()
+	client, target, err := requireRunningTarget()
 	if err != nil {
 		return "", "", "", "", err
 	}
@@ -186,7 +186,7 @@ func webEndpoints() (providerBase, incusUI, incusLogin, keyPath string, err erro
 	oidcPort, err := client.GetConfig(control.ConfigKeyLocalOIDCPort)
 	if err != nil {
 		logging.L().Debug("get local-oidc-port failed", "err", err)
-		return "", "", "", "", errVMNotRunning
+		return "", "", "", "", notRunningError(target)
 	}
 	if oidcPort == "" || oidcPort == "0" {
 		return "", "", "", "", errors.New("the local OIDC provider is disabled (LocalOIDCPort=0); web SSO is unavailable")
@@ -194,7 +194,7 @@ func webEndpoints() (providerBase, incusUI, incusLogin, keyPath string, err erro
 	apiPort, err := client.GetConfig(control.ConfigKeyLocalAPIPort)
 	if err != nil {
 		logging.L().Debug("get local-api-port failed", "err", err)
-		return "", "", "", "", errVMNotRunning
+		return "", "", "", "", notRunningError(target)
 	}
 	// The browser talks to the host web proxy (which strips Incus's TLS
 	// client-cert request, so there's no certificate picker), not Incus directly.
