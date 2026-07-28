@@ -73,6 +73,13 @@ type resolvedInstance struct {
 	StartedAt  time.Time
 	Version    string
 
+	// Protection is what the holder recorded about this instance's
+	// DiskArbitration unmount veto. It is only meaningful for a cartridge, and
+	// only a registry entry carries it: an instance resolved from the legacy
+	// directory layout has no record, which reads as
+	// instance.ProtectionUnrecorded rather than as "protected".
+	Protection instance.Protection
+
 	// Running records that the control socket answered when the instance was
 	// discovered. It is always true for an implicitly resolved instance.
 	Running bool
@@ -391,6 +398,7 @@ func fromEntry(e instance.Entry) resolvedInstance {
 		Ports:      e.Ports,
 		StartedAt:  e.StartedAt,
 		Version:    e.BinaryVersion,
+		Protection: e.UnmountProtection,
 	}
 }
 
@@ -508,6 +516,11 @@ type instanceListing struct {
 	SourcePath string         `json:"source_path,omitempty"`
 	Mountpoint string         `json:"mountpoint,omitempty"`
 	Version    string         `json:"binary_version,omitempty"`
+
+	// UnmountProtection says whether ejecting this cartridge spins the guest
+	// down in an orderly way, and when it does not, why. It is nil — and so
+	// absent from the JSON — for an instance with no cartridge to protect.
+	UnmountProtection *unmountProtectionReport `json:"unmount_protection,omitempty"`
 }
 
 func runInstances(_ *cobra.Command, _ []string) error {
@@ -537,15 +550,16 @@ func (s instanceScanner) listings(running []resolvedInstance) []instanceListing 
 			ports = s.ports(r.StateDir)
 		}
 		l := instanceListing{
-			Name:       r.Name,
-			Kind:       string(r.Kind),
-			StateDir:   r.StateDir,
-			Running:    r.Running,
-			PID:        r.PID,
-			Ports:      ports,
-			SourcePath: r.SourcePath,
-			Mountpoint: r.Mountpoint,
-			Version:    r.Version,
+			Name:              r.Name,
+			Kind:              string(r.Kind),
+			StateDir:          r.StateDir,
+			Running:           r.Running,
+			PID:               r.PID,
+			Ports:             ports,
+			SourcePath:        r.SourcePath,
+			Mountpoint:        r.Mountpoint,
+			Version:           r.Version,
+			UnmountProtection: protectionReportFor(r.Kind, r.Protection),
 		}
 		if !r.StartedAt.IsZero() {
 			l.StartedAt = r.StartedAt.Format(time.RFC3339)
@@ -557,27 +571,36 @@ func (s instanceScanner) listings(running []resolvedInstance) []instanceListing 
 }
 
 // renderInstanceListings writes the human table for `br instances`.
+//
+// The EJECT column is the one piece of state that is not merely descriptive:
+// it says whether pulling this cartridge out in Finder shuts the guest down
+// first. It stays a single word so the table survives, and the reason a
+// cartridge is not protected goes underneath it — see writeProtectionNotes.
 func renderInstanceListings(out io.Writer, listings []instanceListing) error {
 	if len(listings) == 0 {
 		fmt.Fprintln(out, subtle("No VM instances are running. Start one with 'br start'."))
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tKIND\tSSH\tAPI\tUPTIME\tPID\tSTATE DIR\tSOURCE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tKIND\tSSH\tAPI\tUPTIME\tPID\tEJECT\tSTATE DIR\tSOURCE"); err != nil {
 		return err
 	}
 	for i := range listings {
 		l := &listings[i]
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			l.Name, l.Kind,
 			portCell(l.Ports.SSH), portCell(l.Ports.API),
 			emptyCell(l.Uptime), emptyCell(pidCell(l.PID)),
+			protectionCell(l.UnmountProtection),
 			l.StateDir, emptyCell(l.SourcePath),
 		); err != nil {
 			return err
 		}
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeProtectionNotes(out, listings)
 }
 
 // missingCell is what a table cell shows when the value is unknown (an instance

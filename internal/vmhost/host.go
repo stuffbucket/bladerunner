@@ -287,9 +287,11 @@ type Host struct {
 	// non-cartridge instance, a platform without DiskArbitration, or a failed
 	// registration (which is warned about, never fatal).
 	unmountCancel func() error
-	// unprotected records why this instance is running WITHOUT the unmount
-	// veto, or UnprotectedNone when it is armed. Guarded by mu: it is written
-	// on the goroutine driving Run and read by whoever reports instance state.
+	// unprotected records whether this instance's cartridge is covered by the
+	// unmount veto, and when it is not, why — UnprotectedNone when it is armed,
+	// UnprotectedNotRecorded when nothing decided (a non-cartridge instance).
+	// Guarded by mu: it is written on the goroutine driving Run and read by
+	// whoever reports instance state.
 	unprotected UnprotectedReason
 
 	// drainOnce guarantees that however many unmount-approval callbacks fire —
@@ -396,13 +398,14 @@ func (h *Host) instanceName() string {
 // safe to call at any point; fields that are not known yet are zero.
 func (h *Host) Info() instance.Entry {
 	e := instance.Entry{
-		Name:            h.instanceName(),
-		Kind:            h.spec.Kind,
-		SourcePath:      h.spec.CartridgePath,
-		PID:             os.Getpid(),
-		ProtocolVersion: control.ProtocolVersion,
-		BinaryVersion:   h.spec.BinaryVersion,
-		StartedAt:       h.startedAt,
+		Name:              h.instanceName(),
+		Kind:              h.spec.Kind,
+		SourcePath:        h.spec.CartridgePath,
+		PID:               os.Getpid(),
+		ProtocolVersion:   control.ProtocolVersion,
+		BinaryVersion:     h.spec.BinaryVersion,
+		StartedAt:         h.startedAt,
+		UnmountProtection: h.UnmountProtection(),
 	}
 	if h.cfg != nil {
 		e.StateDir = h.cfg.VMDir
@@ -503,7 +506,7 @@ func (h *Host) drain(ctx context.Context, timeout time.Duration, force bool) err
 const unmountDenyReason = bootstage.DetailUnmountRequested
 
 // UnprotectedReason says why a cartridge instance is running WITHOUT the
-// DiskArbitration unmount veto.
+// DiskArbitration unmount veto, or that it is armed.
 //
 // The veto fails OPEN on purpose — a safety net that cannot be registered must
 // never stop the VM from starting — which is exactly why the outcome has to be
@@ -513,43 +516,57 @@ const unmountDenyReason = bootstage.DetailUnmountRequested
 // A value here is the difference between "protected" and "unprotected, for this
 // stated reason", and it is what lets `br instances` / `br status` say so.
 //
-// The value doubles as the human-readable clause in the warning, so the log
-// line and anything a front end renders cannot drift apart.
-type UnprotectedReason string
+// It is an ALIAS of instance.Protection, not a second vocabulary. The value is
+// published in this instance's registry entry (Info sets
+// instance.Entry.UnmountProtection), which is how it reaches a CLI running in
+// another process, and the registry record's format is owned by
+// internal/instance. Its Reason method supplies the human clause the warning
+// below prints, so the log line and anything a front end renders cannot drift.
+type UnprotectedReason = instance.Protection
 
-// The reasons the veto can be off. Each corresponds to exactly one bail-out in
-// startUnmountWatch; every one of them returns nil, so the only way to observe
-// which fired is this value.
+// The outcomes the veto can have. Each of the failures corresponds to exactly
+// one bail-out in startUnmountWatch; every one of them returns nil, so the only
+// way to observe which fired is this value.
+//
+// These names are kept as the vmhost spelling of the instance.Protection
+// constants: this package is where each one is DECIDED, and a reader of
+// startUnmountWatch should not have to change packages to see what it can
+// record.
 const (
-	// UnprotectedNone means the veto is armed — or that there is nothing to
-	// protect, because the instance boots no cartridge. It is the zero value.
-	UnprotectedNone UnprotectedReason = ""
+	// UnprotectedNone means the veto is armed. Note that it is NOT the zero
+	// value: an instance whose outcome was never recorded — a non-cartridge
+	// instance, or one started by a build that predates the record — is
+	// instance.ProtectionUnrecorded, and reporting that as "protected" is the
+	// lie this value exists to prevent.
+	UnprotectedNone = instance.ProtectionArmed
+	// UnprotectedNotRecorded is the zero value: nothing decided an outcome,
+	// because there is nothing to protect.
+	UnprotectedNotRecorded = instance.ProtectionUnrecorded
 	// UnprotectedNoCartridge means the cartridge step produced no open mount,
 	// so there is no device to watch on an instance that expected one.
-	UnprotectedNoCartridge UnprotectedReason = "no cartridge attached"
+	UnprotectedNoCartridge = instance.ProtectionNoCartridge
 	// UnprotectedNoDevNode means the mount recorded no device node.
-	UnprotectedNoDevNode UnprotectedReason = "no cartridge device node"
+	UnprotectedNoDevNode = instance.ProtectionNoDevNode
 	// UnprotectedUnreadableDevNode means the recorded device node does not name
 	// a BSD disk, so no filter can be derived from it. Registering the empty
 	// filter instead would arm the veto over every disk on the machine.
-	UnprotectedUnreadableDevNode UnprotectedReason = "cartridge device node is not a BSD disk"
+	UnprotectedUnreadableDevNode = instance.ProtectionUnreadableDevNode
 	// UnprotectedNoSession means the DiskArbitration session could not be
 	// opened.
-	UnprotectedNoSession UnprotectedReason = "DiskArbitration unavailable"
+	UnprotectedNoSession = instance.ProtectionNoSession
 	// UnprotectedWatchFailed means the session was opened but the approval
 	// watcher could not be registered on it.
-	UnprotectedWatchFailed UnprotectedReason = "could not watch unmount approval"
+	UnprotectedWatchFailed = instance.ProtectionWatchFailed
 	// UnprotectedUnsupported means the platform has no DiskArbitration at all.
-	UnprotectedUnsupported UnprotectedReason = "unmount protection is macOS-only"
+	UnprotectedUnsupported = instance.ProtectionUnsupported
 )
 
-// UnmountProtection reports why this instance's cartridge is not protected
-// against an unmount, or UnprotectedNone when the veto is armed (or when there
-// is nothing to protect). It is safe from any goroutine.
+// UnmountProtection reports whether this instance's cartridge is protected
+// against an unmount, and when it is not, why. It is safe from any goroutine.
 //
-// It is exported for the front end that has to tell a user their cartridge can
-// be pulled out from under a running guest; a dead-code sweep that finds no
-// caller yet should leave it alone.
+// It is what Info publishes into the registry entry, so `br instances` and
+// `br status` can tell a user their cartridge can be pulled out from under a
+// running guest.
 func (h *Host) UnmountProtection() UnprotectedReason {
 	h.mu.Lock()
 	defer h.mu.Unlock()
