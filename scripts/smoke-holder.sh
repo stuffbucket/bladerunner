@@ -2,12 +2,23 @@
 # Live end-to-end smoke test for GOAL 1 of the cartridge runtime: the holder
 # process owns the VM and OUTLIVES whatever spawned it.
 #
+# Phase 1 — the holder itself:
 #   spawn a holder (detached, via a throwaway spawner process)
 #     -> assert it registered itself and answers on its control socket
 #     -> SIGKILL the SPAWNER
 #     -> assert the VM is still running, still reachable, still registered
 #     -> drain it cleanly
 #     -> assert the registry entry is retracted
+#
+# Phase 2 — the ORDINARY path:
+#   run `br start --state-dir <slot>` in the foreground
+#     -> assert it RETURNS (it used to block for the life of the VM)
+#     -> assert the VM is still running once that process is gone
+#     -> drain it cleanly
+#
+# Phase 2 is what goal 1 promised and what only `br watch` used to deliver: the
+# CLI is no longer the VM. Phase 1 reuses the slot, so phase 2 boots from an
+# already-downloaded image.
 #
 # The SIGKILL is the point of the whole script. A holder that dies with its
 # parent is the failure mode this refactor exists to remove, and it is invisible
@@ -43,6 +54,7 @@ SLOT="$STATE_ROOT/disks/$NAME"        # the holder's --state-dir; kept between r
 REGISTRY="$STATE_ROOT/instances/$NAME.json"
 SOCKET="$SLOT/control.sock"
 HOLDER_LOG="$WORK/holder.log"
+START_LOG="$WORK/start.log"
 PIDFILE="$WORK/holder.pid"
 SPAWNER="$WORK/spawner.sh"
 
@@ -193,5 +205,43 @@ ok "registry entry retracted"
 ok "control socket removed"
 listed && fail "'br instances' still lists $NAME after the drain"
 ok "'br instances' no longer lists it"
+
+# --- phase 2: the ordinary path ------------------------------------------
+#
+# Everything above proves `br vmd` survives its spawner. That was already true.
+# What follows proves the thing goal 1 actually promised: that `br start` — the
+# verb a person types — leaves a VM behind when it exits.
+
+note "PHASE 2: 'br start' must return, leaving the VM running"
+# Foreground, and it BLOCKS until the guest is ready: that is the preserved UX.
+# What is new is that it comes back at all.
+if ! "$BIN" start --state-dir "$SLOT" --timeout "${READY_TIMEOUT}s" >"$START_LOG" 2>&1; then
+  sed 's/^/      /' "$START_LOG" >&2
+  fail "'br start' failed — see $START_LOG"
+fi
+ok "'br start' returned (it used to block for the life of the VM)"
+
+# The CLI process is gone by definition — the command above completed — so the
+# only thing that can still be holding the VM is the holder.
+[[ -e "$REGISTRY" ]] || fail "no registry entry at $REGISTRY after 'br start' returned"
+HOLDER_PID="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$REGISTRY" | head -1)"
+[[ -n "$HOLDER_PID" ]] || fail "registry entry names no holder pid: $REGISTRY"
+[[ "$HOLDER_PID" != "$$" ]] || fail "the holder pid is this script — 'br start' did not detach the VM"
+alive "$HOLDER_PID" || fail "THE VM DIED WITH THE CLI — this is goal 1 unfulfilled on the ordinary path"
+ok "holder pid $HOLDER_PID still owns the VM"
+listed || fail "the instance does not answer on its control socket after 'br start' returned"
+ok "the VM still answers on its control socket"
+"$BIN" shell --instance "$NAME" -- true >/dev/null 2>&1 \
+  || fail "the guest is not reachable although 'br start' reported it ready"
+ok "the guest is reachable with no CLI process anywhere"
+
+note "Draining the VM 'br start' left behind"
+"$BIN" stop --instance "$NAME" --timeout "$DRAIN_TIMEOUT" || fail "'br stop --instance $NAME' failed"
+for _ in $(seq 1 30); do alive "$HOLDER_PID" || break; sleep 2; done
+alive "$HOLDER_PID" && fail "holder still running after a clean stop"
+HOLDER_PID=""
+ok "holder exited"
+[[ -e "$REGISTRY" ]] && fail "registry entry survived the drain: $REGISTRY"
+ok "registry entry retracted"
 
 PASS=1

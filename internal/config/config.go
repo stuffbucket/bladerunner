@@ -514,11 +514,11 @@ const (
 // A zero OIDC or NTP port means that service is disabled (the existing
 // convention); a zero SSH or API port is invalid and is rejected by Validate.
 type PortAssignment struct {
-	SSH  int
-	API  int
-	Web  int
-	OIDC int
-	NTP  int
+	SSH  int `json:"ssh,omitempty"`
+	API  int `json:"api,omitempty"`
+	Web  int `json:"web,omitempty"`
+	OIDC int `json:"oidc,omitempty"`
+	NTP  int `json:"ntp,omitempty"`
 }
 
 // DefaultPortAssignment returns the well-known ports the flat default instance
@@ -614,6 +614,14 @@ func LoopbackAddr(port int) string {
 	return fmt.Sprintf("%s:%d", LoopbackHost, port)
 }
 
+// APIEndpoint is the URL the guest's Incus API is reachable at on this host.
+// It is derived in exactly one place so the runner that publishes it and a
+// process that only has the reserved port number cannot disagree about the
+// scheme or the host.
+func APIEndpoint(port int) string {
+	return "https://" + LoopbackAddr(port)
+}
+
 // InstanceName returns the name this instance is known by: the flat default
 // instance (whose state lives directly in the default state dir) is
 // DefaultInstanceName; every other instance is named after its own state
@@ -624,6 +632,13 @@ func (c *Config) InstanceName() string {
 	if dir == "" {
 		dir = c.StateDir
 	}
+	return InstanceNameFor(dir)
+}
+
+// InstanceNameFor is InstanceName for a bare directory, so a process that has
+// resolved no Config — a front end watching an instance another process
+// started — derives the same registry key rather than a second rule for it.
+func InstanceNameFor(dir string) string {
 	if dir == "" || filepath.Clean(dir) == filepath.Clean(DefaultStateDir()) {
 		return DefaultInstanceName
 	}

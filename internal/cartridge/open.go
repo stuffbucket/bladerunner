@@ -415,6 +415,17 @@ func (o *Opened) WritesBack() bool {
 	return o != nil && o.persist && o.WorkingCopy != ""
 }
 
+// WritesBack answers the same question for an image that has not been opened
+// yet: will booting THIS path with persist set write anything back?
+//
+// A front end needs it because the boot it is announcing may be run by another
+// process — a holder opens the cartridge itself — so there is no *Opened to
+// ask. The two agree by construction: a working copy exists exactly when the
+// source is a shipped .dmg, which is the test materialize makes.
+func WritesBack(path string, persist bool) bool {
+	return persist && filepath.Ext(path) == DMGExt
+}
+
 // --- the boot claim -------------------------------------------------------
 //
 // One cartridge image must be booted by at most one process at a time, and

@@ -1,12 +1,16 @@
 package vmhost
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
@@ -83,9 +87,33 @@ func TestSpecValidate(t *testing.T) {
 			wantErr: "needs a cartridge path",
 		},
 		{
-			name:    "cartridge without mountpoint",
-			spec:    func() Spec { s := cartridgeSpec(); s.Mountpoint = ""; return s },
+			name: "browsable cartridge without mountpoint",
+			spec: func() Spec { s := cartridgeSpec(); s.Mountpoint = ""; return s },
+		},
+		{
+			name: "private cartridge without mountpoint",
+			spec: func() Spec {
+				s := cartridgeSpec()
+				s.Mountpoint = ""
+				s.MountPolicy = cartridge.MountPrivate
+				return s
+			},
 			wantErr: "needs a mountpoint",
+		},
+		{
+			name:    "unknown mount policy",
+			spec:    func() Spec { s := cartridgeSpec(); s.MountPolicy = "floppy"; return s },
+			wantErr: "unknown mount policy",
+		},
+		{
+			name:    "mount policy without cartridge kind",
+			spec:    func() Spec { s := flatSpec(); s.MountPolicy = cartridge.MountPrivate; return s },
+			wantErr: "mount policy",
+		},
+		{
+			name:    "persist without cartridge kind",
+			spec:    func() Spec { s := flatSpec(); s.Persist = true; return s },
+			wantErr: "persist",
 		},
 		{
 			name:    "cartridge cannot restore",
@@ -616,5 +644,72 @@ func TestApplyOverridesNeverLeavesAZeroBudget(t *testing.T) {
 
 	if cfg.WaitForIncus != config.DefaultTimeout {
 		t.Errorf("WaitForIncus = %v, want the package default %v", cfg.WaitForIncus, config.DefaultTimeout)
+	}
+}
+
+// --- the cartridge options a holder is handed ------------------------------
+
+// A cartridge Spec must reach cartridge.Open with the same options the CLI was
+// asked for. Until the holder ran the ordinary boot path these two fields were
+// carried on the already-open *cartridge.Opened and never crossed a process
+// boundary, so `br boot <dmg> --persist --private-mount` silently lost both.
+func TestSpecCartridgeOpenOptions(t *testing.T) {
+	s := cartridgeSpec()
+	s.Name = "demo"
+	s.Persist = true
+	s.MountPolicy = cartridge.MountPrivate
+
+	got := s.cartridgeOpenOptions()
+	want := cartridge.OpenOptions{
+		Mountpoint: "/state/mnt/demo",
+		Name:       "demo",
+		Policy:     cartridge.MountPrivate,
+		Persist:    true,
+	}
+	if got != want {
+		t.Errorf("cartridgeOpenOptions() = %+v, want %+v", got, want)
+	}
+}
+
+// Under the browsable default macOS chooses the mountpoint, so the Spec must
+// not dictate one: passing a guess would be a lie that Open ignores.
+func TestSpecCartridgeOpenOptionsDropsABrowsableMountpoint(t *testing.T) {
+	s := cartridgeSpec()
+	s.Mountpoint = "/state/mnt/demo"
+	if got := s.cartridgeOpenOptions().Mountpoint; got != "" {
+		t.Errorf("browsable open options carry Mountpoint %q, want none", got)
+	}
+}
+
+// A Spec is handed to the holder as JSON, so every field the ordinary paths set
+// has to survive the round trip. The two cartridge options are the ones this
+// change adds; the rest guard the encoding as a whole.
+func TestSpecSurvivesAJSONRoundTrip(t *testing.T) {
+	want := Spec{
+		Name:          "demo",
+		Kind:          instance.KindCartridge,
+		StateDir:      "/state",
+		CartridgePath: "/tmp/demo.dmg",
+		Persist:       true,
+		MountPolicy:   cartridge.MountPrivate,
+		Mountpoint:    "/state/mnt/demo",
+		Manifest:      &disk.Manifest{Name: "demo"},
+		Overrides:     Overrides{CPUs: 4, MemoryGiB: 8, DiskSizeGiB: 40, Timeout: 90 * time.Second},
+		ChangedFlags:  []string{"cpus", "memory"},
+		Driven:        true,
+		Ports:         config.PortAssignment{SSH: 6022},
+		DrainTimeout:  90 * time.Second,
+		BinaryVersion: "test",
+	}
+	blob, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Spec
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip changed the spec:\n got %+v\nwant %+v", got, want)
 	}
 }

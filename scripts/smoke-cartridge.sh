@@ -59,7 +59,7 @@ BROWSABLE_MNT="/Volumes/$VOLNAME"      # where the browsable default lands
 MNT=""                                 # resolved after boot; see resolve_mnt
 SHARE=""                               # host side of the RW VirtioFS share
 
-BOOT_PID=""
+HOLDER_PID=""                          # the `br vmd` that owns the VM after boot returns
 PASS=0
 
 note() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -96,12 +96,11 @@ resolve_mnt() {
 cleanup() {
   local rc=$?
   set +e
-  if [[ -n "$BOOT_PID" ]] && kill -0 "$BOOT_PID" 2>/dev/null; then
-    note "cleanup: ejecting (force) and stopping the boot process"
+  if [[ -n "$HOLDER_PID" ]] && kill -0 "$HOLDER_PID" 2>/dev/null; then
+    note "cleanup: ejecting (force) and stopping the holder"
     "$BIN" eject "$NAME" --force >/dev/null 2>&1
-    sleep 3
-    kill "$BOOT_PID" 2>/dev/null
-    wait "$BOOT_PID" 2>/dev/null
+    for _ in $(seq 1 15); do kill -0 "$HOLDER_PID" 2>/dev/null || break; sleep 2; done
+    kill -9 "$HOLDER_PID" 2>/dev/null
   fi
   # Belt-and-suspenders: detach the cartridge if anything left it mounted, at
   # whichever location the policy in force put it.
@@ -175,24 +174,31 @@ ok "volume name matches the bladerunner- prefix mount detection filters on"
 hdiutil detach "$BROWSE_DEV" >/dev/null || fail "could not detach the browsable mount"
 ok "browsable mount detached"
 
-note "Booting the cartridge headless in the background"
-"$BIN" boot "$CART" --headless --timeout "${READY_TIMEOUT}s" ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"} >"$WORK/boot.log" 2>&1 &
-BOOT_PID=$!
-ok "boot pid $BOOT_PID (log: $WORK/boot.log)"
+note "Booting the cartridge headless (the VM runs under a holder, not under br boot)"
+# `br boot` now spawns a `br vmd` holder, attaches to it, and RETURNS once the
+# guest is up. It blocks for the whole boot, so this is a foreground call.
+"$BIN" boot "$CART" --headless --timeout "${READY_TIMEOUT}s" ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"} >"$WORK/boot.log" 2>&1 \
+  || { sed 's/^/      /' "$WORK/boot.log" >&2; fail "br boot failed — see $WORK/boot.log"; }
+ok "br boot returned (log: $WORK/boot.log)"
 
-note "Waiting for the cartridge to attach + the guest to reach SSH readiness (≤ ${READY_TIMEOUT}s)"
-deadline=$(( SECONDS + READY_TIMEOUT ))
-ready=0
-while (( SECONDS < deadline )); do
-  if ! kill -0 "$BOOT_PID" 2>/dev/null; then fail "boot process exited early — see $WORK/boot.log"; fi
-  if [[ -z "$MNT" ]]; then
-    MNT="$(resolve_mnt)"
-    [[ -n "$MNT" ]] && { SHARE="$MNT/share"; ok "cartridge mounted at $MNT"; }
-  fi
-  if [[ -n "$MNT" ]] && BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- true >/dev/null 2>&1; then ready=1; break; fi
-  sleep 10
-done
-[[ "$ready" -eq 1 ]] || fail "guest did not become SSH-ready within ${READY_TIMEOUT}s (mountpoint: ${MNT:-not found})"
+note "GOAL 1: br boot has EXITED and the VM is still running"
+# This is the assertion the whole refactor exists for. Before it, `br boot` WAS
+# the VM: the process that ran this command owned the VMM, and it had to stay
+# alive for the rest of the script. Now it is gone and a holder owns the VM.
+REGISTRY="$STATE_DIR/instances/$NAME.json"
+[[ -e "$REGISTRY" ]] || fail "no registry entry at $REGISTRY after boot returned"
+HOLDER_PID="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$REGISTRY" | head -1)"
+[[ -n "$HOLDER_PID" ]] || fail "registry entry names no holder pid: $REGISTRY"
+kill -0 "$HOLDER_PID" 2>/dev/null || fail "the holder (pid $HOLDER_PID) is not running after br boot returned"
+[[ "$HOLDER_PID" != "$$" ]] || fail "the holder pid is this script — the VM is not detached"
+ok "holder pid $HOLDER_PID owns the VM; br boot is gone"
+
+MNT="$(resolve_mnt)"
+[[ -n "$MNT" ]] || fail "cartridge is not mounted after boot returned"
+SHARE="$MNT/share"
+ok "cartridge mounted at $MNT"
+BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- true >/dev/null 2>&1 \
+  || fail "guest is not reachable even though br boot reported it ready"
 ok "guest is up and reachable"
 [[ -d "$SHARE" ]] || fail "share dir not present at $SHARE"
 
@@ -211,7 +217,7 @@ ok "host wrote a file into the cartridge share/"
 share_deadline=$(( SECONDS + SHARE_TIMEOUT ))
 got=""
 while (( SECONDS < share_deadline )); do
-  if ! kill -0 "$BOOT_PID" 2>/dev/null; then fail "boot process exited while waiting for the share — see $WORK/boot.log"; fi
+  if ! kill -0 "$HOLDER_PID" 2>/dev/null; then fail "the holder exited while waiting for the share — see $WORK/boot.log"; fi
   got="$(BLADERUNNER_STATE_DIR="$MNT" "$BIN" shell -- cat /mnt/share/from-host.txt 2>/dev/null | tr -d '\r\n' || true)"
   [[ "$got" == "$HOST_MSG" ]] && break
   printf '    waiting for guest virtiofs mount… (%ds left)\n' "$(( share_deadline - SECONDS ))"
@@ -257,12 +263,12 @@ note "Ejecting (ACPI graceful shutdown, then detach)"
 # real cartridge-scan path and labels the slot by name, rather than treating the
 # overridden state dir as the flat "default" slot.
 "$BIN" eject "$NAME"
-# The foreground boot process powers off, detaches, and exits.
-for _ in $(seq 1 30); do kill -0 "$BOOT_PID" 2>/dev/null || break; sleep 2; done
-if kill -0 "$BOOT_PID" 2>/dev/null; then fail "boot process still running after eject"; fi
-wait "$BOOT_PID" 2>/dev/null
-BOOT_PID=""
-ok "guest powered off cleanly and the boot process exited"
+# The HOLDER powers the guest off, detaches, and exits. (It is not a child of
+# this shell, so it is polled rather than waited on.)
+for _ in $(seq 1 30); do kill -0 "$HOLDER_PID" 2>/dev/null || break; sleep 2; done
+if kill -0 "$HOLDER_PID" 2>/dev/null; then fail "the holder is still running after eject"; fi
+HOLDER_PID=""
+ok "guest powered off cleanly and the holder exited"
 
 if hdiutil info 2>/dev/null | grep -q "bladerunner-$NAME"; then
   fail "cartridge still attached after eject"

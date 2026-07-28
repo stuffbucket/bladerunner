@@ -77,7 +77,11 @@ Cartridge-only flags:
                    cartridge of the same name: both want that mountpoint.
 
 Sizing and boot-mode flags override the disk's recommendations. The disk carries
-its own image, so there is no --image-url/--image-path here.`,
+its own image, so there is no --image-url/--image-path here.
+
+Like 'br start', the VM is owned by a holder process: boot prints the progress,
+returns once the guest is up, and leaves the VM running. --gui is the exception
+and stays in the foreground, where its window belongs.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runBoot,
 }

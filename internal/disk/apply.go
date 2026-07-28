@@ -52,6 +52,23 @@ func (m *Manifest) ApplyTo(cfg *config.Config) error {
 		return fmt.Errorf("disk %q has no resolvable image source", m.Name)
 	}
 
+	m.ApplyDefaultsTo(cfg)
+
+	return nil
+}
+
+// ApplyDefaultsTo applies the parts of a manifest that are NOT the image
+// source: the sizing recommendations and the boot mode. A zero sizing field
+// leaves config.Default's value alone.
+//
+// It is split out of ApplyTo for one caller that must not resolve an image at
+// all — a cartridge, which carries its own root.img and whose packed manifest
+// is therefore consulted only for "how big should this VM be, and does it want
+// a window". Resolving the image there would be worse than useless: the
+// cartridge overwrites every image field a moment later, and a manifest that
+// names an architecture this host does not have would fail a boot that was
+// never going to download anything.
+func (m *Manifest) ApplyDefaultsTo(cfg *config.Config) {
 	// Sizing defaults only: 0 => leave config.Default's value.
 	if m.VM.CPUs > 0 {
 		cfg.CPUs = m.VM.CPUs
@@ -64,6 +81,4 @@ func (m *Manifest) ApplyTo(cfg *config.Config) error {
 	}
 
 	cfg.GUI = m.Boot.Mode == BootModeGUI
-
-	return nil
 }

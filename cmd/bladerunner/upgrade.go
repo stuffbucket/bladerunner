@@ -20,7 +20,8 @@ When the host supports VZ save/restore, the guest's running state is saved,
 the old server is stopped, and the new server restores and resumes the guest —
 no cold reboot. Otherwise it falls back to a stop + fresh start.
 
-This becomes the new long-lived server (foreground), like 'br start'.`,
+The upgraded server is a holder process, like 'br start': this command returns
+once the guest is back up and the VM keeps running after it exits.`,
 	RunE: runUpgrade,
 }
 

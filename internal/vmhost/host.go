@@ -775,7 +775,7 @@ func (h *Host) block(ctx context.Context) error {
 		// macOS event loop must run on the main thread immediately. We
 		// don't yet know if boot will succeed, so don't claim it did.
 		h.obs.Started(h.cfg, h.endpoint)
-		go func() { _ = h.waitForGuestReady(ctx) }()
+		go func() { h.publishBootOutcome(h.waitForGuestReady(ctx)) }()
 
 		h.obs.Waiting(true)
 		if err := h.activeRunner().StartGUI(); err != nil {
@@ -783,6 +783,7 @@ func (h *Host) block(ctx context.Context) error {
 		}
 	} else {
 		bootErr := h.waitForGuestReady(ctx)
+		h.publishBootOutcome(bootErr)
 		h.obs.Ready(h.cfg, h.endpoint, bootErr)
 		h.obs.Waiting(false)
 		<-ctx.Done()
@@ -790,6 +791,29 @@ func (h *Host) block(ctx context.Context) error {
 
 	h.obs.Stopping()
 	return nil
+}
+
+// publishBootOutcome records how the readiness wait ended in the boot-stage
+// file, which is the only progress a process that did not start this VM can
+// see.
+//
+// It exists because the boot phase never reached a terminal stage: the
+// publisher advanced as far as Incus and stopped, so a reader could watch the
+// Incus wait begin and never learn whether it succeeded. That was survivable
+// while the only reader was a menubar splash; it is not, now that the CLI
+// attaches to a holder over this file and has to decide when to stop waiting
+// and print the summary.
+//
+// A nil publisher (a boot that failed before StepBootStage) is a no-op.
+func (h *Host) publishBootOutcome(bootErr error) {
+	if h.bootPub == nil {
+		return
+	}
+	if bootErr != nil {
+		h.bootPub.advance(bootstage.Failed)
+		return
+	}
+	h.bootPub.advance(bootstage.Ready)
 }
 
 // waitForGuestReady runs the Incus readiness wait. Returns nil if the guest
@@ -905,10 +929,7 @@ func (h *Host) startCartridge() error {
 	if h.spec.Kind != instance.KindCartridge || h.adopted {
 		return nil
 	}
-	opened, err := cartridge.Open(h.spec.CartridgePath, cartridge.OpenOptions{
-		Mountpoint: h.spec.Mountpoint,
-		Name:       h.spec.Name,
-	})
+	opened, err := cartridge.Open(h.spec.CartridgePath, h.spec.cartridgeOpenOptions())
 	if err != nil {
 		return err
 	}
@@ -1017,6 +1038,12 @@ func (h *Host) startConfig() error {
 		if err := h.spec.Manifest.ApplyTo(h.cfg); err != nil {
 			return fmt.Errorf("apply disk: %w", err)
 		}
+	} else if h.cartridge != nil && h.cartridge.Manifest != nil {
+		// A cartridge carries its own disk manifest, and when the Host opened
+		// the image itself nothing upstream could read it: the CLI used to do
+		// this hop, and a holder-spawned boot has no CLI. Only the non-image
+		// defaults are taken — the cartridge supplies its own root.img below.
+		h.cartridge.Manifest.ApplyDefaultsTo(h.cfg)
 	}
 
 	h.spec.applyOverrides(h.cfg)

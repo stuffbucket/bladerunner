@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/bootstage"
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/diskarb"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 )
@@ -646,4 +648,114 @@ func TestStopRecordsItselfAsTheCancelCause(t *testing.T) {
 	if got := cancelReason(context.Cause(ctx)); got != ErrStopRequested.Error() {
 		t.Errorf("cancelReason = %q, want %q", got, ErrStopRequested.Error())
 	}
+}
+
+// A cartridge carries its own disk manifest, and that manifest is where its
+// recommended sizing lives. The CLI used to read it (it opened the cartridge
+// itself) and stuff the numbers into the Spec's overrides. A holder opens the
+// cartridge for itself, so nothing upstream can read the manifest before the
+// boot starts — the Host has to apply it, or every cartridge booted under a
+// holder silently falls back to the default 2 CPUs.
+func TestStartConfigAppliesTheCartridgesOwnManifest(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
+
+	dir := t.TempDir()
+	h, err := New(Spec{Kind: instance.KindCartridge, Name: "demo", CartridgePath: "/tmp/demo.dmg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.AdoptCartridge(&cartridge.Opened{
+		Name:     "demo",
+		Manifest: &disk.Manifest{Name: "demo", VM: disk.VMSpec{CPUs: 6, MemoryGiB: 12, DiskSizeGiB: 96}},
+	})
+	cfg, err := config.Default(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cfg = cfg
+
+	if err := h.startConfig(); err != nil {
+		t.Fatalf("startConfig() = %v", err)
+	}
+	if cfg.CPUs != 6 || cfg.MemoryGiB != 12 || cfg.DiskSizeGiB != 96 {
+		t.Errorf("sizing = %d cpus / %d GiB / %d GiB, want the cartridge manifest's 6 / 12 / 96",
+			cfg.CPUs, cfg.MemoryGiB, cfg.DiskSizeGiB)
+	}
+}
+
+// An explicit Spec.Manifest still wins: it is the disk the caller resolved, and
+// the cartridge's own copy is only the fallback for a Host that opened the
+// image itself.
+func TestStartConfigPrefersTheSpecManifest(t *testing.T) {
+	t.Setenv(config.ForceHostedImageEnvVar, "")
+	t.Setenv(config.ForceDebianImageEnvVar, "")
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
+
+	dir := t.TempDir()
+	h, err := New(Spec{
+		Kind:          instance.KindCartridge,
+		Name:          "demo",
+		CartridgePath: "/tmp/demo.dmg",
+		Manifest:      &disk.Manifest{Name: "demo", Image: disk.ImageSpec{Hosted: true}, VM: disk.VMSpec{CPUs: 3, MemoryGiB: 5, DiskSizeGiB: 50}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.AdoptCartridge(&cartridge.Opened{
+		Name:     "demo",
+		Manifest: &disk.Manifest{Name: "demo", VM: disk.VMSpec{CPUs: 6, MemoryGiB: 12, DiskSizeGiB: 96}},
+	})
+	cfg, err := config.Default(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cfg = cfg
+
+	if err := h.startConfig(); err != nil {
+		t.Fatalf("startConfig() = %v", err)
+	}
+	if cfg.CPUs != 3 {
+		t.Errorf("CPUs = %d, want the spec manifest's 3", cfg.CPUs)
+	}
+}
+
+// The boot phase must reach a TERMINAL stage in the file a separate process
+// reads. bootstage declared Ready from the start and nothing ever wrote it: the
+// publisher advanced Boot -> Setup -> Incus and then stopped, so a reader
+// outside the process could see the Incus wait START but never learn how it
+// ended. The CLI now attaches to a holder over exactly this file, so "still
+// waiting" and "up" were indistinguishable.
+func TestPublishBootOutcome(t *testing.T) {
+	cases := []struct {
+		name    string
+		bootErr error
+		want    bootstage.Stage
+	}{
+		{name: "ready", bootErr: nil, want: bootstage.Ready},
+		{name: "failed", bootErr: errors.New("guest never came up"), want: bootstage.Failed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			h := &Host{bootPub: newBootStagePublisher(dir)}
+			h.publishBootOutcome(tc.bootErr)
+
+			got, ok := bootstage.Read(dir)
+			if !ok {
+				t.Fatal("no boot stage was published")
+			}
+			if got.Stage != tc.want {
+				t.Errorf("stage = %q, want %q", got.Stage, tc.want)
+			}
+		})
+	}
+}
+
+// Publishing is safe before the step that creates the publisher has run — a
+// boot that failed early still unwinds through the same code.
+func TestPublishBootOutcomeWithoutAPublisher(t *testing.T) {
+	h := &Host{}
+	h.publishBootOutcome(nil) // must not panic
 }
