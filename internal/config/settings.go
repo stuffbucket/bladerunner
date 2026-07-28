@@ -59,7 +59,14 @@ func (p StartPolicy) Valid() bool {
 type NetSetting string
 
 const (
-	NetSettingShared  NetSetting = NetSetting(NetworkModeShared)
+	// NetSettingShared is the default: the guest sits behind
+	// Virtualization.framework's NAT. It needs no entitlement and no host
+	// configuration, and BridgeInterface is ignored.
+	NetSettingShared NetSetting = NetSetting(NetworkModeShared)
+	// NetSettingBridged attaches the guest to the host NIC named by
+	// BridgeInterface, giving it an address of its own on the LAN. Validate
+	// requires BridgeInterface to be set for it, and the binary must carry the
+	// com.apple.vm.networking entitlement or the attachment fails at start.
 	NetSettingBridged NetSetting = NetSetting(NetworkModeBridged)
 )
 
@@ -79,7 +86,13 @@ func (n NetSetting) Valid() bool {
 type NestedVirtSetting string
 
 const (
-	NestedAuto     NestedVirtSetting = "auto"
+	// NestedAuto is the default intent: enable nested virtualization wherever
+	// the host supports it, so the guest's Incus can run VMs and not only
+	// containers. A host without support is not an error — the VM still starts
+	// and Config.NestedVirt resolves to "unsupported".
+	NestedAuto NestedVirtSetting = "auto"
+	// NestedDisabled opts out even on a capable host. It is the persisted form
+	// of --no-nested-virt and maps to Config.NestedVirtDisabled.
 	NestedDisabled NestedVirtSetting = "disabled"
 )
 
@@ -99,6 +112,11 @@ func (n NestedVirtSetting) Valid() bool {
 // Config can.
 type ImageKind string
 
+// The four image sources, in decreasing order of "we know what this is".
+// ImageHosted and ImageDebian name a build this codebase pins and verifies, so
+// they carry no other field; ImageCustomURL and ImageLocalPath each require
+// exactly one, which ImageSource.Valid enforces. The values are persisted in
+// settings.json, so add a kind rather than renaming one.
 const (
 	ImageHosted    ImageKind = "hosted"     // pre-baked bladerunner guest image
 	ImageDebian    ImageKind = "debian"     // pinned Debian Trixie genericcloud

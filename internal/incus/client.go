@@ -13,6 +13,14 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
+// ServerInfo is the part of an Incus GetServer response that bladerunner keeps:
+// enough to identify the server in the startup report, and Auth, which is what
+// readiness is actually decided on (see checkAuthorized). It is a flat copy so
+// that callers — including the JSON report written to disk — do not carry a
+// dependency on the Incus API types.
+//
+// A zero value is what toServerInfo returns for an empty response, so an
+// unpopulated ServerInfo means "the server told us nothing", not "no server".
 type ServerInfo struct {
 	ServerVersion string
 	APIVersion    string
@@ -22,14 +30,35 @@ type ServerInfo struct {
 	APIExtensions int
 }
 
+// WaitProgress describes one failed readiness probe: which attempt it was, how
+// long the whole wait has run so far, and the error that probe returned. It
+// exists so a UI can say WHY the wait is still going, not merely that it is —
+// "connection refused" and "not authorized yet" are different problems.
 type WaitProgress struct {
 	Attempt   int
 	Elapsed   time.Duration
 	LastError error
 }
 
+// WaitProgressCallback observes a wait in flight. WaitForServer calls it once
+// per FAILED probe and never on success, so the last thing a callback sees is
+// the last failure, not the outcome.
+//
+// It runs on the goroutine driving the wait, between probes, so it must return
+// promptly and must not block. A nil callback is valid and means "no progress
+// reporting"; the wait still logs either way.
 type WaitProgressCallback func(WaitProgress)
 
+// EnsureClientCertificate returns the PEM-encoded client certificate and key
+// used to talk to Incus, generating a self-signed pair at certPath/keyPath on
+// first use.
+//
+// It is idempotent: an existing pair is read back unchanged. That matters
+// because the guest's Incus trust store holds the fingerprint of this exact
+// certificate — regenerating it would leave the API answering but refusing to
+// authorize us, which is the failure WaitForServer reports as "not authorized
+// yet". The PEM bytes are returned rather than the paths because the Incus
+// client and WaitForServer take them in memory.
 func EnsureClientCertificate(certPath, keyPath string) ([]byte, []byte, error) {
 	if err := sharedtls.FindOrGenCert(certPath, keyPath, true, false); err != nil {
 		return nil, nil, fmt.Errorf("create/load client cert: %w", err)
@@ -48,6 +77,23 @@ func EnsureClientCertificate(certPath, keyPath string) ([]byte, []byte, error) {
 	return certPEM, keyPEM, nil
 }
 
+// WaitForServer probes endpoint every retryEvery until Incus both answers and
+// reports this client as trusted, then returns what the server said about
+// itself. "It answered" is not readiness on its own: GetServer replies to an
+// untrusted client too, so gating on a bare response reports a half-started VM
+// as ready. See checkAuthorized.
+//
+// ctx carries the entire budget for the wait. This function adds no timeout of
+// its own and never shortens what the caller gave it; the caller (vmhost, from
+// --timeout or the persisted settings) owns that decision. When ctx ends,
+// waitEnded distinguishes an exhausted budget from a cancellation and says
+// which in the returned error, carrying the last probe error with it — that
+// error is the only evidence about the guest.
+//
+// cb, when non-nil, is called after each failed probe; see
+// WaitProgressCallback for the constraints on it. Failures are also logged, on
+// the first attempt and then every fifth, so that a long wait does not fill the
+// log with the same line.
 func WaitForServer(ctx context.Context, endpoint string, certPEM, keyPEM []byte, retryEvery time.Duration, cb WaitProgressCallback) (*ServerInfo, error) {
 	ticker := time.NewTicker(retryEvery)
 	defer ticker.Stop()

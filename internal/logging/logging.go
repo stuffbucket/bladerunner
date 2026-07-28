@@ -108,6 +108,15 @@ func isStdoutTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
+// L returns the process logger. It is safe to call from any goroutine and
+// before Init: until Init runs, L answers a stdout logger set to the level in
+// BLADERUNNER_LOG_LEVEL, so early code never has to nil-check or order itself
+// around logging setup.
+//
+// Call L at the point of use. Do not cache the result in a package variable or
+// a struct field — Init replaces the logger wholesale, and a value captured
+// before it would keep writing to stdout instead of the rotating log file,
+// which on a TTY is exactly the output Init is trying to keep off the screen.
 func L() *charmlog.Logger {
 	mu.RLock()
 	defer mu.RUnlock()

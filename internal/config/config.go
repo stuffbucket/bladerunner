@@ -12,15 +12,30 @@ import (
 )
 
 const (
-	NetworkModeShared  = "shared"
+	// NetworkModeShared puts the guest behind Virtualization.framework's NAT.
+	// It is the default: no entitlement, no host setup, and BridgeInterface is
+	// ignored.
+	NetworkModeShared = "shared"
+	// NetworkModeBridged attaches the guest to the host NIC named by
+	// BridgeInterface so it gets its own address on the LAN. It needs the
+	// com.apple.vm.networking entitlement, and start fails if the named
+	// interface is not present. Validate accepts only these two values.
 	NetworkModeBridged = "bridged"
 
 	// DefaultBridgeInterface is the host interface used for bridged networking.
 	DefaultBridgeInterface = "en0"
 
-	// Default values for CLI flags and config
-	DefaultCPUs        = 4
-	DefaultMemoryGiB   = 8
+	// DefaultCPUs is the guest vCPU count when no flag or settings.json says
+	// otherwise. It and the two sizes below are the built-in defaults behind the
+	// CLI flags; DefaultSettings repeats them so a fresh settings.json overlays
+	// as a no-op.
+	DefaultCPUs = 4
+	// DefaultMemoryGiB is the guest RAM allocation in GiB. Validate rejects
+	// less than 2.
+	DefaultMemoryGiB = 8
+	// DefaultDiskSizeGiB is the virtual size the raw disk is grown to (with
+	// qemu-img resize) after the base image is copied in. The file is sparse,
+	// so this is a ceiling, not space consumed up front.
 	DefaultDiskSizeGiB = 64
 	// DefaultTimeout bounds WaitForIncus: how long a boot waits for the guest's
 	// Incus API to answer AND to report this client as authorized. It is the
@@ -39,19 +54,46 @@ const (
 	// vsock forwarders, never over IP.
 	LoopbackHost = "127.0.0.1"
 
-	// Port assignments (avoid conflicts with common services)
-	DefaultLocalSSHPort  = 6022
-	DefaultLocalAPIPort  = 18443
-	DefaultLocalWebPort  = 18444
+	// DefaultLocalSSHPort is the host loopback port that forwards to the guest's
+	// sshd. It and the other DefaultLocal* ports were chosen clear of common
+	// services, and only the flat default instance keeps them — every other
+	// instance takes whatever internal/portalloc reserves (see
+	// DefaultPortAssignment).
+	DefaultLocalSSHPort = 6022
+	// DefaultLocalAPIPort is the host loopback port that forwards to the guest's
+	// Incus API.
+	DefaultLocalAPIPort = 18443
+	// DefaultLocalWebPort is the host loopback port of the web-UI proxy.
+	DefaultLocalWebPort = 18444
+	// DefaultLocalOIDCPort is the host loopback port the OIDC provider listens
+	// on. OIDCIssuerURL is derived from it, so it must never be formatted into a
+	// URL by hand — see AssignPorts.
 	DefaultLocalOIDCPort = 15556
-	DefaultVsockSSHPort  = 10022
-	DefaultVsockAPIPort  = 18443
+	// DefaultVsockSSHPort is the guest-side vsock port sshd is exposed on. The
+	// DefaultVsock* ports are namespaced per VM, so unlike the host ports they
+	// are identical for every instance and never need reassigning.
+	DefaultVsockSSHPort = 10022
+	// DefaultVsockAPIPort is the guest-side vsock port the Incus API is exposed
+	// on.
+	DefaultVsockAPIPort = 18443
+	// DefaultVsockOIDCPort is a REVERSE forwarder port: the host listens on it
+	// inside the guest's vsock namespace so guest-side Incus can reach the
+	// host's OIDC provider.
 	DefaultVsockOIDCPort = 18556
-	DefaultLocalNTPPort  = 15557
-	DefaultVsockNTPPort  = 18557
+	// DefaultLocalNTPPort is the host loopback port of the SNTP responder that
+	// serves the host clock to the guest (see internal/timesource).
+	DefaultLocalNTPPort = 15557
+	// DefaultVsockNTPPort is the reverse forwarder port guest chrony reaches
+	// that SNTP responder on, which is what lets the guest clock recover from a
+	// host sleep with no network at all.
+	DefaultVsockNTPPort = 18557
 
-	// Default OIDC client ID and audience baked into Incus config.
+	// DefaultOIDCClientID is the OAuth2 client_id baked into the guest's Incus
+	// config and expected by the host provider; both ends read it from here.
 	DefaultOIDCClientID = "bladerunner"
+	// DefaultOIDCAudience is the `aud` claim Incus verifies on issued tokens.
+	// It has the same value as the client ID but is a separate constant because
+	// Incus configures the two independently.
 	DefaultOIDCAudience = "bladerunner"
 
 	// DefaultShareTag is the VirtioFS device tag used for the host<->guest
@@ -78,7 +120,9 @@ const (
 	archARM64 = "arm64"
 	archAMD64 = "amd64"
 
-	// Validation constraints
+	// MinDiskSizeGiB is the smallest disk size Config.Validate and
+	// Settings.Validate accept. Below it the base image plus Incus and its
+	// storage pool leave no usable room in the guest.
 	MinDiskSizeGiB = 16
 
 	// XDG directory structure
@@ -112,6 +156,16 @@ const (
 	clientKeyFileName    = "client.key"
 )
 
+// Config is the fully resolved runtime configuration of a single bladerunner
+// instance: the user-settable knobs, every path derived from the instance's
+// state directory, the resolved base-image selection, and the host/vsock port
+// set. Build one with Default; overlay the persisted user choices with
+// Settings.ApplyTo; then Validate before it reaches the VM.
+//
+// Several fields are DERIVED and must not be written directly — OIDCIssuerURL
+// is computed from LocalOIDCPort, so change ports only through AssignPorts or
+// AssignPortsFrom, which re-derive everything built on them. The base-image
+// fields are likewise a set that has to move together (see UseDebianImage).
 type Config struct {
 	Name     string
 	Hostname string
@@ -311,19 +365,20 @@ func ResolveBaseImageURL(goarch string, useHosted bool) (string, error) {
 	return DebianTrixieGenericCloudURL(goarch)
 }
 
-// ForceHostedImageEnvVar, when set to a truthy value ("1", "true", "yes", "on"),
-// forces the pre-baked hosted guest image for the run — the non-interactive
-// equivalent of the --hosted-image start flag. Since the hosted image is now the
-// default, this mostly exists to re-select it after a persisted Settings image
-// choice or to make the intent explicit; it is the mutual-exclusion counterpart
-// of ForceDebianImageEnvVar.
+// ForceHostedImageEnvVar names the environment variable that, when set to a
+// truthy value ("1", "true", "yes", "on"), forces the pre-baked hosted guest
+// image for the run — the non-interactive equivalent of the --hosted-image
+// start flag. Since the hosted image is now the default, this mostly exists to
+// re-select it after a persisted Settings image choice or to make the intent
+// explicit; it is the mutual-exclusion counterpart of ForceDebianImageEnvVar.
 const ForceHostedImageEnvVar = "BLADERUNNER_FORCE_HOSTED_IMAGE"
 
-// ForceDebianImageEnvVar, when set to a truthy value ("1", "true", "yes", "on"),
-// forces the Debian Trixie genericcloud + cloud-init path for the run — the
-// non-interactive equivalent of the --debian-image start flag. This is the
-// "bring your own generic image" escape hatch out of the pre-baked default. It is
-// mutually exclusive with ForceHostedImageEnvVar / --hosted-image.
+// ForceDebianImageEnvVar names the environment variable that, when set to a
+// truthy value ("1", "true", "yes", "on"), forces the Debian Trixie
+// genericcloud + cloud-init path for the run — the non-interactive equivalent
+// of the --debian-image start flag. This is the "bring your own generic image"
+// escape hatch out of the pre-baked default. It is mutually exclusive with
+// ForceHostedImageEnvVar / --hosted-image.
 const ForceDebianImageEnvVar = "BLADERUNNER_FORCE_DEBIAN_IMAGE"
 
 // ForceHostedImage reports whether the forced-hosted-image override is set via
@@ -348,6 +403,20 @@ func envTruthy(name string) bool {
 	}
 }
 
+// Default returns the built-in configuration for an instance rooted at baseDir,
+// or at DefaultStateDir when baseDir is empty. Every path on the returned
+// Config — disk, cloud-init, logs, certificates, OIDC state — is derived from
+// that one directory, which is what makes an instance relocatable to a disk
+// slot or a mounted cartridge.
+//
+// The returned Config is deliberately NOT yet valid: SSHPublicKey is empty
+// until EnsureSSHKeys fills it in, so Validate rejects it. Callers are expected
+// to overlay Settings, resolve keys, and only then validate.
+//
+// The ports come from DefaultPortAssignment through AssignPorts rather than
+// being written into the literal, so the values derived from them are produced
+// by exactly one code path whether the ports are these constants or a runtime
+// reservation.
 func Default(baseDir string) (*Config, error) {
 	if baseDir == "" {
 		baseDir = DefaultStateDir()
@@ -610,6 +679,15 @@ func (c *Config) CloseHostListeners() error {
 	return errors.Join(errs...)
 }
 
+// Validate returns the first reason c cannot be used to start a VM: a missing
+// required field, an unknown network mode, a port outside 1-65535 or colliding
+// with another, or a resource below its floor (MinDiskSizeGiB, 1 CPU, 2 GiB of
+// memory). A zero OIDC or NTP port is not an error — it is the convention for
+// "that service is disabled".
+//
+// It is a check of the config's own shape only. It touches no files and no host
+// state: a port in range is not a port that is free (internal/portalloc owns
+// that), and a base image URL that parses is not one that resolves.
 func (c *Config) Validate() error {
 	if err := c.validateRequiredFields(); err != nil {
 		return err
