@@ -28,8 +28,14 @@
 #   SMOKE_DISK   builtin/user disk to pack (default: debian-trixie-gui — the
 #                incus builtin needs the not-yet-published hosted guest image).
 #   SMOKE_READY_TIMEOUT  seconds to wait for guest SSH readiness (default 600).
-#   SMOKE_BOOT_ARGS      extra flags for `br boot` (e.g. --private-mount once
-#                        the CLI exposes it).
+#   SMOKE_BOOT_ARGS      extra flags for `br boot`. --private-mount is the one
+#                        worth setting here: it attaches -nobrowse at
+#                        $PRIVATE_MNT, which resolve_mnt already handles, so the
+#                        script passes under either policy. Leave it unset to
+#                        exercise the browsable default that Finder-eject needs.
+#                        Do NOT set --persist: this script packs a throwaway
+#                        cartridge and asserts a clean cold-boot state, and
+#                        --persist would rewrite the .dmg on the way out.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

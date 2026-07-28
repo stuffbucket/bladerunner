@@ -16,13 +16,15 @@ import (
 )
 
 var bootFlags struct {
-	cpus      uint
-	memory    uint64
-	disk      int
-	gui       bool
-	headless  bool
-	noRestore bool
-	timeout   time.Duration
+	cpus         uint
+	memory       uint64
+	disk         int
+	gui          bool
+	headless     bool
+	noRestore    bool
+	persist      bool
+	privateMount bool
+	timeout      time.Duration
 }
 
 // bootManifest stashes the resolved disk manifest so runStart can fold it into
@@ -53,6 +55,27 @@ file stays pristine. The cartridge carries its own disk, EFI state and
 cloud-init, so it always cold-boots and the slot flags below do not apply to it;
 put it away with 'br eject'.
 
+Cartridge-only flags:
+
+  --persist        Write the guest's changes back over the .dmg you booted.
+                   Without it a .dmg boot is a throwaway run: every byte the
+                   guest wrote is discarded when it powers off. That is the
+                   default and it does not change. With it, once the guest has
+                   powered off and the volume has been detached, the working
+                   copy is compacted, compressed to a new .dmg beside the
+                   original, verified, and only then renamed over it. The
+                   original is never written into: a failed or interrupted
+                   write-back leaves it byte-for-byte as it was, and the guest's
+                   changes are kept in a '<name>-rescue-<timestamp>.sparseimage'
+                   you can boot directly. Booting a .sparseimage already writes
+                   into that file, so --persist is a no-op there.
+  --private-mount  Attach the cartridge -nobrowse at <state>/mnt/<name> instead
+                   of letting macOS place it under /Volumes. Deterministic, and
+                   what scripts want — but invisible in Finder, so the cartridge
+                   cannot be ejected by hand. The browsable default stays the
+                   default. Do not use it while 'br disk pack' is writing a
+                   cartridge of the same name: both want that mountpoint.
+
 Sizing and boot-mode flags override the disk's recommendations. The disk carries
 its own image, so there is no --image-url/--image-path here.`,
 	Args: cobra.ExactArgs(1),
@@ -67,7 +90,38 @@ func init() {
 	f.BoolVar(&bootFlags.gui, "gui", false, "Force a GUI window (override boot.mode)")
 	f.BoolVar(&bootFlags.headless, "headless", false, "Force headless boot (override boot.mode)")
 	f.BoolVar(&bootFlags.noRestore, "no-restore", false, "Cold-boot even if the slot holds saved guest RAM")
+	f.BoolVar(&bootFlags.persist, flagPersist, false,
+		"Cartridge only: write the guest's changes back over the .dmg on eject (default: discard them)")
+	f.BoolVar(&bootFlags.privateMount, flagPrivateMount, false,
+		"Cartridge only: attach -nobrowse at <state>/mnt/<name> instead of the Finder-ejectable /Volumes default")
 	f.DurationVar(&bootFlags.timeout, "timeout", config.DefaultTimeout, "How long to wait for the guest's Incus API to come up and authorize this client")
+}
+
+// The cartridge-only boot flags, named once so the registration, the refusal
+// and the help all use the same spelling.
+const (
+	flagPersist      = "persist"
+	flagPrivateMount = "private-mount"
+)
+
+// cartridgeOnlyFlags names the `br boot` flags that only mean anything for a
+// cartridge image. Passing one on a disk or URL boot is refused rather than
+// ignored: --persist ignored in silence tells a user their guest's changes are
+// being kept when they are not, which is the one mistake this whole feature
+// exists to avoid.
+var cartridgeOnlyFlags = []string{flagPersist, flagPrivateMount}
+
+// cartridgeOnlyFlagError refuses a boot that set a cartridge-only flag on a
+// target that is not a cartridge. changed reports whether the user explicitly
+// set a flag (cobra's Flags().Changed), so a default never trips it.
+func cartridgeOnlyFlagError(changed func(string) bool) error {
+	for _, name := range cartridgeOnlyFlags {
+		if changed(name) {
+			return fmt.Errorf("--%s applies only to a cartridge image (%s or %s); this argument resolves to a disk, so there is nothing to %s",
+				name, cartridge.SparseExt, cartridge.DMGExt, name)
+		}
+	}
+	return nil
 }
 
 // bootTargetKind classifies how a boot argument is to be resolved.
@@ -206,6 +260,9 @@ func runBoot(cmd *cobra.Command, args []string) error {
 	target := classifyBootArg(args[0], util.FileExists)
 	if target.kind == bootTargetCartridge {
 		return runBootCartridge(cmd, args, target.arg)
+	}
+	if err := cartridgeOnlyFlagError(cmd.Flags().Changed); err != nil {
+		return jsonOrError(err)
 	}
 
 	cat, err := disk.LoadCatalog()

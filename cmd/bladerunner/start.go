@@ -388,11 +388,17 @@ func (o *cliObserver) Stopping() {
 	}
 }
 
-// TeardownWarning surfaces a failed teardown step. Only the cartridge detach is
+// TeardownWarning surfaces a failed teardown step. Only the cartridge step is
 // worth a user-visible line: everything else is either logged or harmless.
+//
+// The error is printed unprefixed because that step now covers two very
+// different failures — the detach, and the --persist write-back — and the
+// write-back's message already says what happened to which file. Labeling it
+// "detach cartridge" would have told a user their changes were lost to a detach
+// that in fact succeeded.
 func (o *cliObserver) TeardownWarning(step string, err error) {
 	if step == vmhost.StepCartridge && !o.json {
-		fmt.Printf("%s detach cartridge: %v\n", warning("⚠"), err)
+		fmt.Printf("%s cartridge: %v\n", warning("⚠"), err)
 	}
 }
 
