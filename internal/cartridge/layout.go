@@ -18,6 +18,7 @@ import (
 
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 // MountDirName is the directory under a bladerunner state dir where cartridges
@@ -92,13 +93,18 @@ func (l Layout) LoadManifest() (*disk.Manifest, error) {
 }
 
 // WriteManifest marshals m into the cartridge's disk.json.
+//
+// The publish is atomic and durable (internal/util owns that): the cartridge is
+// the artifact the design promises is always in a consistent cold-boot state, so
+// a reader — or a crash — must never find disk.json truncated. A plain
+// os.WriteFile opens O_TRUNC and would leave exactly that.
 func (l Layout) WriteManifest(m *disk.Manifest) error {
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal cartridge manifest: %w", err)
 	}
 	path := l.ManifestPath()
-	if err := os.WriteFile(path, b, layoutFilePerm); err != nil {
+	if err := util.WriteFileAtomic(path, b, layoutFilePerm); err != nil {
 		return fmt.Errorf("write cartridge manifest %s: %w", path, err)
 	}
 	return nil

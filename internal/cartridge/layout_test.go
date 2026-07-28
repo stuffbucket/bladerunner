@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -251,5 +253,132 @@ func TestListAttachedIgnoresPlainDirectories(t *testing.T) {
 	}
 	if got := ListAttached(stateDir); len(got) != 0 {
 		t.Fatalf("ListAttached = %v, want empty", got)
+	}
+}
+
+// The cartridge is the artifact the design promises is always in a consistent
+// cold-boot state, so its manifest must never be observable half-written. These
+// bound the hammer that proves it.
+const (
+	// manifestPadBytes makes the payload big enough that a truncating write has
+	// a window a concurrent reader can actually land in.
+	manifestPadBytes = 1 << 18
+	// manifestRewrites is how many times the writer republishes the manifest.
+	manifestRewrites = 200
+	// manifestReaders is how many goroutines read the manifest concurrently.
+	manifestReaders = 4
+)
+
+// paddedSourceManifest returns a manifest whose serialized form is large enough
+// to expose a truncate-then-write race.
+func paddedSourceManifest() *disk.Manifest {
+	m := validSourceManifest()
+	m.Description = strings.Repeat("d", manifestPadBytes)
+	return m
+}
+
+// A reader must never see the cartridge manifest missing, empty or short while
+// it is being republished. os.WriteFile opens O_TRUNC, so the destination is
+// briefly zero-length and then grows; only a temp-file-and-rename publish makes
+// the swap atomic.
+func TestWriteManifestNeverExposesAPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLayout(dir)
+	m := paddedSourceManifest()
+	if err := l.WriteManifest(m); err != nil {
+		t.Fatalf("seed WriteManifest: %v", err)
+	}
+	path := l.ManifestPath()
+	full, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read seeded manifest: %v", err)
+	}
+	wantLen := len(full)
+
+	var partials, shortest atomic.Int64
+	shortest.Store(int64(wantLen))
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range manifestReaders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				b, readErr := os.ReadFile(path)
+				if readErr != nil {
+					partials.Add(1)
+					shortest.Store(-1) // the file was not there at all
+					continue
+				}
+				if len(b) != wantLen {
+					partials.Add(1)
+					if int64(len(b)) < shortest.Load() {
+						shortest.Store(int64(len(b)))
+					}
+				}
+			}
+		}()
+	}
+
+	for range manifestRewrites {
+		if err := l.WriteManifest(m); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("WriteManifest: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	if n := partials.Load(); n != 0 {
+		t.Errorf("a concurrent reader saw a partial cartridge manifest %d times (shortest read %d bytes, want %d): the publish is not atomic",
+			n, shortest.Load(), wantLen)
+	}
+}
+
+// The manifest keeps its published mode across a rewrite. os.CreateTemp makes
+// 0600 files, so an atomic publish that forgets to chmod would silently narrow
+// the cartridge manifest.
+func TestWriteManifestKeepsFileMode(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLayout(dir)
+	m := validSourceManifest()
+	for i := range 2 {
+		if err := l.WriteManifest(m); err != nil {
+			t.Fatalf("WriteManifest #%d: %v", i, err)
+		}
+		st, err := os.Stat(l.ManifestPath())
+		if err != nil {
+			t.Fatalf("stat manifest #%d: %v", i, err)
+		}
+		if perm := st.Mode().Perm(); perm != layoutFilePerm {
+			t.Errorf("manifest mode after write #%d = %o, want %o", i, perm, layoutFilePerm)
+		}
+	}
+}
+
+// A failed or completed publish must not leave staging files inside the
+// cartridge volume: the volume is the shipped artifact.
+func TestWriteManifestLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLayout(dir)
+	if err := l.WriteManifest(validSourceManifest()); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(des) != 1 || des[0].Name() != ManifestFile {
+		names := make([]string, 0, len(des))
+		for _, de := range des {
+			names = append(names, de.Name())
+		}
+		t.Errorf("cartridge root contains %v, want only %q", names, ManifestFile)
 	}
 }
