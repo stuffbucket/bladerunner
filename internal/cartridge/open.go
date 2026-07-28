@@ -52,6 +52,12 @@ type Opened struct {
 	// cartridge is open. It is what stops a second boot from converting over —
 	// or unlinking — an image this process is running from.
 	lock *imageLock
+
+	// persist records OpenOptions.Persist: whether Close COMMITS the working
+	// copy back over SourcePath instead of discarding it. It is unexported
+	// because the decision belongs to whoever opened the cartridge — flipping
+	// it on a live *Opened would change what teardown does to a user's file.
+	persist bool
 }
 
 // OpenOptions configures Open.
@@ -73,6 +79,19 @@ type OpenOptions struct {
 	// orderly drain. Set MountPrivate for scripted or headless use that needs a
 	// deterministic mountpoint.
 	Policy MountPolicy
+	// Persist asks Close to COMMIT the guest's changes back over the shipped
+	// .dmg this cartridge was opened from, instead of discarding them with the
+	// working copy.
+	//
+	// It is opt-in, and deliberately so: booting a .dmg has always been a
+	// throwaway run, and a cartridge is a thing people hand to each other, so
+	// overwriting one is a decision its owner has to make rather than a default
+	// they discover after the fact. See Opened.writeBack for what it does and
+	// what it refuses to do.
+	//
+	// It has no effect when SourcePath is already a runnable .sparseimage: the
+	// guest writes into that file directly, so it is persistent either way.
+	Persist bool
 }
 
 // Open makes a cartridge image bootable and returns it as an owned value.
@@ -112,7 +131,7 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 		name = NameFromPath(path)
 	}
 
-	o := &Opened{Name: name, SourcePath: path}
+	o := &Opened{Name: name, SourcePath: path, persist: opts.Persist}
 
 	// Claim the working copy BEFORE anything touches it. materialize deletes a
 	// stale working copy and converts a fresh one over it; without this claim a
@@ -261,14 +280,17 @@ func (o *Opened) inspect() error {
 	return nil
 }
 
-// Close releases the cartridge: detach the volume, then remove the working copy
-// materialized from a .dmg. Order matters — the working copy is the backing
-// store of the mount, so it can only be removed once the volume is gone.
+// Close releases the cartridge: detach the volume, then settle the working copy
+// materialized from a .dmg — discarded by default, or committed back over the
+// shipped file when the cartridge was opened with Persist. Order matters — the
+// working copy is the backing store of the mount, so it can only be read or
+// removed once the volume is gone.
 //
 // Close is idempotent and safe on a partially-opened cartridge. It returns the
-// detach error; the working copy is removed only once the volume it backs is
-// genuinely gone, so a leftover file after a failed detach is deliberate — the
-// next Open clears it, or refuses if it is somehow still attached.
+// detach error joined with any write-back error; the working copy is settled
+// only once the volume it backs is genuinely gone, so a leftover file after a
+// failed detach is deliberate — the next Open clears it, or refuses if it is
+// somehow still attached.
 func (o *Opened) Close() error {
 	if o == nil {
 		return nil
@@ -277,7 +299,7 @@ func (o *Opened) Close() error {
 		// Unreachable in practice: Open cannot produce an *Opened off darwin.
 		return ErrUnsupported
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), detachTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), o.closeBudget())
 	defer cancel()
 	return o.closeWith(ctx, defaultRunner)
 }
@@ -287,12 +309,15 @@ func (o *Opened) Close() error {
 //
 // A FAILED detach keeps the working copy: it is the backing store of a volume
 // the kernel is still serving, so removing it would be the same data loss
-// clearStaleWorkingCopy refuses at the other end. The Mount is kept too, so a
-// later Close retries the detach rather than pretending the volume is gone.
+// clearStaleWorkingCopy refuses at the other end, and reading it to build a new
+// cartridge would compress a disk mid-write. The Mount is kept too, so a later
+// Close retries the detach rather than pretending the volume is gone.
 //
 // The claim on the working copy is released LAST, after the volume is gone and
-// the working copy has been removed: until then another process must still be
-// refused, or it would convert a fresh image over one this VMM is using.
+// the working copy has been settled: until then another process must still be
+// refused, or it would convert a fresh image over one this VMM is using — and
+// with Persist it would do so while this process is still reading that image to
+// build the cartridge it replaces.
 func (o *Opened) closeWith(ctx context.Context, r commandRunner) error {
 	var err error
 	if o.Mount.Mountpoint != "" {
@@ -301,7 +326,7 @@ func (o *Opened) closeWith(ctx context.Context, r commandRunner) error {
 		}
 	}
 	if o.Mount.Mountpoint == "" || !o.StillAttached() {
-		o.removeWorkingCopy()
+		err = errors.Join(err, o.settleWorkingCopy(ctx, r))
 	}
 	o.releaseClaim()
 	return err
@@ -377,6 +402,17 @@ func (o *Opened) ApplyTo(cfg *config.Config) {
 // GUI reports whether the cartridge's manifest asks for a GUI boot.
 func (o *Opened) GUI() bool {
 	return o != nil && o.Manifest != nil && o.Manifest.Boot.Mode == disk.BootModeGUI
+}
+
+// WritesBack reports whether Close will commit this cartridge's working copy
+// back over the .dmg it was opened from.
+//
+// It is the conjunction a front end has to state to the user, not just the flag
+// they passed: OpenOptions.Persist on a cartridge that was ALREADY runnable
+// (a .sparseimage, which the guest writes into directly) leaves no working copy
+// to commit, so nothing is written back and nothing needs to be.
+func (o *Opened) WritesBack() bool {
+	return o != nil && o.persist && o.WorkingCopy != ""
 }
 
 // --- the boot claim -------------------------------------------------------
