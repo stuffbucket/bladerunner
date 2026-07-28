@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
 // readFile reads a generated config file or fails the test.
@@ -305,5 +307,94 @@ func TestGeneratedConfigsResolveWithRealSSH(t *testing.T) {
 	// Unrelated hosts are untouched.
 	if got := sshConfigResolves(t, agg, "example.invalid"); got != "22" {
 		t.Errorf("ssh -F <aggregator> example.invalid => port %s, want 22", got)
+	}
+}
+
+// TestValidInstanceNameRejectsUnsafeNames pins the guard that stands between a
+// derived instance name and a file written into the user's ssh config tree.
+//
+// The name reaching WriteConfigFor is NOT always checked by instance.ValidName.
+// On the `br start --state-dir <path>` route, vmhost.Spec.Name is deliberately
+// left empty (see buildStartSpec in cmd/bladerunner/start.go), Spec.validateIdentity
+// therefore skips ValidName entirely, and Host.instanceName falls through to
+// config.Config.InstanceName — which is filepath.Base of the state dir, with no
+// validation of any kind. internal/vm.Runner.makeReport takes the same
+// unvalidated value straight from cfg.InstanceName().
+//
+// So this guard is the ONLY check on that route. It must be an allowlist: the
+// name is rendered unescaped by text/template into an ssh_config file, and
+// interpolated into the shell command string CommandFor prints for the user to
+// paste.
+func TestValidInstanceNameRejectsUnsafeNames(t *testing.T) {
+	unsafe := []struct{ name, why string }{
+		{"a\rb", "carriage return is a line terminator to some config readers"},
+		{"a\vb", "vertical tab is a control character"},
+		{"a\fb", "form feed is a control character"},
+		{"a#b", "# starts an ssh_config comment"},
+		{"a=b", "= separates an ssh_config keyword from its value"},
+		{"a;b", "; separates shell commands in the string CommandFor prints"},
+		{"a|b", "| pipes in the string CommandFor prints"},
+		{"a&b", "& backgrounds in the string CommandFor prints"},
+		{"a$b", "$ expands in the string CommandFor prints"},
+		{"a`b", "backtick substitutes a command in the string CommandFor prints"},
+		{"a<b", "< redirects in the string CommandFor prints"},
+		{"a>b", "> redirects in the string CommandFor prints"},
+		{"a(b", "( subshells in the string CommandFor prints"},
+		{"a~b", "~ expands to a home directory"},
+	}
+	for _, tc := range unsafe {
+		if err := validInstanceName(tc.name); err == nil {
+			t.Errorf("validInstanceName(%q) = nil, want an error: %s", tc.name, tc.why)
+		}
+	}
+}
+
+// TestValidInstanceNameAcceptsOrdinaryDirectoryNames guards the other side: the
+// guard must keep accepting the names real instances already use, or tightening
+// it would break working boots. It is deliberately WIDER than
+// instance.ValidName — buildStartSpec documents that a slot basename may carry
+// uppercase, an underscore, a dot, or more than instance.MaxNameLen characters,
+// and those boots work today.
+func TestValidInstanceNameAcceptsOrdinaryDirectoryNames(t *testing.T) {
+	ok := []string{
+		"demo", "my-vm", "vm2", "My_VM", "release.1", "a",
+		strings.Repeat("x", 200),
+	}
+	for _, name := range ok {
+		if err := validInstanceName(name); err != nil {
+			t.Errorf("validInstanceName(%q) = %v, want nil", name, err)
+		}
+	}
+}
+
+// TestWriteInstanceSSHConfigRejectsUnsafeName is the end-to-end statement of the
+// same rule: an unsafe name must not reach the filesystem at all.
+func TestWriteInstanceSSHConfigRejectsUnsafeName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if _, err := WriteInstanceSSHConfig("evil#Port 2222", 51050, "u", "/k"); err == nil {
+		t.Fatal("WriteInstanceSSHConfig() accepted a name containing an ssh_config comment character")
+	}
+	if entries, err := os.ReadDir(InstanceConfigDir()); err == nil && len(entries) != 0 {
+		t.Errorf("rejected name still wrote %d file(s) into config.d", len(entries))
+	}
+}
+
+// TestSSHGuardIsSupersetOfInstanceValidName pins the relationship between the
+// two name rules so the layering stays coherent. Every name the authoritative
+// validator accepts must also pass this package's guard — otherwise a properly
+// registered instance would boot and then fail to get an ssh config.
+//
+// The converse does NOT hold, and must not: see validInstanceName's comment for
+// the route on which instance.ValidName never runs at all.
+func TestSSHGuardIsSupersetOfInstanceValidName(t *testing.T) {
+	names := []string{"demo", "vm2", "a", "my-vm", "x0-9-z", strings.Repeat("n", 64)}
+	for _, name := range names {
+		if err := instance.ValidName(name); err != nil {
+			t.Fatalf("test fixture %q is not a valid instance name: %v", name, err)
+		}
+		if err := validInstanceName(name); err != nil {
+			t.Errorf("instance.ValidName accepts %q but the ssh guard rejects it: %v", name, err)
+		}
 	}
 }
