@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -913,6 +912,11 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 		sshCommand = fmt.Sprintf("ssh -p %d %s@127.0.0.1", r.cfg.LocalSSHPort, r.cfg.SSHUser)
 	}
 
+	// Write the example before assembling the report: the report publishes the
+	// path, so it must only publish one that exists. A failure is logged inside
+	// and comes back as "", which Access.GoClientExamplePath omits.
+	goClientExamplePath := writeGoClientExample(r.cfg.VMDir, r.cfg.ClientCertPath, r.cfg.ClientKeyPath, r.cfg.LocalAPIPort)
+
 	data := &report.StartupReport{
 		GeneratedAt: time.Now().UTC(),
 		Host: report.HostInfo{
@@ -948,7 +952,7 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 			SSHConfigPath:       sshConfigPath,
 			SSHKeyPath:          r.cfg.SSHPrivateKeyPath,
 			RESTExample:         fmt.Sprintf("curl --cert %s --key %s -k %s/1.0", r.cfg.ClientCertPath, r.cfg.ClientKeyPath, endpoint),
-			GoClientExamplePath: filepath.Join(r.cfg.VMDir, "incus-client-example.go"),
+			GoClientExamplePath: goClientExamplePath,
 			ClientCertPath:      r.cfg.ClientCertPath,
 			ClientKeyPath:       r.cfg.ClientKeyPath,
 			LogPath:             r.cfg.LogPath,
@@ -966,7 +970,6 @@ func (r *Runner) makeReport(baseImagePath, endpoint string, server *incusctl.Ser
 		}
 	}
 
-	_ = os.WriteFile(data.Access.GoClientExamplePath, []byte(goClientExample(r.cfg.ClientCertPath, r.cfg.ClientKeyPath, r.cfg.LocalAPIPort)), 0o644)
 	return data
 }
 
