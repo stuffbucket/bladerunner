@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/instance"
@@ -69,15 +70,46 @@ type Spec struct {
 	// calling config.Default(StateDir). The overlay chain (Settings, Manifest,
 	// Overrides, Ports, cartridge) is still applied on top of it. It must not
 	// carry live handles: HostListeners is populated by the Host itself.
-	Config *config.Config `json:"config,omitempty"`
+	//
+	// It is deliberately NOT serialized. A Spec crosses a process boundary as
+	// JSON when a holder is spawned, and this field is the in-process escape
+	// hatch for a caller that has already resolved a config — a thing no
+	// spawner has and no holder could use, since the paths in it are only
+	// meaningful to the process that built it.
+	Config *config.Config `json:"-"`
 
 	// CartridgePath is the cartridge image the instance boots from (the
 	// shipped .dmg or a runnable .sparseimage). Only valid for KindCartridge.
 	CartridgePath string `json:"cartridgePath,omitempty"`
 
 	// Mountpoint is where the cartridge image is attached. Required for
-	// KindCartridge; must be empty otherwise.
+	// KindCartridge under MountPolicy private, ignored under the browsable
+	// default (macOS chooses the location and Open reports it back), and must
+	// be empty for a non-cartridge kind.
+	//
+	// It stays meaningful under the browsable policy for one caller: a front
+	// end that opened the cartridge ITSELF and handed it over with
+	// AdoptCartridge already knows where the volume landed, and records it
+	// here. When the Host does the opening this field is a guess, so
+	// cartridgeOpenOptions drops it.
 	Mountpoint string `json:"mountpoint,omitempty"`
+
+	// MountPolicy selects where the cartridge volume is attached: the
+	// browsable default under /Volumes, where the user can eject it, or
+	// `br boot --private-mount`'s deterministic <state>/mnt/<name>. Only valid
+	// for KindCartridge; the zero value is cartridge.DefaultMountPolicy.
+	MountPolicy cartridge.MountPolicy `json:"mountPolicy,omitempty"`
+
+	// Persist is `br boot --persist`: write the guest's changes back over the
+	// shipped .dmg once it has powered off, instead of discarding them with
+	// the working copy. Only valid for KindCartridge.
+	//
+	// It rides on the Spec rather than on the *cartridge.Opened alone because
+	// the ordinary boot path now runs under a holder process, which opens the
+	// cartridge itself — a decision recorded only on an already-open cartridge
+	// could not cross that process boundary, and `--persist` would be silently
+	// dropped.
+	Persist bool `json:"persist,omitempty"`
 
 	// Manifest is the disk manifest applied as defaults after the persisted
 	// Settings and before Overrides. Nil for a plain start.
@@ -158,28 +190,77 @@ func (s Spec) validateIdentity() error {
 }
 
 // validateCartridge enforces that the cartridge fields and the kind agree, in
-// both directions: a cartridge boot needs an image and a mountpoint, and a
-// non-cartridge boot must not carry either.
+// both directions: a cartridge boot needs an image (and, when it dictates a
+// private mountpoint, that mountpoint), and a non-cartridge boot must not carry
+// any of them.
 func (s Spec) validateCartridge() error {
 	if s.Kind != instance.KindCartridge {
-		if s.CartridgePath != "" {
-			return fmt.Errorf("%w: cartridge path %q set for kind %q", ErrInvalidSpec, s.CartridgePath, s.Kind)
-		}
-		if s.Mountpoint != "" {
-			return fmt.Errorf("%w: mountpoint %q set for kind %q", ErrInvalidSpec, s.Mountpoint, s.Kind)
-		}
-		return nil
+		return s.validateNoCartridgeFields()
+	}
+	if !s.MountPolicy.Valid() {
+		return fmt.Errorf("%w: unknown mount policy %q", ErrInvalidSpec, string(s.MountPolicy))
 	}
 	if s.CartridgePath == "" {
 		return fmt.Errorf("%w: kind %q needs a cartridge path", ErrInvalidSpec, instance.KindCartridge)
 	}
-	if s.Mountpoint == "" {
-		return fmt.Errorf("%w: kind %q needs a mountpoint", ErrInvalidSpec, instance.KindCartridge)
+	// Only a PRIVATE mount needs a mountpoint up front. Under the browsable
+	// default macOS chooses one (and suffixes it on a collision), so demanding
+	// one here would force every caller to guess — which is exactly the guess
+	// cartridge.BrowsableMountpointFor documents as unsafe to rely on.
+	if s.MountPolicy.Private() && s.Mountpoint == "" {
+		return fmt.Errorf("%w: a private mount needs a mountpoint", ErrInvalidSpec)
 	}
 	if s.RestoreFrom != "" {
 		return fmt.Errorf("%w: a cartridge always cold-boots, so it cannot restore from %q", ErrInvalidSpec, s.RestoreFrom)
 	}
 	return nil
+}
+
+// validateNoCartridgeFields rejects a non-cartridge Spec that carries any
+// cartridge-only field, so a boot never silently ignores one.
+func (s Spec) validateNoCartridgeFields() error {
+	switch {
+	case s.CartridgePath != "":
+		return fmt.Errorf("%w: cartridge path %q set for kind %q", ErrInvalidSpec, s.CartridgePath, s.Kind)
+	case s.Mountpoint != "":
+		return fmt.Errorf("%w: mountpoint %q set for kind %q", ErrInvalidSpec, s.Mountpoint, s.Kind)
+	case s.MountPolicy != "":
+		return fmt.Errorf("%w: mount policy %q set for kind %q", ErrInvalidSpec, string(s.MountPolicy), s.Kind)
+	case s.Persist:
+		return fmt.Errorf("%w: persist set for kind %q, which has nothing to write back", ErrInvalidSpec, s.Kind)
+	default:
+		return nil
+	}
+}
+
+// cartridgeOpenOptions is what a Host that opens the cartridge ITSELF passes to
+// cartridge.Open.
+//
+// The mountpoint is forwarded only under the private policy. Under the
+// browsable default hdiutil picks the location and Open reads it back, so
+// passing the Spec's recorded one would at best be ignored and at worst read as
+// authoritative by a future change.
+func (s Spec) cartridgeOpenOptions() cartridge.OpenOptions {
+	opts := cartridge.OpenOptions{
+		Name:    s.Name,
+		Policy:  s.MountPolicy,
+		Persist: s.Persist,
+	}
+	if s.MountPolicy.Private() {
+		opts.Mountpoint = s.Mountpoint
+	}
+	return opts
+}
+
+// GUIRequested reports whether this Spec ASSERTS a GUI console window.
+//
+// It is not the whole answer to "will this instance be GUI": a Spec that
+// asserts nothing leaves the decision to the persisted Settings, which only the
+// Host resolves. It is the part a front end can know before spawning anything,
+// and the front end needs it because a GUI VM cannot run under a holder — see
+// cmd/bladerunner/start.go.
+func (s Spec) GUIRequested() bool {
+	return s.changed("gui") && s.Overrides.GUI
 }
 
 // validateSizing rejects a driven start with unresolved sizing. A driven Spec

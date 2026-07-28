@@ -53,7 +53,17 @@ var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start a new VM instance",
 	Long: `Start a new Incus VM instance. If no VM exists, one will be created
-with cloud-init provisioning.`,
+with cloud-init provisioning.
+
+The VM is owned by a small holder process, not by this command. Start prints
+the boot progress and returns once the guest is up, and the VM KEEPS RUNNING:
+closing the terminal does not stop it. Press Ctrl+C while it is coming up and
+this command detaches — the VM carries on booting. Shut it down with 'br stop'.
+
+  --gui is the exception. A console window has to be opened by the process that
+  owns the main thread, so a GUI boot runs in the FOREGROUND and the VM stops
+  when this command does, exactly as it always has. The same applies when the
+  menubar's "show console" setting is on.`,
 	RunE: runStart,
 }
 
@@ -87,12 +97,105 @@ func nestedVirtBanner() string {
 	}
 }
 
-// runStart is the CLI wrapper over internal/vmhost: it turns the flags (plus
-// whatever `br boot` stashed) into a vmhost.Spec, installs the terminal front
-// end, and hands the whole VM lifecycle to the Host. Everything that owns a
-// resource lives in vmhost so a holder process — which cannot import package
-// main — can run the exact same sequence.
-func runStart(cmd *cobra.Command, _ []string) error {
+// runStart brings one instance up.
+//
+// # Where the VM actually runs
+//
+// Headless — the ordinary case — the VM is run by a HOLDER: a detached
+// `br vmd` that owns it and outlives this command. This function spawns that
+// holder, attaches the terminal to it (the same banner, the same boot board,
+// the same running summary), and returns once the guest is up, leaving the VM
+// running. Closing the terminal, or Ctrl+C, no longer stops the VM. That is
+// goal 1 of the cartridge runtime, and until now only `br watch` and the
+// menubar reached it.
+//
+// # Except with --gui
+//
+// A GUI boot stays in the FOREGROUND, and it has to: vz.StartGraphicApplication
+// takes the main thread of this process and never gives it back, so the window
+// belongs to whichever process called it. Running it under a holder would put
+// the window on a process with no terminal and no relationship to the one the
+// user typed in, and closing that window is the gesture that ends the VM. So
+// `br start --gui`, `br boot --gui` and a start whose persisted Settings ask
+// for a console keep exactly the behavior they had, terminal-bound lifetime
+// included.
+func runStart(cmd *cobra.Command, args []string) error {
+	spec := buildStartSpec(cmd)
+	if guiRequested(spec) {
+		return runStartForeground(cmd, args, spec)
+	}
+	return runStartUnderHolder(spec)
+}
+
+// guiRequested reports whether this start opens a console window, as far as
+// this process can know before a Host has resolved the config.
+//
+// A boot carries the decision pre-resolved in its overrides. A plain start
+// carries it only when the user passed --gui; otherwise it comes from the
+// persisted Settings, which the menubar's "show console" switch writes and
+// which this reads for the same reason the Host does. A cartridge whose own
+// manifest asks for a GUI is NOT visible here — the manifest lives inside an
+// image nothing has attached yet — so that one boot runs its window under the
+// holder, exactly as an inserted cartridge already does.
+func guiRequested(spec vmhost.Spec) bool {
+	if spec.GUIRequested() {
+		return true
+	}
+	if spec.Driven {
+		// A driven spec asserts every flag, so the answer above was complete.
+		return false
+	}
+	settings, err := config.LoadSettings(config.DefaultStateDir())
+	if err != nil {
+		return false
+	}
+	return settings.ShowConsole
+}
+
+// runStartUnderHolder spawns the holder that will own this instance and watches
+// it come up.
+func runStartUnderHolder(spec vmhost.Spec) error {
+	ctx, stop := signalContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if spec.StateDir == "" {
+		spec.StateDir = config.DefaultStateDir()
+	}
+	// The "it is already up" refusal has to be made HERE now. The Host still
+	// makes it, but it makes it inside a detached process whose only output is
+	// a log file, so the terminal would show a spawned pid and then wait for a
+	// readiness that could never arrive. A cartridge is exempt: it is checked
+	// by image in ensureCartridgeBootable, because its state dir is the
+	// registry root and says nothing about the cartridge.
+	if spec.Kind != instance.KindCartridge {
+		if err := alreadyRunningAt(spec.StateDir); err != nil {
+			return err
+		}
+	}
+	return startUnderHolder(ctx, spec, holderAttachOptions{
+		JSON:    jsonOutput,
+		Timeout: attachBudget(spec),
+	})
+}
+
+// attachBudgetSlack is how much longer than the instance's own readiness budget
+// the terminal keeps watching. It covers everything the readiness wait does not
+// — attaching a cartridge, materializing a disk, downloading a base image —
+// so the outer budget never expires first and blames the wrong thing.
+const attachBudgetSlack = 10 * time.Minute
+
+// attachBudget bounds the terminal's watch on a starting holder.
+func attachBudget(spec vmhost.Spec) time.Duration {
+	if spec.Overrides.Timeout <= 0 {
+		return 0 // the attachment's own default
+	}
+	return spec.Overrides.Timeout + attachBudgetSlack
+}
+
+// runStartForeground runs the VM in THIS process, which is what a GUI boot
+// requires. It is the pre-holder behavior, unchanged: the VM's lifetime is this
+// command's lifetime.
+func runStartForeground(_ *cobra.Command, _ []string, spec vmhost.Spec) error {
 	ctx, stop := signalContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -101,7 +204,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	// below this is a no-op.
 	defer detachBootCartridge()
 
-	host, err := vmhost.New(buildStartSpec(cmd))
+	host, err := vmhost.New(spec)
 	if err != nil {
 		return err
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/vmhost"
@@ -71,8 +72,15 @@ func TestBuildVMDSpecFlat(t *testing.T) {
 	}
 }
 
-// A cartridge holder derives its mountpoint so two cartridges never land on top
-// of each other, and it still validates.
+// A hand-started cartridge holder attaches BROWSABLY and dictates no
+// mountpoint.
+//
+// It used to compute <stateDir>/mnt/<name> and put it in the Spec, and this
+// test asserted that value — but cartridge.Open IGNORES the mountpoint under
+// the browsable policy, and no policy was ever set, so the field was a
+// prediction that never described where the volume actually landed. Now the
+// policy is named and the guess is gone: the mountpoint is read back from the
+// mount, which is the only authority for it.
 func TestBuildVMDSpecCartridge(t *testing.T) {
 	setVMDFlags(t, "/tmp/br-holder", "/Volumes/x/demo.dmg", "", false, 0)
 
@@ -86,17 +94,20 @@ func TestBuildVMDSpecCartridge(t *testing.T) {
 	if spec.CartridgePath != "/Volumes/x/demo.dmg" {
 		t.Fatalf("CartridgePath = %q", spec.CartridgePath)
 	}
-	if !strings.HasSuffix(spec.Mountpoint, "demo") {
-		t.Fatalf("Mountpoint = %q, want it derived from the cartridge name", spec.Mountpoint)
+	if spec.MountPolicy != cartridge.DefaultMountPolicy || !spec.MountPolicy.Browsable() {
+		t.Fatalf("MountPolicy = %q, want the browsable default", spec.MountPolicy)
+	}
+	if spec.Mountpoint != "" {
+		t.Fatalf("Mountpoint = %q, want none: macOS chooses it under the browsable policy", spec.Mountpoint)
 	}
 	if err := spec.Validate(); err != nil {
 		t.Fatalf("the spec a cartridge holder builds must be runnable: %v", err)
 	}
 }
 
-// An explicit --name wins over the cartridge's own basename for both the
-// instance name and the mount slot.
-func TestBuildVMDSpecNameOverridesTheMountSlot(t *testing.T) {
+// An explicit --name wins over the cartridge's own basename for the instance
+// name, which is the registry key, the ssh alias and what `br eject` addresses.
+func TestBuildVMDSpecNameOverridesTheInstanceName(t *testing.T) {
 	setVMDFlags(t, "/tmp/br-holder", "/Volumes/x/demo.dmg", "second", false, 0)
 
 	spec, err := buildVMDSpec()
@@ -105,9 +116,6 @@ func TestBuildVMDSpecNameOverridesTheMountSlot(t *testing.T) {
 	}
 	if spec.Name != "second" {
 		t.Fatalf("Name = %q, want %q", spec.Name, "second")
-	}
-	if !strings.HasSuffix(spec.Mountpoint, "second") {
-		t.Fatalf("Mountpoint = %q, want it to use the explicit name", spec.Mountpoint)
 	}
 }
 
@@ -347,13 +355,13 @@ func TestHoldersDoNotShareALogFile(t *testing.T) {
 	// And the name a spawn derives is what separates the cartridge holders the
 	// mount watcher starts, all of which share the registry root.
 	spawns := []holderSpawn{
-		{StateDir: root, CartridgePath: "/Users/me/Downloads/demo.dmg"},
-		{StateDir: root, CartridgePath: "/Users/me/Downloads/other.dmg"},
-		{StateDir: root, Name: "named", CartridgePath: "/Users/me/Downloads/demo.dmg"},
+		{Spec: vmhost.Spec{StateDir: root, CartridgePath: "/home/me/Downloads/demo.dmg"}},
+		{Spec: vmhost.Spec{StateDir: root, CartridgePath: "/home/me/Downloads/other.dmg"}},
+		{Spec: vmhost.Spec{StateDir: root, Name: "named", CartridgePath: "/home/me/Downloads/demo.dmg"}},
 	}
 	seen := map[string]bool{}
 	for _, s := range spawns {
-		path := vmdLogPath(s.StateDir, s.logName())
+		path := vmdLogPath(s.Spec.StateDir, s.logName())
 		if seen[path] {
 			t.Errorf("holder spawn %+v reuses the log %q", s, path)
 		}

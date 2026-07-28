@@ -505,7 +505,7 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 		return nil, err
 	}
 
-	endpoint := fmt.Sprintf("https://127.0.0.1:%d", r.cfg.LocalAPIPort)
+	endpoint := config.APIEndpoint(r.cfg.LocalAPIPort)
 	return &StartVMResult{Endpoint: endpoint}, nil
 }
 
@@ -516,7 +516,7 @@ func (r *Runner) StartVM(ctx context.Context) (*StartVMResult, error) {
 // default (see vmhost.resolveWaitBudget). Nothing here shortens it.
 func (r *Runner) WaitForIncus(ctx context.Context) (*report.StartupReport, error) {
 	log := logging.L()
-	endpoint := fmt.Sprintf("https://127.0.0.1:%d", r.cfg.LocalAPIPort)
+	endpoint := config.APIEndpoint(r.cfg.LocalAPIPort)
 
 	incusCtx, cancel := context.WithTimeout(ctx, r.cfg.WaitForIncus)
 	defer cancel()
