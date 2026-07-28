@@ -231,6 +231,15 @@ func TestPassthroughCoversEveryPersistentFlag(t *testing.T) {
 		if rootCmd.PersistentFlags().Lookup(name) == nil {
 			t.Errorf("passthroughFlags names %q, which the root command does not declare as a persistent flag", name)
 		}
+		// The list is only a claim; check that splitPassthroughArgs really
+		// consumes the flag rather than handing it to the guest.
+		args := []string{"--" + name, "value"}
+		_, rest, err := splitPassthroughArgs(args)
+		if err != nil {
+			t.Errorf("splitPassthroughArgs(%q) returned error: %v", args, err)
+		} else if len(rest) > 0 && rest[0] == args[0] {
+			t.Errorf("splitPassthroughArgs(%q) left %q for the guest; passthroughFlags claims it is consumed", args, rest[0])
+		}
 		known[name] = true
 	}
 	for _, name := range rootPersistentFlagNames(t) {
