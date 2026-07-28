@@ -39,10 +39,19 @@ import (
 // and pending requests are short-lived and held in memory only.
 
 const (
-	pathAuthnNonce    = "/authn/nonce"
-	pathAuthnExchange = "/authn/exchange"
-	pathAuthnConsume  = "/authn/consume"
-	pathAuthnApprove  = "/authn/approve"
+	// PathAuthnNonce serves the single-use nonce a client signs to prove it
+	// holds a registered SSH key. Exported because `br web` drives these
+	// endpoints; this package is the single source of truth for the routes and
+	// registers the same constants on its mux.
+	PathAuthnNonce = "/authn/nonce"
+	// PathAuthnExchange trades a signed nonce for a short-lived ticket.
+	PathAuthnExchange = "/authn/exchange"
+	// PathAuthnConsume redeems a ticket for a browser session cookie.
+	PathAuthnConsume = "/authn/consume"
+	// PathAuthnApprove binds a registered identity to a pending out-of-band
+	// authorization request.
+	PathAuthnApprove = "/authn/approve"
+
 	pathAuthorizePoll = "/authorize/poll"
 
 	// sessionCookieName is the provider-origin cookie that marks a browser as

@@ -8,10 +8,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
 //go:embed manifests/*.disk
 var builtinFS embed.FS
+
+// userDiskDirName is the config-dir subdirectory holding user disk manifests.
+const userDiskDirName = "disks"
 
 // Entry is one catalog disk: its manifest plus where it came from.
 type Entry struct {
@@ -28,17 +33,9 @@ type Catalog struct {
 }
 
 // DefaultDiskDir returns the XDG-compliant directory of user disk manifests:
-// $XDG_CONFIG_HOME/bladerunner/disks or ~/.config/bladerunner/disks. Mirrors
-// oidc.DefaultIdentityDir's layout.
+// <config.DefaultConfigDir>/disks. internal/config owns the XDG lookup; this wraps it.
 func DefaultDiskDir() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bladerunner", "disks")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".config", "bladerunner", "disks")
-	}
-	return filepath.Join(home, ".config", "bladerunner", "disks")
+	return filepath.Join(config.DefaultConfigDir(), userDiskDirName)
 }
 
 // LoadCatalog seeds the catalog from the embedded builtins, then overlays user

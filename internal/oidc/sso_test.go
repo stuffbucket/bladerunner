@@ -49,7 +49,7 @@ func sshProof(t *testing.T, base string, signer ssh.Signer) (fp, nonce, sig stri
 	var nr struct {
 		Nonce string `json:"nonce"`
 	}
-	resp, err := http.Get(base + pathAuthnNonce)
+	resp, err := http.Get(base + PathAuthnNonce)
 	if err != nil {
 		t.Fatalf("nonce get: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestSilentSSOFlow(t *testing.T) {
 
 	// Step 1: proof -> ticket.
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
-	exResp, err := http.PostForm(srv.URL+pathAuthnExchange, url.Values{
+	exResp, err := http.PostForm(srv.URL+PathAuthnExchange, url.Values{
 		formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestSilentSSOFlow(t *testing.T) {
 
 	// Step 2: consume the ticket -> sets the session cookie.
 	next := "http://127.0.0.1:9999/ui/"
-	cResp, err := browser.Get(srv.URL + pathAuthnConsume + "?ticket=" + url.QueryEscape(ex.Ticket) + "&next=" + url.QueryEscape(next))
+	cResp, err := browser.Get(srv.URL + PathAuthnConsume + "?ticket=" + url.QueryEscape(ex.Ticket) + "&next=" + url.QueryEscape(next))
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 	}
 
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
-	exResp, _ := http.PostForm(srv.URL+pathAuthnExchange, url.Values{
+	exResp, _ := http.PostForm(srv.URL+PathAuthnExchange, url.Values{
 		formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	var ex struct {
@@ -240,7 +240,7 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 	browser := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
-	cResp, _ := browser.Get(srv.URL + pathAuthnConsume + "?ticket=" + url.QueryEscape(ex.Ticket))
+	cResp, _ := browser.Get(srv.URL + PathAuthnConsume + "?ticket=" + url.QueryEscape(ex.Ticket))
 	_ = cResp.Body.Close()
 
 	verifier := "this-is-a-sufficiently-long-pkce-code-verifier-string"
@@ -317,7 +317,7 @@ func TestChallengeApproveFlow(t *testing.T) {
 
 	// Approve from a terminal that holds the key.
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
-	apResp, err := http.PostForm(srv.URL+pathAuthnApprove, url.Values{
+	apResp, err := http.PostForm(srv.URL+PathAuthnApprove, url.Values{
 		"request_id": {reqID}, formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	if err != nil {
@@ -351,7 +351,7 @@ func TestExchangeRejectsUnregisteredKey(t *testing.T) {
 
 	_, signer := genKeyAndSigner(t, "mallory@host") // never added to the store
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
-	resp, err := http.PostForm(srv.URL+pathAuthnExchange, url.Values{
+	resp, err := http.PostForm(srv.URL+PathAuthnExchange, url.Values{
 		formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig},
 	})
 	if err != nil {
@@ -376,13 +376,13 @@ func TestNonceIsSingleUse(t *testing.T) {
 	fp, nonce, sig := sshProof(t, srv.URL, signer)
 	form := url.Values{formFieldFingerprint: {fp}, formFieldNonce: {nonce}, formFieldSignature: {sig}}
 
-	first, _ := http.PostForm(srv.URL+pathAuthnExchange, form)
+	first, _ := http.PostForm(srv.URL+PathAuthnExchange, form)
 	firstStatus := first.StatusCode
 	_ = first.Body.Close()
 	if firstStatus != http.StatusOK {
 		t.Fatalf("first exchange status=%d want 200", firstStatus)
 	}
-	second, _ := http.PostForm(srv.URL+pathAuthnExchange, form)
+	second, _ := http.PostForm(srv.URL+PathAuthnExchange, form)
 	secondStatus := second.StatusCode
 	_ = second.Body.Close()
 	if secondStatus != http.StatusBadRequest {

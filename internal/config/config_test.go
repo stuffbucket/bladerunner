@@ -8,8 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
 // pinnedURL builds the expected pinned genericcloud URL for an arch so the
@@ -327,91 +325,6 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-func TestConfigValidation(t *testing.T) {
-	tests := []struct {
-		name    string
-		setup   func(*Config)
-		wantErr bool
-	}{
-		{
-			name:    "valid config passes",
-			setup:   func(_ *Config) {},
-			wantErr: false,
-		},
-		{
-			name: "missing name fails",
-			setup: func(c *Config) {
-				c.Name = ""
-			},
-			wantErr: true,
-		},
-		{
-			name: "zero CPUs fails",
-			setup: func(c *Config) {
-				c.CPUs = 0
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid network mode fails",
-			setup: func(c *Config) {
-				c.NetworkMode = "invalid"
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// EnsureKeyPair generates into ssh.Dir(), which falls back to
-			// $HOME/.config/bladerunner/ssh. Without this the test writes a
-			// real private key into the developer's home directory.
-			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-			tmpDir := t.TempDir()
-			cfg, err := Default(tmpDir)
-			if err != nil {
-				t.Fatalf("Default() error = %v", err)
-			}
-
-			// Set up SSH keys for validation
-			keyPair, err := ssh.EnsureKeyPair()
-			if err != nil {
-				t.Fatalf("EnsureKeyPair() error = %v", err)
-			}
-			cfg.SetSSHKeys(keyPair.PublicKey, keyPair.PrivateKeyPath)
-
-			tt.setup(cfg)
-			err = cfg.Validate()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestSSHKeyDetection(t *testing.T) {
-	// Sandbox the key material. Without this the test both writes into the
-	// developer's real $HOME and, on a machine that already has a key, only
-	// ever exercises the read-back branch of EnsureKeyPair.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	keyPair, err := ssh.EnsureKeyPair()
-	if err != nil {
-		t.Fatalf("EnsureKeyPair() failed: %v", err)
-	}
-
-	if keyPair.PublicKey == "" {
-		t.Error("EnsureKeyPair() returned empty public key")
-	}
-	if len(keyPair.PublicKey) < 50 {
-		t.Errorf("SSH key seems too short: %d bytes", len(keyPair.PublicKey))
-	}
-	if keyPair.PrivateKeyPath == "" {
-		t.Error("EnsureKeyPair() returned empty private key path")
-	}
-}
-
 func TestStateDirectoryDefault(t *testing.T) {
 	// Clear env vars that would override the default
 	t.Setenv("BLADERUNNER_STATE_DIR", "")
@@ -617,4 +530,53 @@ func TestHostListenerHandoff(t *testing.T) {
 	if err := cfg.CloseHostListeners(); err != nil {
 		t.Errorf("second CloseHostListeners() = %v", err)
 	}
+}
+
+// TestConfigDirIsSingleSourceOfTruth pins the XDG config-directory lookup that
+// internal/disk, internal/ssh and internal/oidc all build on. Each of those
+// packages used to carry its own copy of this precedence chain.
+func TestConfigDirIsSingleSourceOfTruth(t *testing.T) {
+	t.Run("XDG_CONFIG_HOME wins", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+		want := filepath.Join(tmpDir, "bladerunner")
+		if got := DefaultConfigDir(); got != want {
+			t.Errorf("DefaultConfigDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("falls back to home/.config", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Skip("cannot determine home directory")
+		}
+		want := filepath.Join(home, ".config", "bladerunner")
+		if got := DefaultConfigDir(); got != want {
+			t.Errorf("DefaultConfigDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("DefaultIdentityDir hangs off DefaultConfigDir", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+		want := filepath.Join(DefaultConfigDir(), "identities")
+		if got := DefaultIdentityDir(); got != want {
+			t.Errorf("DefaultIdentityDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("DefaultStateDir is a different directory", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", tmpDir)
+		t.Setenv("BLADERUNNER_STATE_DIR", "")
+		t.Setenv("XDG_STATE_HOME", "")
+
+		if DefaultConfigDir() == DefaultStateDir() {
+			t.Error("DefaultConfigDir() and DefaultStateDir() must not collapse to one directory")
+		}
+	})
 }

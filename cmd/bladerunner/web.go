@@ -25,16 +25,10 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/oidc"
 )
 
-// Endpoint paths on the local OIDC provider. Kept in sync with internal/oidc;
-// duplicated here so the CLI does not import unexported provider internals.
-const (
-	authnNoncePath    = "/authn/nonce"
-	authnExchangePath = "/authn/exchange"
-	authnConsumePath  = "/authn/consume"
-	authnApprovePath  = "/authn/approve"
-
-	webHTTPTimeout = 10 * time.Second
-)
+// webHTTPTimeout bounds each HTTP call this command makes to the local OIDC
+// provider. The endpoint paths themselves come from internal/oidc, which owns
+// the provider and registers them on its mux.
+const webHTTPTimeout = 10 * time.Second
 
 var webCmd = &cobra.Command{
 	Use:   "web",
@@ -247,7 +241,7 @@ func runWeb(_ *cobra.Command, _ []string) error {
 	// Incus's OIDC login, which bounces to the provider's /authorize. Because the
 	// cookie is already set, /authorize issues a code silently and the browser
 	// lands on the authenticated UI — no login page, no button to click.
-	consume := providerBase + authnConsumePath +
+	consume := providerBase + oidc.PathAuthnConsume +
 		"?ticket=" + url.QueryEscape(ticket) +
 		"&next=" + url.QueryEscape(incusLogin)
 	fmt.Printf("%s Signing in to Incus as your SSH identity…\n", success("✓"))
@@ -279,7 +273,7 @@ func runWebApprove(_ *cobra.Command, args []string) error {
 		"nonce":       {nonce},
 		"signature":   {sig},
 	}
-	if err := postForm(providerBase+authnApprovePath, form, nil); err != nil {
+	if err := postForm(providerBase+oidc.PathAuthnApprove, form, nil); err != nil {
 		return fmt.Errorf("approve request: %w", err)
 	}
 	fmt.Printf("%s Approved sign-in request %s as %s\n", success("✓"), value(reqID), value(fp))
@@ -302,7 +296,7 @@ func proveAndGetTicket(providerBase, keyPath string) (string, error) {
 	var resp struct {
 		Ticket string `json:"ticket"`
 	}
-	if err := postForm(providerBase+authnExchangePath, form, &resp); err != nil {
+	if err := postForm(providerBase+oidc.PathAuthnExchange, form, &resp); err != nil {
 		return "", err
 	}
 	if resp.Ticket == "" {
@@ -317,7 +311,7 @@ func signNonce(providerBase string, signer ssh.Signer) (fingerprint, nonce, sigB
 	var nr struct {
 		Nonce string `json:"nonce"`
 	}
-	if err = httpGetJSON(providerBase+authnNoncePath, &nr); err != nil {
+	if err = httpGetJSON(providerBase+oidc.PathAuthnNonce, &nr); err != nil {
 		return "", "", "", fmt.Errorf("get nonce: %w", err)
 	}
 	if nr.Nonce == "" {
