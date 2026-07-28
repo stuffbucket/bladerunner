@@ -1,6 +1,8 @@
 package vm
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -43,5 +45,34 @@ func TestGoClientExampleEscapesPaths(t *testing.T) {
 	const wantCert = `os.ReadFile("/tmp/a\"b\\c")`
 	if !strings.Contains(got, wantCert) {
 		t.Errorf("goClientExample() did not %%q-escape cert path\nwant substring %q\n---\n%s", wantCert, got)
+	}
+}
+
+// TestWriteGoClientExampleReportsFailure pins that a failed write is NOT
+// silently swallowed: the report must not advertise a path to a file that does
+// not exist. This mirrors how Access.SSHConfigPath already degrades when its
+// write fails.
+func TestWriteGoClientExampleReportsFailure(t *testing.T) {
+	// A VM dir that does not exist: the write cannot succeed.
+	missing := filepath.Join(t.TempDir(), "no-such-dir")
+	if got := writeGoClientExample(missing, "/c.crt", "/c.key", 18443); got != "" {
+		t.Errorf("writeGoClientExample() into a missing dir = %q, want \"\"", got)
+	}
+}
+
+// TestWriteGoClientExampleWritesFile pins the success path: the returned path is
+// the file that was actually written, and it holds the rendered program.
+func TestWriteGoClientExampleWritesFile(t *testing.T) {
+	dir := t.TempDir()
+	got := writeGoClientExample(dir, "/c.crt", "/c.key", 18443)
+	if got == "" {
+		t.Fatal("writeGoClientExample() = \"\", want the written path")
+	}
+	b, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("read %s: %v", got, err)
+	}
+	if !strings.Contains(string(b), "/c.crt") {
+		t.Errorf("written example does not carry the client cert path: %s", b)
 	}
 }

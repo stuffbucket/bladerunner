@@ -104,12 +104,15 @@ type IncusInfo struct {
 // SSHConfigPath is omitted when no per-instance ssh config was written — no
 // key was provisioned, or writing it failed — and SSHCommand then degrades to a
 // bare `ssh -p <port> user@127.0.0.1` that still works.
+//
+// GoClientExamplePath is omitted on the same principle: it names a file on disk
+// for the user to open, so it is only set when that file was actually written.
 type Access struct {
 	SSHCommand          string `json:"ssh_command"`
 	SSHConfigPath       string `json:"ssh_config_path,omitempty"`
 	SSHKeyPath          string `json:"ssh_key_path,omitempty"`
 	RESTExample         string `json:"rest_example"`
-	GoClientExamplePath string `json:"go_client_example_path"`
+	GoClientExamplePath string `json:"go_client_example_path,omitempty"`
 	ClientCertPath      string `json:"client_cert_path"`
 	ClientKeyPath       string `json:"client_key_path"`
 	LogPath             string `json:"log_path"`
