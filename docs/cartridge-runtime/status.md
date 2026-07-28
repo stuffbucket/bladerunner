@@ -47,11 +47,12 @@ There is a second, older detach path: `startVMDetachedAndWait`
 a VM and none is running. So a VM *can* outlive the invoking command — but via a
 detached copy of the full CLI, not via the minimal holder.
 
-**`design.md` §9 contradicts itself on this.** Its W5 row is correct ("its
-production caller is the mount watcher; `br start` and `br boot` still run a
-`Host` in the foreground"), and then five lines later it asserts "All five goals
-in §1 are now met end to end." The second statement is false as written. PR #176's
-summary repeated the wrong version.
+**`design.md` §9 used to contradict itself on this.** Its W5 row was correct
+("its production caller is the mount watcher; `br start` and `br boot` still run a
+`Host` in the foreground"), and then five lines later it asserted "All five goals
+in §1 are now met end to end". The second statement was false as written, and
+PR #176's summary repeated the wrong version. §9 has since been corrected — see
+§5 — and now records goal 1 as partial.
 
 ### Goal 2
 
@@ -63,8 +64,9 @@ downloads to a single fixed path with no cross-process lock
 (`internal/vm/assets.go:365`), so two instances racing a first download is
 untested. That hazard predates this work.
 
-`scripts/smoke-cartridge.sh:122` still carries a preflight comment saying
-"bladerunner uses fixed ports — one VM at a time". That comment is now stale.
+`scripts/smoke-cartridge.sh`'s preflight used to explain itself with
+"bladerunner uses fixed ports — one VM at a time". That was stale, and has been
+corrected; the port check itself is unchanged and still wanted.
 
 ### Goal 4
 
@@ -72,7 +74,7 @@ Detection requires either a foreground `br watch` or the menubar, and the menuba
 is installed only by an explicit `br menubar install`. A user who installs
 bladerunner and double-clicks a cartridge DMG gets a mounted volume in Finder and
 nothing else. `usage.md` and `README.md` condition this correctly; `design.md` §1
-and PR #176 state it unconditionally.
+and PR #176 stated it unconditionally — `design.md` has since been corrected.
 
 ### Goal 5
 
@@ -153,21 +155,25 @@ aggregator above.
 
 ---
 
-## 5. Known doc inaccuracies
+## 5. Doc inaccuracies — all six are now corrected
 
-1. `design.md` §9's closing sentence contradicts its own W5 row (see §2).
-2. `design.md` §1 goal 4 and PR #176 state mount detection unconditionally; it
-   needs `br watch` or the menubar.
-3. `usage.md` gives the holder log as `vmd.log` for a watcher-booted cartridge; it
-   is `vmd-<name>.log`. A passing test asserts the real behaviour.
-4. The `CLAUDE.md` tracked in the repo is correct. But an **untracked, stale
-   `CLAUDE.md` still sits in the main checkout** describing `cmd/br-agent`,
-   `--use-guest-agent` and "two boot paths" — all deleted in #166. Agents reading
-   that copy get a description of an architecture that no longer exists. Delete
-   it so the tracked file is the only source.
-5. The Makefile help for `smoke-cartridge` still says ~5-10 min; the script header
-   was corrected to ~15-25.
-6. `scripts/smoke-cartridge.sh:122`'s "one VM at a time" comment is stale.
+Every item the audit raised has been fixed. Kept here, resolved rather than
+deleted, so the record shows what was wrong and what was done about it.
+
+| # | Was wrong | Resolution |
+|---|---|---|
+| 1 | `design.md` §9's closing sentence ("All five goals in §1 are now met end to end") contradicted its own W5 row | **Fixed.** §9 now names goals 2–5 as met and goal 1 as **partial**, and repeats that `br start`/`br up`/`br boot` run the `Host` in the CLI foreground while the mount watcher is the only production holder spawn site. |
+| 2 | `design.md` §1 goal 4 stated mount detection unconditionally | **Fixed.** Goal 4 is now conditioned on a foreground `br watch` or the installed menubar, matching `usage.md` and `README.md`. |
+| 3 | `usage.md` gave the holder log as `vmd.log` for a watcher-booted cartridge | **Fixed.** It is `vmd-<name>.log`; only the flat default keeps `vmd.log` (`vmdLogName`, `cmd/bladerunner/vmd.go`). Asserted by `TestHoldersDoNotShareALogFile`. |
+| 4 | A stale, untracked `CLAUDE.md` sat in the main checkout describing `cmd/br-agent`, `--use-guest-agent` and "two boot paths" — all deleted in #166 | **Resolved.** That copy has been removed (archived outside the repo). The tracked `CLAUDE.md` is the only source. |
+| 5 | The Makefile help for `smoke-cartridge` said ~5-10 min | **Fixed.** It now says ~15-25min, agreeing with the script header. |
+| 6 | `scripts/smoke-cartridge.sh`'s preflight said "bladerunner uses fixed ports — one VM at a time" | **Fixed.** The explanation now says ports are a preference with ephemeral fallback, and why the check is still worth keeping. The check itself is unchanged. |
+
+### Still outstanding
+
+§4's behaviour changes are documented nowhere in `README.md` or `docs/`. That is
+a gap in user-facing documentation, not a doc inaccuracy, and is tracked
+separately.
 
 ---
 

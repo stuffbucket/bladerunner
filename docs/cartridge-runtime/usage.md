@@ -221,11 +221,14 @@ hdiutil detach /path/to/mountpoint -force
 **Where the logs are.** The instance's own logs live under its state dir —
 which for a cartridge is the mountpoint, `/Volumes/bladerunner-<name>`:
 `bladerunner.log` for the host side, `console.log` for the guest serial console.
-A holder spawned detached also writes its raw stdout/stderr to `vmd.log` in the
-directory it was *pointed at*, which for a watcher-booted cartridge is
-`~/.local/state/bladerunner/vmd.log`. A holder you ran by hand writes to your
-terminal instead. (`br logs` is unrelated — it streams logs from an *Incus*
-instance inside the guest.)
+A holder spawned detached also writes its raw stdout/stderr to a holder log in
+the directory it was *pointed at*. That log is named **per instance**, because
+every cartridge holder is spawned with the registry root as its state dir and
+would otherwise interleave into one shared file: a watcher-booted cartridge
+`demo` writes `~/.local/state/bladerunner/vmd-demo.log`, and only the flat
+default instance keeps the historical `~/.local/state/bladerunner/vmd.log`. A
+holder you ran by hand writes to your terminal instead. (`br logs` is unrelated —
+it streams logs from an *Incus* instance inside the guest.)
 
 ---
 

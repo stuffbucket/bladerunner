@@ -22,7 +22,10 @@ holders that notices cartridges being inserted and drains them safely on eject.
 3. **The cartridge is the unit.** One DMG contains everything for that instance
    except bladerunner itself. Transportable (AirDrop, copy) and simple to run.
 4. **Insertion is detected.** Mounting a cartridge DMG is noticed, and the user is
-   offered a boot.
+   offered a boot — *when something is watching*. Detection needs a foreground
+   `br watch` or the menubar, and the menubar is installed only by an explicit
+   `br menubar install`. Nothing detects out of the box: a fresh install that
+   double-clicks a cartridge DMG gets a mounted volume in Finder and no offer.
 5. **Ejection is orderly.** Requesting an unmount drains the VM first — no
    corruption.
 
@@ -265,11 +268,28 @@ silently see nothing.
 cartridge holder with no cgo at all. W6/W7/W8 (DiskArbitration) is what buys goals
 4 and 5; cutting it leaves the product where PR #72 left it.
 
-All five goals in §1 are now met end to end. What is left is polish and hardening
-rather than architecture: the menubar's remaining single-VM assumptions (W9),
-cartridge self-containment (W10), the TCC entitlement keys §8 calls for (today a
-permission failure is reported to the user rather than pre-empted), and the
-unmitigated risks below.
+**Where that leaves the five goals in §1.** Goals 2, 3, 4 and 5 are met: ports,
+sockets, lock files, registry entries and ssh fragments are all per-instance; the
+DMG is the transportable unit; `br watch` and the menubar detect an insertion and
+offer a boot; and an unmount request is answered by an orderly drain.
+
+**Goal 1 is partial.** The holder exists, works, and is what the mount watcher
+starts — but it is not on the ordinary path. `br start`, `br up` and
+`br boot <disk|cartridge>` all build a `vmhost.Host` and run it in the
+**foreground of the CLI process** (`cmd/bladerunner/start.go`, `runStart`), so
+Ctrl+C or closing the terminal still takes the VM with it. The only production
+spawn site for `br vmd` is the mount watcher (`cmd/bladerunner/cartridge_watch.go`,
+reachable from `br watch` and the menubar). A second, older detach path survives —
+`startVMDetachedAndWait` (`cmd/bladerunner/vmgate.go`) forks `br start` detached
+when another verb needs a VM and none is running — so a VM *can* outlive the
+invoking command, but via a detached copy of the full CLI rather than the minimal
+holder. Routing `br start` / `br boot` through the holder is outstanding work, not
+a done goal.
+
+What is left beyond that is polish and hardening rather than architecture: the
+menubar's remaining single-VM assumptions (W9), cartridge self-containment (W10),
+the TCC entitlement keys §8 calls for (today a permission failure is reported to
+the user rather than pre-empted), and the unmitigated risks below.
 
 ---
 
