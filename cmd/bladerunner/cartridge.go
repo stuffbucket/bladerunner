@@ -341,11 +341,37 @@ var bootCartridge struct {
 
 // cartridgeMountpoint returns the private mountpoint for a cartridge name:
 // <DefaultStateDir>/mnt/<name>. It is the mount target for the BUILD-side flows
-// (`br disk pack`), which need a deterministic location and must never contend
-// with a booted cartridge — a booted one is attached browsably, so macOS puts
-// it under /Volumes where the user can eject it.
+// (`br disk pack`) and for a boot that asked for --private-mount: both need a
+// deterministic location.
+//
+// The two therefore share one path, and that is the collision the browsable
+// default was chosen to avoid — packing a cartridge while a --private-mount
+// boot of the SAME NAME is live wants the same directory. It fails loudly
+// (`hdiutil attach -mountpoint` refuses an occupied mountpoint) rather than
+// quietly, and the browsable default keeps it off the ordinary path, so the
+// flag documents it instead of the package preventing it.
 func cartridgeMountpoint(name string) string {
 	return cartridge.MountpointFor(config.DefaultStateDir(), name)
+}
+
+// cartridgeOpenOptions builds the cartridge.Open options for `br boot
+// <cartridge>` from the two cartridge-only flags.
+//
+// Under the browsable default the mountpoint is left EMPTY on purpose: macOS
+// picks the location (under /Volumes, where the user can eject it) and Open
+// reports back where it landed. Predicting it here is exactly the mistake this
+// file used to make. Only --private-mount dictates one, because MountPrivate
+// requires it.
+func cartridgeOpenOptions(name string, privateMount, persist bool) cartridge.OpenOptions {
+	opts := cartridge.OpenOptions{
+		Name:    name,
+		Policy:  cartridge.MountPolicyFor(privateMount),
+		Persist: persist,
+	}
+	if opts.Policy.Private() {
+		opts.Mountpoint = cartridgeMountpoint(name)
+	}
+	return opts
 }
 
 // cartridgeImageKey reduces a cartridge image path to the identity two boots of
@@ -427,14 +453,14 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 		return jsonOrError(err)
 	}
 
-	// No mountpoint is passed: the default policy is browsable, so macOS picks
-	// the location (under /Volumes, visible and ejectable in Finder) and Open
-	// reports back where it landed. Predicting it here is exactly the mistake
-	// this file used to make.
-	opened, err := cartridge.Open(path, cartridge.OpenOptions{Name: name})
+	// No mountpoint is passed under the browsable default: macOS picks the
+	// location (under /Volumes, visible and ejectable in Finder) and Open
+	// reports back where it landed. --private-mount dictates one instead.
+	opened, err := cartridge.Open(path, cartridgeOpenOptions(name, bootFlags.privateMount, bootFlags.persist))
 	if err != nil {
 		return jsonOrError(err)
 	}
+	reportPersistence(opened)
 
 	// Stash for the foreground runStart, which hands the open cartridge to the
 	// vmhost.Host: the Host roots cfg inside the mount as the last overlay of
@@ -474,6 +500,27 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 		fmt.Printf("%s cartridge %s (%s)\n", subtle("Booting"), value(name), modeLabel(guiMode))
 	}
 	return runStart(cmd, args)
+}
+
+// reportPersistence tells the user, before the guest even starts, what will
+// happen to its changes when it powers off. --persist rewrites a file the user
+// may have been handed by someone else, so the announcement belongs at the
+// START of the run, while canceling is still free — not in the teardown
+// output, where it would be news.
+//
+// --persist on a runnable .sparseimage is reported as the no-op it is: that
+// file IS the disk the guest writes to, so there is nothing to write back.
+func reportPersistence(opened *cartridge.Opened) {
+	if !bootFlags.persist || jsonOutput || opened == nil {
+		return
+	}
+	if opened.WritesBack() {
+		fmt.Printf("  %s changes will be written back over %s once the guest powers off\n",
+			key("persist:"), value(opened.SourcePath))
+		return
+	}
+	fmt.Printf("  %s %s is a runnable cartridge, so the guest writes into it directly; --persist changes nothing\n",
+		key("persist:"), value(opened.SourcePath))
 }
 
 // takeBootCartridge hands the open cartridge over to whoever will own it from
