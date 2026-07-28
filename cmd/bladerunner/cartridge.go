@@ -45,10 +45,16 @@ Because 'br eject' always powers the guest off cleanly (ACPI), a cartridge is
 always in a consistent cold-boot state — AirDrop the file to any Mac running
 bladerunner and 'br boot <file>' just works.
 
-  --out <file>   Output path (default: ./<name>.sparseimage)
+  --out <file>   Output path for the runnable cartridge. It must end in
+                 ".sparseimage" (a name with no extension gets one).
+                 Default: ./<name>.sparseimage
   --ship         Also produce a compressed read-only <name>.dmg (the AirDrop form)
   --arch <arch>  Target architecture for the root image (default: host GOARCH)
   --size <GiB>   Cartridge capacity (default: disk size + headroom)
+
+'disk pack' always writes the RUNNABLE .sparseimage; --ship writes the .dmg
+beside it. So '--out demo.dmg' is refused — ask for '--out demo.sparseimage'
+and add --ship.
 
 The cartridge is named after its OUTPUT FILE, not after the disk it was packed
 from: '--out demo.sparseimage' produces a volume named bladerunner-demo, and
@@ -62,7 +68,7 @@ Requires macOS (hdiutil) and qemu-img.`,
 
 func init() {
 	f := diskPackCmd.Flags()
-	f.StringVar(&diskPackFlags.out, "out", "", "Output cartridge path (default: ./<name>.sparseimage)")
+	f.StringVar(&diskPackFlags.out, "out", "", "Output cartridge path; must end in .sparseimage (default: ./<name>.sparseimage)")
 	f.BoolVar(&diskPackFlags.ship, "ship", false, "Also produce a compressed read-only <name>.dmg AirDrop artifact")
 	f.StringVar(&diskPackFlags.arch, "arch", runtime.GOARCH, "Target architecture for the root image")
 	f.IntVar(&diskPackFlags.size, "size", 0, "Cartridge capacity in GiB (default: disk size + headroom)")
@@ -94,16 +100,30 @@ func packSizeGiB(flagSize, diskGiB int) int {
 	return cartridge.SizeGiB(diskGiB)
 }
 
+// errPackOutExtension refuses an `--out` path that does not name the runnable
+// cartridge form. It is a sentinel so the refusal is recognizable in a test and
+// distinguishable from a name that is merely unusable.
+var errPackOutExtension = errors.New("cartridge output path must name the runnable form")
+
 // packOutPath resolves the output cartridge path: an explicit --out wins, else
-// ./<name>.sparseimage in the cwd. Either way the .sparseimage extension is
-// ensured, because hdiutil appends it regardless — and a requested path that
-// differs from the file that actually appears would make the cartridge's name
-// (packCartridgeName, derived from this path) disagree with the name `br boot`
-// later derives from that file. `--out demo.dmg` therefore resolves to
-// demo.dmg.sparseimage and is rejected as a name, which is the honest answer:
-// `disk pack` writes the runnable form and --ship produces the .dmg.
+// ./<name>.sparseimage in the cwd. Either way the result carries the
+// .sparseimage extension, because hdiutil appends it regardless — and a
+// requested path that differs from the file that actually appears would make
+// the cartridge's name (packCartridgeName, derived from this path) disagree
+// with the name `br boot` later derives from that file.
+//
+// A bare `--out demo` is therefore accepted and becomes demo.sparseimage, while
+// `--out demo.dmg` is REFUSED here. It used to become demo.dmg.sparseimage,
+// whose name "demo.dmg" then failed instance.ValidName three calls later and
+// put a regex in front of a user who had only picked the wrong extension —
+// after --ship had advertised a .dmg to them. `disk pack` writes the runnable
+// form; --ship produces the .dmg.
 func packOutPath(flagOut, name string) (string, error) {
 	if flagOut != "" {
+		if ext := filepath.Ext(flagOut); ext != "" && ext != cartridge.SparseExt {
+			return "", fmt.Errorf("%w: %s ends in %q; write the runnable cartridge with '--out %s%s', and add --ship to also produce the compressed %s AirDrop artifact",
+				errPackOutExtension, flagOut, ext, strings.TrimSuffix(flagOut, ext), cartridge.SparseExt, cartridge.DMGExt)
+		}
 		return ensureSparseExt(flagOut), nil
 	}
 	cwd, err := os.Getwd()
