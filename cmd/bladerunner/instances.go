@@ -20,6 +20,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/incus"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 // instanceFlag is bound to the global --instance persistent flag (see root.go).
@@ -262,7 +263,7 @@ func (s instanceScanner) resolveNamed(name string) (resolvedInstance, error) {
 	if mp, ok := attachedCartridgeMountpoint(s.root, name); ok {
 		return s.mark(resolvedInstance{Name: name, Kind: instance.KindCartridge, StateDir: mp, Mountpoint: mp}), nil
 	}
-	if dir := filepath.Join(s.root, disksDirName, name); isDirectory(dir) {
+	if dir := filepath.Join(s.root, disksDirName, name); util.DirExists(dir) {
 		return s.mark(resolvedInstance{Name: name, Kind: instance.KindDisk, StateDir: dir}), nil
 	}
 	return resolvedInstance{}, s.unknownError(name)
@@ -391,12 +392,6 @@ func fromEntry(e instance.Entry) resolvedInstance {
 		StartedAt:  e.StartedAt,
 		Version:    e.BinaryVersion,
 	}
-}
-
-// isDirectory reports whether path exists and is a directory.
-func isDirectory(path string) bool {
-	fi, err := os.Stat(path)
-	return err == nil && fi.IsDir()
 }
 
 // ambiguousError reports that the selection is ambiguous and lists every

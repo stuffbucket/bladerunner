@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/util"
 	"golang.org/x/crypto/ssh"
 )
@@ -93,13 +94,7 @@ func Dir() string {
 }
 
 // ConfigDir returns the XDG-compliant config directory for bladerunner.
+// internal/config owns the XDG lookup; this wraps it.
 func ConfigDir() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bladerunner")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".config", "bladerunner")
-	}
-	return filepath.Join(home, ".config", "bladerunner")
+	return config.DefaultConfigDir()
 }

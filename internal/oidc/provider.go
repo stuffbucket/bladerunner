@@ -154,10 +154,10 @@ func (p *Provider) Handler() http.Handler {
 	mux.HandleFunc(pathToken, p.handleToken)
 	mux.HandleFunc(pathAuthorize, p.handleAuthorize)
 	mux.HandleFunc(pathAuthorizePoll, p.handleAuthorizePoll)
-	mux.HandleFunc(pathAuthnNonce, p.handleAuthnNonce)
-	mux.HandleFunc(pathAuthnExchange, p.handleAuthnExchange)
-	mux.HandleFunc(pathAuthnConsume, p.handleAuthnConsume)
-	mux.HandleFunc(pathAuthnApprove, p.handleAuthnApprove)
+	mux.HandleFunc(PathAuthnNonce, p.handleAuthnNonce)
+	mux.HandleFunc(PathAuthnExchange, p.handleAuthnExchange)
+	mux.HandleFunc(PathAuthnConsume, p.handleAuthnConsume)
+	mux.HandleFunc(PathAuthnApprove, p.handleAuthnApprove)
 	return mux
 }
 
