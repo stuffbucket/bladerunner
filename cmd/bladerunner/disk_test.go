@@ -159,7 +159,7 @@ func TestDiskNewArchNarrowsAFork(t *testing.T) {
 	}
 }
 
-// A fork of a disk that carries no per-arch images cannot honour --arch, so it
+// A fork of a disk that carries no per-arch images cannot honor --arch, so it
 // says so rather than dropping the flag.
 func TestDiskNewArchRefusesAForkWithoutPerArchImages(t *testing.T) {
 	withDiskNewFlags(t)
