@@ -174,6 +174,20 @@ func TerminalWidth() int {
 }
 
 // styled applies a style only if output is a TTY.
+//
+// This looks like internal/ui/board.applyStyle and is deliberately NOT shared
+// with it. The two ask different questions of different sinks: this one gates on
+// os.Stdout, because the Title/Subtle/Success/... helpers below are package-level
+// functions that always write there and have no receiver to inject anything
+// into. A Board gates on its own injected `interactive` flag, because a Board
+// may be constructed over any io.Writer and must stay plain when it is writing
+// to a buffer even though os.Stdout happens to be a terminal.
+//
+// Folding them together would need a shared helper taking the gate as an
+// argument, which trades three obvious lines for an exported API and a
+// board -> ui dependency, and would let a future reader believe the two sinks
+// are the same. They are not, and they cannot drift into disagreement, because
+// neither is the authority for the other's writer.
 func styled(style lipgloss.Style, s string) string {
 	if !IsTTY() {
 		return s
