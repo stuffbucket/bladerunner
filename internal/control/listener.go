@@ -374,14 +374,6 @@ func NewServer(stateDir string, stopFunc func()) (*Listener, error) {
 	return NewListener(stateDir, ctrl)
 }
 
-// NewServerWithConfig creates a listener (deprecated, use NewListenerWithConfig).
-func NewServerWithConfig(cfg ServerConfig) (*Listener, error) {
-	if cfg.Controller == nil {
-		return nil, fmt.Errorf("Controller is required")
-	}
-	return NewListenerWithConfig(cfg)
-}
-
 // --- Utility functions ---
 
 // removeIfExists removes a file if it exists.
