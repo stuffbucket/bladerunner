@@ -175,6 +175,17 @@ func copyExecutable(src, dst string) error {
 	return out.Close()
 }
 
+// infoPlist renders the app bundle's Info.plist. This is the single producer:
+// .macos-builder/build.sh assembles Bladerunner.app by calling `br menubar
+// bundle` rather than carrying a plist of its own.
+//
+// The two NS*UsageDescription keys are TCC purpose strings, and they are
+// load-bearing for the cartridge story rather than decorative. A cartridge
+// usually arrives in ~/Downloads (AirDrop) and is then read as a mounted
+// volume. macOS denies a LaunchAgent both of those unless the bundle declares a
+// purpose string for them, and it denies them SILENTLY — the system shows no
+// prompt at all for a bundle that never asked, so the menubar would simply fail
+// to see the cartridge with no way for the user to grant it.
 func infoPlist() string {
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -192,6 +203,8 @@ func infoPlist() string {
 	<key>LSUIElement</key><string>1</string>
 	<key>NSHighResolutionCapable</key><string>True</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
+	<key>NSDownloadsFolderUsageDescription</key><string>Bladerunner needs access to your Downloads folder to open a cartridge you have received, for example over AirDrop.</string>
+	<key>NSRemovableVolumesUsageDescription</key><string>Bladerunner needs access to mounted volumes to read a cartridge you have inserted and to eject it safely when its VM stops.</string>
 </dict>
 </plist>
 `, menubarBundleName, menubarBundleName, menubarBundleID, menubarBundleName, menubarIconName, version, version)
