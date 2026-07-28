@@ -261,7 +261,7 @@ func scaffoldArches(arch string) (map[string]disk.ArchImage, error) {
 
 // narrowToArch restricts a FORKED manifest's per-arch images to arch, so
 // --arch means the same thing on both `br disk new` paths. A disk that carries
-// no per-arch images (a hosted or path image) cannot honour it, so it says so
+// no per-arch images (a hosted or path image) cannot honor it, so it says so
 // rather than dropping the flag.
 func narrowToArch(m *disk.Manifest, arch, from string) error {
 	if arch == "" {
