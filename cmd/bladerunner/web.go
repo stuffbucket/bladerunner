@@ -63,6 +63,12 @@ the waiting browser then completes sign-in as that account.`,
 	RunE: runWebApprove,
 }
 
+// webTrustFlags is shared by 'br web trust' and 'br web untrust': the two act
+// on ONE keychain choice, and the flag is registered on both commands from this
+// single variable so they cannot disagree about which. It used to be declared
+// on trust alone while untrust read it, so `br web untrust --system` failed
+// with "unknown flag" and the plain form always deleted from the login
+// keychain — leaving a system-wide trusted certificate no command could remove.
 var webTrustFlags struct {
 	system bool
 }
@@ -77,19 +83,29 @@ trusted SSL certificate, so https://127.0.0.1:<api-port>/ui/ loads without the
 The cert is self-signed by Incus but already carries 127.0.0.1 in its SANs, so
 trusting it is sufficient — nothing is regenerated. macOS will prompt you to
 authorize the keychain change. By default the cert goes in your login keychain;
-pass --system to install it system-wide (requires sudo). Undo with 'br web untrust'.`,
+pass --system to install it system-wide (requires sudo).
+
+Undo with 'br web untrust', passing the same --system you installed with.`,
 	RunE: runWebTrust,
 }
 
 var webUntrustCmd = &cobra.Command{
 	Use:   "untrust",
 	Short: "Remove the Incus server certificate previously added by 'br web trust'",
-	RunE:  runWebUntrust,
+	Long: `Remove the Incus server certificate that 'br web trust' added to the macOS
+keychain.
+
+Pass the same --system you installed with: without it the login keychain is
+searched, with it the system one.`,
+	RunE: runWebUntrust,
 }
 
 func init() {
 	webCmd.AddCommand(webApproveCmd)
-	webTrustCmd.Flags().BoolVar(&webTrustFlags.system, "system", false, "Install into the system keychain (trusts for all users; requires sudo)")
+	// One flag, one variable, both halves of the pair — see webTrustFlags.
+	for _, c := range []*cobra.Command{webTrustCmd, webUntrustCmd} {
+		c.Flags().BoolVar(&webTrustFlags.system, "system", false, "Act on the system keychain (trusts for all users; requires sudo)")
+	}
 	webCmd.AddCommand(webTrustCmd, webUntrustCmd)
 }
 
