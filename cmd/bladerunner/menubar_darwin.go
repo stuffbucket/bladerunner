@@ -96,77 +96,285 @@ func runMenubar() error {
 	return nil
 }
 
-//nolint:gocyclo // onMenubarReady is a setup+dispatch function — menu build, the apply() state mapping, and the click select; the start-policy branches tip it past the ceiling without adding real branching complexity.
-func onMenubarReady() {
-	systray.SetIcon(statusIcon(vmStopped))
-	systray.SetTooltip("bladerunner")
+// menubarItems is the fixed set of status-bar rows, captured once at build time
+// so the state mapping and the click loop can address them by name instead of
+// passing ten *systray.MenuItem values around. The rows never change identity
+// for the life of the process; only their title and enabled state do.
+type menubarItems struct {
+	status    *systray.MenuItem
+	update    *systray.MenuItem
+	start     *systray.MenuItem
+	stop      *systray.MenuItem
+	reconnect *systray.MenuItem
+	restart   *systray.MenuItem
+	web       *systray.MenuItem
+	shell     *systray.MenuItem
+	settings  *systray.MenuItem
+	quit      *systray.MenuItem
+}
 
-	mStatus := systray.AddMenuItem("Checking…", "Bladerunner VM status")
-	mStatus.Disable()
+// buildMenubarItems lays out the status-bar menu in display order and returns
+// the rows. It must run on the systray callback (i.e. from onMenubarReady);
+// systray has no menu to attach to before that.
+func buildMenubarItems() *menubarItems {
+	m := &menubarItems{}
+	m.status = systray.AddMenuItem("Checking…", "Bladerunner VM status")
+	m.status.Disable()
 	systray.AddSeparator()
 	// Shown only when the running VM (engine) was started by an older build than
 	// this menubar — a user-gated, non-destructive "restart to apply" (Docker
 	// Desktop's app-vs-engine split). Hidden until detected.
-	mUpdate := systray.AddMenuItem("Restart VM to finish update", "Gracefully restart the VM to apply the new bladerunner version")
-	mUpdate.Hide()
-	mStart := systray.AddMenuItem("Start VM", "Boot the bladerunner VM")
-	mStop := systray.AddMenuItem("Stop VM", "Gracefully stop the VM")
-	mReconnect := systray.AddMenuItem("Reconnect", "Re-sync the guest after sleep (clock + forwarders) without restarting")
-	mRestart := systray.AddMenuItem("Restart VM", "Stop and start the VM (fixes a wedged/unresponsive guest)")
+	m.update = systray.AddMenuItem("Restart VM to finish update", "Gracefully restart the VM to apply the new bladerunner version")
+	m.update.Hide()
+	m.start = systray.AddMenuItem("Start VM", "Boot the bladerunner VM")
+	m.stop = systray.AddMenuItem("Stop VM", "Gracefully stop the VM")
+	m.reconnect = systray.AddMenuItem("Reconnect", "Re-sync the guest after sleep (clock + forwarders) without restarting")
+	m.restart = systray.AddMenuItem("Restart VM", "Stop and start the VM (fixes a wedged/unresponsive guest)")
 	systray.AddSeparator()
-	mWeb := systray.AddMenuItem("Open Web UI…", "Open the Incus web UI with single sign-on")
-	mShell := systray.AddMenuItem("Open Shell…", "Open a Terminal shell inside the VM")
+	m.web = systray.AddMenuItem("Open Web UI…", "Open the Incus web UI with single sign-on")
+	m.shell = systray.AddMenuItem("Open Shell…", "Open a Terminal shell inside the VM")
 	systray.AddSeparator()
-	mSettings := systray.AddMenuItem("Settings…", "Edit bladerunner settings")
-	mQuit := systray.AddMenuItem("Quit", "Quit the bladerunner menubar")
+	m.settings = systray.AddMenuItem("Settings…", "Edit bladerunner settings")
+	m.quit = systray.AddMenuItem("Quit", "Quit the bladerunner menubar")
+	return m
+}
 
-	// Read the host-wide start policy once. It governs whether the menubar
-	// auto-starts the VM at launch (StartOnLaunch) or lazily on the first
-	// Web/Shell action (StartOnFirstAction). Default StartManual is today's
-	// behavior; a missing/invalid settings file falls back to it.
-	startPolicy := config.StartManual
+// menubarStartPolicy reads the host-wide start policy that governs whether the
+// menubar auto-starts the VM at launch (StartOnLaunch) or lazily on the first
+// Web/Shell action (StartOnFirstAction). A missing or unreadable settings file
+// falls back to StartManual, today's behavior, so a broken file never
+// surprises the user with an unasked-for boot.
+func menubarStartPolicy() config.StartPolicy {
 	if s, err := config.LoadSettings(config.DefaultStateDir()); err == nil {
-		startPolicy = s.StartPolicy
+		return s.StartPolicy
 	}
-	firstAction := startPolicy == config.StartOnFirstAction
+	return config.StartManual
+}
 
-	apply := func(st vmState) {
-		systray.SetIcon(statusIcon(st))
-		switch st {
-		case vmStopped:
-			mStatus.SetTitle("Stopped")
-		case vmHealthy:
-			mStatus.SetTitle("Running — healthy")
-		case vmWedged, vmUnknown:
-			// While a boot is in progress, surface the live, friendly phase
-			// ("Booting Linux…", "Starting Incus…") instead of a scary
-			// "unresponsive" — the guest simply isn't answering yet. A
-			// stale/absent boot-stage file means it's a genuine wedge.
-			if msg, ok := bootingPhase(); ok {
-				mStatus.SetTitle(msg)
-			} else if st == vmWedged {
-				mStatus.SetTitle("Running — not responding")
-			} else {
-				mStatus.SetTitle("Running — status unknown")
+// statusTitle maps a VM state to the disabled first row of the menu. phase and
+// booting come from bootingPhase and are consulted only when the guest is not
+// answering: while a boot is in progress we surface the live, friendly phase
+// ("Booting Linux…", "Starting Incus…") instead of a scary "unresponsive" — the
+// guest simply isn't answering yet. A stale or absent boot-stage file (booting
+// false) means it is a genuine wedge and we say so.
+func statusTitle(st vmState, phase string, booting bool) string {
+	switch st {
+	case vmStopped:
+		return "Stopped"
+	case vmHealthy:
+		return "Running — healthy"
+	case vmWedged, vmUnknown:
+		if booting {
+			return phase
+		}
+		if st == vmWedged {
+			return "Running — not responding"
+		}
+		return "Running — status unknown"
+	default:
+		return "Running — status unknown"
+	}
+}
+
+// menuEnablement is which action rows are clickable for a given VM state. It is
+// split out from the menu itself so the policy can be asserted in a test
+// without a live status bar.
+type menuEnablement struct {
+	start     bool
+	stop      bool
+	reconnect bool
+	restart   bool
+	web       bool
+	shell     bool
+}
+
+// enablementFor decides which actions make sense in state st. Stop, Reconnect
+// and Restart need a running VM (Reconnect is the light heal after sleep;
+// Restart is the fix when the guest is fully wedged), Start needs a stopped
+// one, and Web/Shell normally need a healthy guest — except under
+// StartOnFirstAction, where they stay clickable while stopped so that a click
+// can lazily boot the VM.
+func enablementFor(st vmState, firstAction bool) menuEnablement {
+	running := st != vmStopped
+	return menuEnablement{
+		start:     st == vmStopped,
+		stop:      running,
+		reconnect: running,
+		restart:   running,
+		web:       webShellEnabled(st, firstAction),
+		shell:     webShellEnabled(st, firstAction),
+	}
+}
+
+// apply pushes a health reading onto the menu: icon tint, status row, and which
+// actions are clickable. The boot-stage file is read only when the guest is not
+// answering, so the steady-state poll stays free of disk I/O.
+func (m *menubarItems) apply(st vmState, firstAction bool) {
+	systray.SetIcon(statusIcon(st))
+
+	phase, booting := "", false
+	if st == vmWedged || st == vmUnknown {
+		phase, booting = bootingPhase()
+	}
+	m.status.SetTitle(statusTitle(st, phase, booting))
+
+	en := enablementFor(st, firstAction)
+	setEnabled(m.start, en.start)
+	setEnabled(m.stop, en.stop)
+	setEnabled(m.reconnect, en.reconnect)
+	setEnabled(m.restart, en.restart)
+	setEnabled(m.web, en.web)
+	setEnabled(m.shell, en.shell)
+}
+
+// triggerStart boots the VM: show the splash and arm the notify machine, then
+// launch `br start` detached. This is the single canonical start path, shared
+// by the Start click, StartOnLaunch and the lazy StartOnFirstAction boot.
+// (`br start`'s control socket refuses a second bind, so a racing auto-start
+// plus a manual start can never double-boot.)
+func (m *menubarItems) triggerStart(notif *vmNotifier) {
+	m.status.SetTitle("bladerunner: starting…")
+	notif.onStart(time.Now())
+	_ = launchDetached("start")
+}
+
+// runWhenHealthy polls until the guest answers, then runs action. Used by
+// StartOnFirstAction to perform the Web/Shell action once the lazily-started VM
+// is ready. It gives up silently at startActionTimeout rather than running the
+// action against a guest that never came up.
+func runWhenHealthy(action func()) {
+	deadline := time.Now().Add(startActionTimeout)
+	for time.Now().Before(deadline) {
+		if vmHealth() == vmHealthy {
+			action()
+			return
+		}
+		time.Sleep(menubarRefreshInterval)
+	}
+}
+
+// runOrLazyStart runs a Web/Shell action now, or — under StartOnFirstAction
+// with the VM stopped — boots the VM first and runs the action once the guest
+// answers. The deferred case runs on its own goroutine so the click loop is
+// never blocked for the length of a cold boot.
+func (m *menubarItems) runOrLazyStart(notif *vmNotifier, firstAction bool, action func()) {
+	if firstAction && vmHealth() == vmStopped {
+		m.triggerStart(notif)
+		go runWhenHealthy(action)
+		return
+	}
+	action()
+}
+
+// hostWokeFromSleep reports whether the wall clock jumped much further between
+// two polls than the poll interval can account for — the signature of the Mac
+// sleeping and waking with the agent frozen in between. A stopped VM is never
+// reported: there is no guest whose clock and forwarders need resyncing.
+func hostWokeFromSleep(st vmState, prevWall, nowWall int64) bool {
+	if st == vmStopped {
+		return false
+	}
+	return nowWall-prevWall > int64(menubarRefreshInterval/time.Second)+wakeGapSeconds
+}
+
+// offerLatest hands v to ch without ever blocking. The channels it feeds hold a
+// single slot; if that slot is still full the menu goroutine has not caught up
+// and this reading is dropped rather than stalling the poll loop.
+func offerLatest[T any](ch chan<- T, v T) {
+	select {
+	case ch <- v:
+	default:
+	}
+}
+
+// pollVMHealth samples VM health forever, off the click loop, so that a slow
+// probe (a wedged guest) never blocks the menu. It feeds every reading to the
+// transition machine — not just the ones that fit in healthCh — so edge
+// detection never misses a change, publishes the latest reading on healthCh,
+// and signals updateCh once if the running engine turns out to be older than
+// this menubar. It also detects host sleep/wake and surfaces a banner; the
+// guest watchdog owns the actual post-sleep recovery.
+func pollVMHealth(notif *vmNotifier, healthCh chan<- vmState, updateCh chan<- struct{}) {
+	lastWall := time.Now().Unix()
+	engineChecked := false
+	for {
+		st := vmHealth()
+		now := time.Now().Unix()
+		if hostWokeFromSleep(st, lastWall, now) {
+			notif.onWake(time.Now()) // banner only; the guest watchdog self-heals
+		}
+		lastWall = now
+		notif.observe(st, time.Now())
+		// Once the guest is up, check whether it's running an OLDER engine than
+		// this (possibly just-upgraded) menubar; if so, surface a user-gated
+		// "restart to apply". Checked once per session.
+		if st == vmHealthy && !engineChecked {
+			engineChecked = true
+			if engineUpgradeAvailable(version) {
+				notif.notifyEngineUpdate()
+				offerLatest(updateCh, struct{}{})
 			}
 		}
-		running := st != vmStopped
-		setEnabled(mStart, st == vmStopped)
-		setEnabled(mStop, running)
-		setEnabled(mReconnect, running) // light heal after sleep
-		setEnabled(mRestart, running)   // restart is the fix when fully wedged
-		// Web/Shell normally require a healthy guest. Under StartOnFirstAction
-		// they stay clickable while stopped so a click can lazily boot the VM.
-		setEnabled(mWeb, webShellEnabled(st, firstAction))
-		setEnabled(mShell, webShellEnabled(st, firstAction))
+		offerLatest(healthCh, st)
+		time.Sleep(menubarRefreshInterval)
 	}
-	apply(vmStopped)
+}
+
+// dispatchClicks is the menu's event loop: it folds health readings onto the
+// menu and runs the action behind each row. Long-running commands are launched
+// on their own goroutine (or detached entirely) so a click is never able to
+// wedge the loop. It returns only on Quit, which tears the process down.
+func (m *menubarItems) dispatchClicks(notif *vmNotifier, healthCh <-chan vmState, updateCh <-chan struct{}, firstAction bool) {
+	for {
+		select {
+		case st := <-healthCh:
+			m.apply(st, firstAction)
+		case <-updateCh:
+			m.update.Show() // an older engine is running; offer the restart
+		case <-m.update.ClickedCh:
+			m.status.SetTitle("bladerunner: updating…")
+			m.update.Hide()
+			go runnerRun("upgrade") // graceful save/restore to the new engine
+		case <-m.start.ClickedCh:
+			m.triggerStart(notif)
+		case <-m.stop.ClickedCh:
+			m.status.SetTitle("bladerunner: stopping…")
+			go runnerRun("stop")
+		case <-m.reconnect.ClickedCh:
+			m.status.SetTitle("bladerunner: reconnecting…")
+			go runnerRun("reconnect")
+		case <-m.restart.ClickedCh:
+			m.status.SetTitle("bladerunner: restarting…")
+			go restartVM()
+		case <-m.web.ClickedCh:
+			m.runOrLazyStart(notif, firstAction, func() { _ = launchDetached("web") })
+		case <-m.shell.ClickedCh:
+			m.runOrLazyStart(notif, firstAction, openShellTerminal)
+		case <-m.settings.ClickedCh:
+			showSettingsWindow()
+		case <-m.quit.ClickedCh:
+			systray.Quit()
+			return
+		}
+	}
+}
+
+// onMenubarReady is systray's ready callback: it builds the menu, resolves the
+// start policy, wires up notifications and the cartridge watcher, honors
+// StartOnLaunch, and hands the running system over to the poll loop and the
+// click loop. It returns immediately; systray owns the main thread from here.
+func onMenubarReady() {
+	systray.SetIcon(statusIcon(vmStopped))
+	systray.SetTooltip("bladerunner")
+
+	items := buildMenubarItems()
+
+	startPolicy := menubarStartPolicy()
+	firstAction := startPolicy == config.StartOnFirstAction
+	items.apply(vmStopped, firstAction)
 
 	// notif turns the stream of health readings + Start clicks into at-most-one
 	// native banner per real VM transition, and drives the starting splash.
-	// Today both the notifier and splash are no-ops; the cgo UNUserNotification
-	// and NSPopover implementations are dropped in behind these interfaces in
-	// later PRs.
 	splash := defaultSplash()
 	notifications := defaultNotifier()
 	notif := newVMNotifier(notifications, splash)
@@ -183,122 +391,15 @@ func onMenubarReady() {
 	// over an already-running VM.
 	setMenubarPresentHandler(notif.onPresent)
 
-	// triggerStart boots the VM the same way the Start item does — show the
-	// splash + arm the notify machine, then launch `br start` detached. The
-	// single canonical start path, reused by the Start click and the policies.
-	// (`br start`'s control socket refuses a second bind, so a racing auto-start
-	// + manual start can never double-boot.)
-	triggerStart := func() {
-		mStatus.SetTitle("bladerunner: starting…")
-		notif.onStart(time.Now())
-		_ = launchDetached("start")
-	}
-
-	// runWhenHealthy polls until the guest answers (bounded) then runs action —
-	// used by StartOnFirstAction to perform the Web/Shell action once the
-	// lazily-started VM is ready.
-	runWhenHealthy := func(action func()) {
-		deadline := time.Now().Add(startActionTimeout)
-		for time.Now().Before(deadline) {
-			if vmHealth() == vmHealthy {
-				action()
-				return
-			}
-			time.Sleep(menubarRefreshInterval)
-		}
-	}
-
 	// StartOnLaunch: boot the VM now if it isn't already up.
 	if startPolicy == config.StartOnLaunch && vmHealth() == vmStopped {
-		triggerStart()
+		items.triggerStart(notif)
 	}
 
-	// Poll health off the click loop so a slow probe (a wedged guest) never
-	// blocks the menu. The same loop detects host sleep/wake (a big wall-clock
-	// jump between polls) and surfaces a banner. The guest watchdog owns the
-	// actual post-sleep recovery, so the menubar no longer auto-reconnects.
 	healthCh := make(chan vmState, 1)
 	updateCh := make(chan struct{}, 1)
-	go func() {
-		lastWall := time.Now().Unix()
-		engineChecked := false
-		for {
-			st := vmHealth()
-			now := time.Now().Unix()
-			if st != vmStopped && now-lastWall > int64(menubarRefreshInterval/time.Second)+wakeGapSeconds {
-				notif.onWake(time.Now()) // banner only; the guest watchdog self-heals
-			}
-			lastWall = now
-			// Feed every reading (not just the ones that fit in the channel) to
-			// the transition machine, so edge detection never misses a change.
-			notif.observe(st, time.Now())
-			// Once the guest is up, check whether it's running an OLDER engine
-			// than this (possibly just-upgraded) menubar; if so, surface a
-			// user-gated "restart to apply". Checked once per session.
-			if st == vmHealthy && !engineChecked {
-				engineChecked = true
-				if engineUpgradeAvailable(version) {
-					notif.notifyEngineUpdate()
-					select {
-					case updateCh <- struct{}{}:
-					default:
-					}
-				}
-			}
-			select {
-			case healthCh <- st:
-			default:
-			}
-			time.Sleep(menubarRefreshInterval)
-		}
-	}()
-
-	go func() {
-		for {
-			select {
-			case st := <-healthCh:
-				apply(st)
-			case <-updateCh:
-				mUpdate.Show() // an older engine is running; offer the restart
-			case <-mUpdate.ClickedCh:
-				mStatus.SetTitle("bladerunner: updating…")
-				mUpdate.Hide()
-				go runnerRun("upgrade") // graceful save/restore to the new engine
-			case <-mStart.ClickedCh:
-				triggerStart()
-			case <-mStop.ClickedCh:
-				mStatus.SetTitle("bladerunner: stopping…")
-				go runnerRun("stop")
-			case <-mReconnect.ClickedCh:
-				mStatus.SetTitle("bladerunner: reconnecting…")
-				go runnerRun("reconnect")
-			case <-mRestart.ClickedCh:
-				mStatus.SetTitle("bladerunner: restarting…")
-				go restartVM()
-			case <-mWeb.ClickedCh:
-				// Under StartOnFirstAction a click while stopped lazily boots the
-				// VM, then opens the web UI once the guest is healthy.
-				if firstAction && vmHealth() == vmStopped {
-					triggerStart()
-					go runWhenHealthy(func() { _ = launchDetached("web") })
-				} else {
-					_ = launchDetached("web")
-				}
-			case <-mShell.ClickedCh:
-				if firstAction && vmHealth() == vmStopped {
-					triggerStart()
-					go runWhenHealthy(openShellTerminal)
-				} else {
-					openShellTerminal()
-				}
-			case <-mSettings.ClickedCh:
-				showSettingsWindow()
-			case <-mQuit.ClickedCh:
-				systray.Quit()
-				return
-			}
-		}
-	}()
+	go pollVMHealth(notif, healthCh, updateCh)
+	go items.dispatchClicks(notif, healthCh, updateCh, firstAction)
 }
 
 // engineUpgradeAvailable reports whether the running VM (started by some prior
