@@ -30,6 +30,17 @@ Getting started:
 	},
 }
 
+// The root command's persistent flags, named once. `br shell` and `br incus`
+// disable cobra's flag parsing (see passthrough.go) and have to recognize these
+// themselves, so the names must not be spelled twice.
+const (
+	jsonFlagName     = "json"
+	instanceFlagName = "instance"
+	// helpFlagName is cobra's built-in help flag, which the passthrough verbs
+	// also answer themselves.
+	helpFlagName = "help"
+)
+
 // Command group IDs. Every verb is assigned one of these so `br --help`
 // renders as titled buckets instead of one alphabetical wall (issue #131).
 const (
@@ -49,13 +60,13 @@ func init() {
 	cobra.AddTemplateFunc("banner", ui.Banner)
 
 	// Global --json flag: commands emit machine-readable JSON for agents.
-	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format (for scripting/agents)")
+	rootCmd.PersistentFlags().BoolVar(&jsonOutput, jsonFlagName, false, "Output in JSON format (for scripting/agents)")
 
 	// Global --instance flag: which VM a verb acts on when several are running.
 	// With a single running VM it can be omitted and nothing changes; see
 	// resolveInstanceTarget. BLADERUNNER_INSTANCE (or BR_INSTANCE) is the
 	// environment equivalent.
-	rootCmd.PersistentFlags().StringVar(&instanceFlag, "instance", "",
+	rootCmd.PersistentFlags().StringVar(&instanceFlag, instanceFlagName, "",
 		"Which VM instance to act on (default: the single running one; env "+instanceEnvVar+")")
 
 	// Titled command buckets for `br --help`. Order here is the display order.
