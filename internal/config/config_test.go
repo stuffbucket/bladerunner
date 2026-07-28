@@ -363,6 +363,11 @@ func TestConfigValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// EnsureKeyPair generates into ssh.Dir(), which falls back to
+			// $HOME/.config/bladerunner/ssh. Without this the test writes a
+			// real private key into the developer's home directory.
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 			tmpDir := t.TempDir()
 			cfg, err := Default(tmpDir)
 			if err != nil {
@@ -386,6 +391,11 @@ func TestConfigValidation(t *testing.T) {
 }
 
 func TestSSHKeyDetection(t *testing.T) {
+	// Sandbox the key material. Without this the test both writes into the
+	// developer's real $HOME and, on a machine that already has a key, only
+	// ever exercises the read-back branch of EnsureKeyPair.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
 	keyPair, err := ssh.EnsureKeyPair()
 	if err != nil {
 		t.Fatalf("EnsureKeyPair() failed: %v", err)
