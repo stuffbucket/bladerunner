@@ -74,6 +74,10 @@ func firePresent() {
 	}
 }
 
+// menubarSocketPath is where the single-menubar lock lives. The default state
+// dir is right here regardless of how many VMs are running: this socket
+// identifies the MENUBAR PROCESS, of which there is one per user, not an
+// instance.
 func menubarSocketPath() string {
 	return filepath.Join(config.DefaultStateDir(), menubarSocketName)
 }
