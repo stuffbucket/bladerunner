@@ -127,7 +127,10 @@ both exit 0. `clonedetect` reports 29 clusters.
 
 ## 4. Behaviour changes users must know
 
-These are not documented in `README.md` or `docs/` and should be.
+These are now documented for users in
+[behaviour-changes.md](behaviour-changes.md), linked from `usage.md` and
+`README.md`. The table below is the audit's own summary, kept as the record of
+what the audit found.
 
 | Change | Impact |
 |---|---|
@@ -169,11 +172,22 @@ deleted, so the record shows what was wrong and what was done about it.
 | 5 | The Makefile help for `smoke-cartridge` said ~5-10 min | **Fixed.** It now says ~15-25min, agreeing with the script header. |
 | 6 | `scripts/smoke-cartridge.sh`'s preflight said "bladerunner uses fixed ports — one VM at a time" | **Fixed.** The explanation now says ports are a preference with ephemeral fallback, and why the check is still worth keeping. The check itself is unchanged. |
 
-### Still outstanding
+### Now documented
 
-§4's behaviour changes are documented nowhere in `README.md` or `docs/`. That is
-a gap in user-facing documentation, not a doc inaccuracy, and is tracked
-separately.
+§4's behaviour changes had no home in `README.md` or `docs/`. They now do:
+[behaviour-changes.md](behaviour-changes.md), linked from `usage.md` and
+`README.md`.
+
+Two corrections to the audit's own §4 table came out of writing it:
+
+- The `--instance` no-op list was **incomplete**. It named `exec`, `logs`,
+  `events`, `incus`, `reconnect`, `web`, `save`, `restore`, `upgrade` and
+  `menubar`, but `up`, `start`, `boot`, `disk`, `disks`, `user`, `notice` and
+  `self-update` also ignore the flag. (The last five are not instance-scoped
+  concepts at all, so ignoring it is correct there; the VM-facing ones are the
+  real defect.)
+- `br instances` was listed under "works". It deliberately ignores `--instance`,
+  because listing every instance is its whole job.
 
 ---
 

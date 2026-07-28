@@ -4,7 +4,9 @@ The practical guide: pack a whole VM into one file, send it to another Mac, boot
 it, run several at once, and put them away without corrupting anything.
 
 The architecture behind this is in [design.md](design.md). This page is the part
-you type.
+you type. If you already drive `br` from a script or from memory, read
+[behaviour-changes.md](behaviour-changes.md) first — several defaults changed,
+and `br stop --force` and `br reset` changed in ways that break scripts.
 
 ---
 
@@ -278,3 +280,10 @@ removable volumes in System Settings › Privacy & Security, or boot by path wit
 eject what you cannot see), but it also means an idle click can start a full VM
 shutdown. There is no CLI flag to opt a boot back into the old invisible
 `-nobrowse` mount; the private policy is used internally by `br disk pack` only.
+
+**`--instance` is accepted by every verb but honoured by only some of them.** It
+is a persistent flag on the root command, so cobra renders it in every verb's
+help. `status`, `stop`, `reset`, `config`, `shell`, `ssh`, `ls` and `eject`
+resolve it; `exec`, `logs`, `events`, `incus`, `reconnect`, `web`, `save`,
+`restore` and `upgrade` silently act on the default instance instead, with no
+warning. The full map is in [behaviour-changes.md](behaviour-changes.md) §4.

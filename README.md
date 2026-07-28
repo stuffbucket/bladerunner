@@ -272,10 +272,15 @@ looked.
 
 ```bash
 runner instances                  # list running VMs with their ports and holder PIDs
-runner status --instance <name>   # every verb takes --instance (env BLADERUNNER_INSTANCE)
+runner status --instance <name>   # --instance selects the VM (env BLADERUNNER_INSTANCE)
 runner stop --instance <name>     # orderly drain of one specific VM
 runner watch                      # notice inserted cartridges and offer to boot them
 ```
+
+`--instance` is a root flag, so it appears in every verb's help — but only
+`status`, `stop`, `reset`, `config`, `shell`, `ssh`, `ls` and `eject` currently
+resolve it. Other verbs act on the default instance without saying so; see
+[docs/cartridge-runtime/behaviour-changes.md](docs/cartridge-runtime/behaviour-changes.md).
 
 With a single VM running there is nothing to choose and `--instance` can be
 omitted, so the single-VM workflow is unchanged. The default instance keeps the
@@ -299,7 +304,11 @@ same drain in the background; the volume unmounts once the guest is stopped.
 
 See [docs/cartridge-runtime/usage.md](docs/cartridge-runtime/usage.md) for the
 full workflow — pack, ship, boot several at once, eject safely — and for the
-limitations that come with it.
+limitations that come with it. If you already script `br`, read
+[docs/cartridge-runtime/behaviour-changes.md](docs/cartridge-runtime/behaviour-changes.md):
+`br stop --force` now cuts power immediately, `br stop -t` defaults to 60s,
+`br reset` refuses against a running VM, and ports are a preference rather than a
+fixed allocation.
 
 ## Notes
 
