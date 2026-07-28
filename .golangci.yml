@@ -20,6 +20,11 @@ linters:
     - nakedret     # Naked returns in long functions
     - prealloc     # Slice preallocation
     - nolintlint   # Ill-formed //nolint directives
+    # funlen is deliberately off: CLAUDE.md caps cyclomatic complexity (section
+    # 5.5), not raw line count, and gocyclo/gocognit already enforce that. A
+    # long but flat function (a table of menu items, a rendered script) is not a
+    # defect. Function length is therefore not machine-enforced. The exclusion
+    # that used to sit under `_test.go` for funlen was dead and has been removed.
 
     # Error handling (∂S: boundary verification)
     - errorlint    # Error wrapping issues
@@ -66,7 +71,8 @@ linters:
         - fmt.Println
 
     gocyclo:
-      min-complexity: 25  # raised for complex validation funcs
+      # Lowered from the default 30 to the cap that CLAUDE.md section 5.5 states.
+      min-complexity: 25
 
     gocognit:
       min-complexity: 30
@@ -106,6 +112,16 @@ linters:
 
     nakedret:
       max-func-lines: 30
+
+    # CLAUDE.md section 5.7: correct the code first; a //nolint that survives
+    # must name the linter it silences and give the reason on the same line.
+    # Without this block the defaults are all permissive, so the rule was
+    # advisory only.
+    nolintlint:
+      require-explanation: true  # a bare //nolint:x with no reason is rejected
+      require-specific: true     # //nolint must name the linter, not silence all
+      allow-unused: false        # a directive that no longer suppresses anything
+                                 # is stale and must be deleted
 
     exhaustive:
       default-signifies-exhaustive: true  # switch default: case counts as exhaustive
@@ -162,7 +178,11 @@ linters:
 
   exclusions:
     presets:
-      - comments
+      # NOTE: the `comments` preset is deliberately NOT listed. It excludes the
+      # revive `exported` messages ("exported X should have comment...", "comment
+      # on exported X should be of the form..."), which would cancel the
+      # `exported` rule enabled above and leave CLAUDE.md section 5.3 (a doc
+      # comment on every exported name) unenforced. Do not re-add it.
       - std-error-handling
     rules:
       # Test files can have longer functions and test-specific patterns
@@ -170,7 +190,6 @@ linters:
         linters:
           - gocyclo
           - gocognit
-          - funlen
           - dupl          # Test cases often repeat patterns
           - goconst       # Test fixtures repeat literals (paths, tags) by design
           - nestif        # Test setup can be nested

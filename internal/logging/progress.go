@@ -32,6 +32,20 @@ type ByteProgress struct {
 	out         io.Writer
 }
 
+// NewByteProgress starts a byte-count progress line for label. The result is
+// an io.Writer: attach it to the copy you want measured (as the second half of
+// an io.MultiWriter, or the writer of an io.TeeReader) and every Write advances
+// the bar by the bytes that passed through. It measures the stream, not the
+// clock — use TimedProgress for a wait that moves no bytes.
+//
+// total is the expected size. Pass a non-positive value when the size is not
+// known, such as a response with no Content-Length, and the line renders a
+// spinner with a running count and rate instead of a bar.
+//
+// Whether stdout is a terminal is decided once, here. In a non-interactive run
+// nothing is drawn and progress reaches the log only: at each 10% when total is
+// known, every 10 seconds when it is not. The caller must end the line with
+// Finish or Fail; until then, Write keeps redrawing it.
 func NewByteProgress(label string, total int64) *ByteProgress {
 	interactive := term.IsTerminal(int(os.Stdout.Fd()))
 	return &ByteProgress{
@@ -60,6 +74,15 @@ func (p *ByteProgress) Write(b []byte) (int, error) {
 	return n, nil
 }
 
+// Finish ends the line for a transfer that completed. It forces a final
+// repaint, so the bar shows the true last byte count rather than whatever the
+// 150ms render throttle last let through, closes the line with a newline so
+// following output does not land on top of it, and logs "task complete" at
+// info level with the total and the elapsed time.
+//
+// Finish and Fail are one-shot and mutually exclusive: the first of them to run
+// wins, and later calls — plus any further Write — are ignored. Safe to call
+// from any goroutine.
 func (p *ByteProgress) Finish() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -71,6 +94,14 @@ func (p *ByteProgress) Finish() {
 	p.logCompletionLocked(nil)
 }
 
+// Fail ends the line for a transfer that broke partway. It repaints and closes
+// the line exactly as Finish does — a dangling half-drawn bar is worse than a
+// wrong one — but logs at error level with err and the byte count reached. That
+// count is the evidence worth keeping: how far the copy got before it failed
+// separates a dead link from a truncated one.
+//
+// Call it from the error path of the copy. Like Finish it is one-shot and safe
+// from any goroutine, and whichever of the two runs first is the one that logs.
 func (p *ByteProgress) Fail(err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -177,6 +208,22 @@ type TimedProgress struct {
 	out         io.Writer
 }
 
+// NewTimedProgress starts an elapsed-time progress line for label and the
+// goroutine that repaints it every 700ms. Use it for a wait, where the work
+// offers nothing to measure — an API that is not up yet moves no bytes — as
+// opposed to ByteProgress, which advances only when a stream does. Because the
+// clock drives it, the line keeps moving even when the thing being waited on is
+// completely stuck, which is the point.
+//
+// timeout is the budget the caller is waiting under. It is used only to draw
+// the bar as elapsed/timeout and cancels nothing; enforcing the budget stays
+// with the caller's context. Pass 0 for an unbounded wait and the line renders
+// a spinner instead of a bar.
+//
+// The caller MUST end it with Finish or Fail: the repaint goroutine runs until
+// one of them closes the done channel. Drawing happens only when stdout is a
+// terminal, decided once here; otherwise the ticks are silent and only the
+// final state reaches the log.
 func NewTimedProgress(label string, timeout time.Duration) *TimedProgress {
 	tp := &TimedProgress{
 		label:       label,
@@ -205,12 +252,31 @@ func (t *TimedProgress) loop() {
 	}
 }
 
+// SetStatus replaces the trailing text of the line — the part that says what
+// the wait is currently blocked on, such as "attempt=3 connection refused".
+// Without it a long wait shows only that time is passing; with it the line
+// carries the reason.
+//
+// It just stores the string under the lock; the repaint goroutine picks it up
+// on its next tick, so calling it on every retry is cheap and it is safe from
+// any goroutine. A blank status renders as "in progress" rather than an empty
+// gap.
 func (t *TimedProgress) SetStatus(status string) {
 	t.mu.Lock()
 	t.status = status
 	t.mu.Unlock()
 }
 
+// Finish ends a wait that succeeded. It stops the repaint goroutine, paints the
+// line once more with whatever SetStatus left on it, closes the line with a
+// newline, and logs "wait complete" at info level with the elapsed time.
+// Callers usually SetStatus("ready") first so the frame that stays on screen
+// reads as success.
+//
+// The goroutine is stopped under a sync.Once, so a repeat call cannot panic on
+// a closed channel — but the repaint and the log are NOT suppressed, and Finish
+// and Fail share that Once. Call exactly one of them, exactly once, or the log
+// will show a wait that both completed and failed.
 func (t *TimedProgress) Finish() {
 	t.once.Do(func() { close(t.done) })
 	t.render(true)
@@ -220,6 +286,14 @@ func (t *TimedProgress) Finish() {
 	L().Info("wait complete", "task", t.label, "elapsed", time.Since(t.start).Round(time.Millisecond).String())
 }
 
+// Fail ends a wait that did not succeed. It stops the repaint goroutine and
+// closes the line exactly as Finish does, but logs at error level with err and
+// the elapsed time — the pair a later reader needs to tell an exhausted budget
+// from a cancellation that arrived early.
+//
+// The same one-shot caveat as Finish applies: the goroutine is stopped only
+// once, but the render and the error log run on every call, so call Finish or
+// Fail, not both.
 func (t *TimedProgress) Fail(err error) {
 	t.once.Do(func() { close(t.done) })
 	t.render(true)
