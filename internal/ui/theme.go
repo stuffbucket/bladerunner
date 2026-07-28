@@ -133,6 +133,18 @@ func SetTheme(theme Theme) {
 		Padding(0, 1)
 }
 
+// GetTheme, ThemeByName and ListThemes are INTENTIONALLY UNREACHABLE from
+// production today. `deadcode -test ./...` reports all three, and they are the
+// only entries in that list which are not //export'ed cgo callbacks — so a
+// reader running the tool will find them and should not have to re-litigate the
+// decision.
+//
+// They are the selection half of the theme system, kept for open issue #27
+// (`br theme`), whose plan names ThemeByName(name) explicitly. There is no
+// `br theme` command and no Theme settings key yet, so nothing calls them.
+// Delete them together with #27 if that issue is closed unimplemented; do not
+// delete them piecemeal because a linter flagged one.
+
 // GetTheme returns the currently active theme.
 func GetTheme() Theme {
 	return currentTheme
