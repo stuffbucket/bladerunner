@@ -19,7 +19,7 @@ import (
 // showSettingsWindow loads the current persisted settings and shows the WKWebView
 // settings form. Wired to the menubar's "Settings…" item.
 func showSettingsWindow() {
-	s, err := config.LoadSettings(config.DefaultStateDir())
+	s, err := config.LoadSettings(menubarSettingsDir())
 	if err != nil {
 		// An invalid file shouldn't block editing — start from defaults so the
 		// user can fix it via the form.
@@ -37,7 +37,7 @@ func showSettingsWindow() {
 //
 //export goSettingsSave
 func goSettingsSave(cjson *C.char) {
-	out := applySettingsForm(C.GoString(cjson), config.DefaultStateDir(), vmHealth() != vmStopped)
+	out := applySettingsForm(C.GoString(cjson), menubarSettingsDir(), vmHealth() != vmStopped)
 	if out.Close {
 		C.brCloseSettings()
 		return

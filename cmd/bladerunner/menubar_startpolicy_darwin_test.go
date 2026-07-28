@@ -5,6 +5,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/config"
 )
 
 func TestWebShellEnabled(t *testing.T) {
@@ -124,7 +126,10 @@ func TestStatusTitle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := statusTitle(tt.st, tt.phase, tt.booting); got != tt.want {
+			// The flat default instance: its wording must stay exactly what
+			// the single-VM install has always shown.
+			target := menubarTarget{name: config.DefaultInstanceName, isDefault: true}
+			if got := statusTitle(tt.st, tt.phase, tt.booting, target); got != tt.want {
 				t.Errorf("statusTitle(%v, %q, %v) = %q, want %q",
 					tt.st, tt.phase, tt.booting, got, tt.want)
 			}

@@ -75,7 +75,27 @@ const (
 	vmHealthy                // running and the guest answers the probe
 	vmWedged                 // host alive but guest unresponsive (the failure mode that breaks web/shell)
 	vmUnknown                // running but status could not be read
+	// vmAmbiguous means several instances are running and none was selected,
+	// so the menubar has no single VM to report on and must not act on one.
+	vmAmbiguous
 )
+
+// vmReading is one health sample together with the instance it describes. The
+// two travel together so the status row can never name one VM while the icon
+// reports another.
+type vmReading struct {
+	state  vmState
+	target menubarTarget
+}
+
+// readVM resolves the instance the menubar reports on and probes it.
+func readVM() vmReading {
+	target := currentMenubarTarget()
+	if target.ambiguous {
+		return vmReading{state: vmAmbiguous, target: target}
+	}
+	return vmReading{state: vmHealthAt(target.stateDir), target: target}
+}
 
 func runMenubar() error {
 	// Enforce a version-aware single-instance rule BEFORE systray.Run seizes the
@@ -145,7 +165,7 @@ func buildMenubarItems() *menubarItems {
 // falls back to StartManual, today's behavior, so a broken file never
 // surprises the user with an unasked-for boot.
 func menubarStartPolicy() config.StartPolicy {
-	if s, err := config.LoadSettings(config.DefaultStateDir()); err == nil {
+	if s, err := config.LoadSettings(menubarSettingsDir()); err == nil {
 		return s.StartPolicy
 	}
 	return config.StartManual
@@ -157,7 +177,15 @@ func menubarStartPolicy() config.StartPolicy {
 // ("Booting Linux…", "Starting Incus…") instead of a scary "unresponsive" — the
 // guest simply isn't answering yet. A stale or absent boot-stage file (booting
 // false) means it is a genuine wedge and we say so.
-func statusTitle(st vmState, phase string, booting bool) string {
+func statusTitle(st vmState, phase string, booting bool, target menubarTarget) string {
+	if st == vmAmbiguous {
+		return "Several VMs running — choose one with 'br instances'"
+	}
+	return qualify(baseStatusTitle(st, phase, booting), target)
+}
+
+// baseStatusTitle is the status wording for a single resolved instance.
+func baseStatusTitle(st vmState, phase string, booting bool) string {
 	switch st {
 	case vmStopped:
 		return "Stopped"
@@ -174,6 +202,16 @@ func statusTitle(st vmState, phase string, booting bool) string {
 	default:
 		return "Running — status unknown"
 	}
+}
+
+// qualify names the instance the status describes, unless it is the flat
+// default — the single-VM install reads exactly as it always did, and only a
+// user who actually has a named instance up pays for the extra words.
+func qualify(title string, target menubarTarget) string {
+	if target.isDefault || target.name == "" || target.name == config.DefaultInstanceName {
+		return title
+	}
+	return title + " (" + target.name + ")"
 }
 
 // menuEnablement is which action rows are clickable for a given VM state. It is
@@ -195,6 +233,12 @@ type menuEnablement struct {
 // StartOnFirstAction, where they stay clickable while stopped so that a click
 // can lazily boot the VM.
 func enablementFor(st vmState, firstAction bool) menuEnablement {
+	// Every row shells out to `br <verb>` with no --instance, and `br` refuses
+	// to guess among several running VMs. Presenting the rows as clickable
+	// would promise an action that cannot happen.
+	if st == vmAmbiguous {
+		return menuEnablement{}
+	}
 	running := st != vmStopped
 	return menuEnablement{
 		start:     st == vmStopped,
@@ -209,14 +253,15 @@ func enablementFor(st vmState, firstAction bool) menuEnablement {
 // apply pushes a health reading onto the menu: icon tint, status row, and which
 // actions are clickable. The boot-stage file is read only when the guest is not
 // answering, so the steady-state poll stays free of disk I/O.
-func (m *menubarItems) apply(st vmState, firstAction bool) {
+func (m *menubarItems) apply(r vmReading, firstAction bool) {
+	st := r.state
 	systray.SetIcon(statusIcon(st))
 
 	phase, booting := "", false
 	if st == vmWedged || st == vmUnknown {
-		phase, booting = bootingPhase()
+		phase, booting = bootingPhase(r.target.stateDir)
 	}
-	m.status.SetTitle(statusTitle(st, phase, booting))
+	m.status.SetTitle(statusTitle(st, phase, booting, r.target))
 
 	en := enablementFor(st, firstAction)
 	setEnabled(m.start, en.start)
@@ -271,7 +316,9 @@ func (m *menubarItems) runOrLazyStart(notif *vmNotifier, firstAction bool, actio
 // sleeping and waking with the agent frozen in between. A stopped VM is never
 // reported: there is no guest whose clock and forwarders need resyncing.
 func hostWokeFromSleep(st vmState, prevWall, nowWall int64) bool {
-	if st == vmStopped {
+	// No single guest whose clock and forwarders need resyncing: stopped means
+	// there is none, ambiguous means we do not know which.
+	if st == vmStopped || st == vmAmbiguous {
 		return false
 	}
 	return nowWall-prevWall > int64(menubarRefreshInterval/time.Second)+wakeGapSeconds
@@ -294,11 +341,12 @@ func offerLatest[T any](ch chan<- T, v T) {
 // and signals updateCh once if the running engine turns out to be older than
 // this menubar. It also detects host sleep/wake and surfaces a banner; the
 // guest watchdog owns the actual post-sleep recovery.
-func pollVMHealth(notif *vmNotifier, healthCh chan<- vmState, updateCh chan<- struct{}) {
+func pollVMHealth(notif *vmNotifier, healthCh chan<- vmReading, updateCh chan<- struct{}) {
 	lastWall := time.Now().Unix()
 	engineChecked := false
 	for {
-		st := vmHealth()
+		reading := readVM()
+		st := reading.state
 		now := time.Now().Unix()
 		if hostWokeFromSleep(st, lastWall, now) {
 			notif.onWake(time.Now()) // banner only; the guest watchdog self-heals
@@ -310,12 +358,12 @@ func pollVMHealth(notif *vmNotifier, healthCh chan<- vmState, updateCh chan<- st
 		// "restart to apply". Checked once per session.
 		if st == vmHealthy && !engineChecked {
 			engineChecked = true
-			if engineUpgradeAvailable(version) {
+			if engineUpgradeAvailable(version, reading.target.stateDir) {
 				notif.notifyEngineUpdate()
 				offerLatest(updateCh, struct{}{})
 			}
 		}
-		offerLatest(healthCh, st)
+		offerLatest(healthCh, reading)
 		time.Sleep(menubarRefreshInterval)
 	}
 }
@@ -324,11 +372,11 @@ func pollVMHealth(notif *vmNotifier, healthCh chan<- vmState, updateCh chan<- st
 // menu and runs the action behind each row. Long-running commands are launched
 // on their own goroutine (or detached entirely) so a click is never able to
 // wedge the loop. It returns only on Quit, which tears the process down.
-func (m *menubarItems) dispatchClicks(notif *vmNotifier, healthCh <-chan vmState, updateCh <-chan struct{}, firstAction bool) {
+func (m *menubarItems) dispatchClicks(notif *vmNotifier, healthCh <-chan vmReading, updateCh <-chan struct{}, firstAction bool) {
 	for {
 		select {
-		case st := <-healthCh:
-			m.apply(st, firstAction)
+		case reading := <-healthCh:
+			m.apply(reading, firstAction)
 		case <-updateCh:
 			m.update.Show() // an older engine is running; offer the restart
 		case <-m.update.ClickedCh:
@@ -371,7 +419,7 @@ func onMenubarReady() {
 
 	startPolicy := menubarStartPolicy()
 	firstAction := startPolicy == config.StartOnFirstAction
-	items.apply(vmStopped, firstAction)
+	items.apply(vmReading{state: vmStopped}, firstAction)
 
 	// notif turns the stream of health readings + Start clicks into at-most-one
 	// native banner per real VM transition, and drives the starting splash.
@@ -396,7 +444,7 @@ func onMenubarReady() {
 		items.triggerStart(notif)
 	}
 
-	healthCh := make(chan vmState, 1)
+	healthCh := make(chan vmReading, 1)
 	updateCh := make(chan struct{}, 1)
 	go pollVMHealth(notif, healthCh, updateCh)
 	go items.dispatchClicks(notif, healthCh, updateCh, firstAction)
@@ -407,8 +455,8 @@ func onMenubarReady() {
 // would move the engine up to the current version. Returns false when the VM
 // isn't reachable or versions don't compare (dev/unknown), so it never nags
 // spuriously.
-func engineUpgradeAvailable(menubarVer string) bool {
-	serverVer, err := control.NewClient(config.DefaultStateDir()).ServerVersion()
+func engineUpgradeAvailable(menubarVer, stateDir string) bool {
+	serverVer, err := control.NewClient(stateDir).ServerVersion()
 	if err != nil {
 		return false
 	}
@@ -434,8 +482,11 @@ func setEnabled(m *systray.MenuItem, enabled bool) {
 // vmHealth probes the VM: stopped (no host process), healthy (guest answers the
 // liveness probe), wedged (host alive but guest unresponsive), or unknown. The
 // probe itself runs server-side in the VM process; this is a cheap socket call.
-func vmHealth() vmState {
-	c := control.NewClient(config.DefaultStateDir())
+func vmHealth() vmState { return readVM().state }
+
+// vmHealthAt probes one instance by its state dir.
+func vmHealthAt(stateDir string) vmState {
+	c := control.NewClient(stateDir)
 	if !c.IsRunning() {
 		return vmStopped
 	}
@@ -459,8 +510,8 @@ func vmHealth() vmState {
 // running `br start` (e.g. "Starting Incus…") while a boot is in progress. ok
 // is false when there is no recent boot-stage file — meaning either no boot is
 // underway or it finished, so callers fall back to the steady-state label.
-func bootingPhase() (string, bool) {
-	s, ok := bootstage.Read(config.DefaultStateDir())
+func bootingPhase(stateDir string) (string, bool) {
+	s, ok := bootstage.Read(stateDir)
 	if !ok || time.Since(s.UpdatedAt) > 90*time.Second {
 		return "", false
 	}
@@ -514,7 +565,7 @@ func statusIcon(state vmState) []byte {
 	switch state {
 	case vmHealthy:
 		dot = color.RGBA{R: greenR, G: greenG, B: greenB, A: alphaOpaque}
-	case vmWedged, vmUnknown:
+	case vmWedged, vmUnknown, vmAmbiguous:
 		dot = color.RGBA{R: amberR, G: amberG, B: amberB, A: alphaOpaque}
 	case vmStopped:
 		// gray (default)

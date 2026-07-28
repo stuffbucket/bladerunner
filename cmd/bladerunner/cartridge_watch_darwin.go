@@ -75,6 +75,9 @@ func startCartridgeWatch(w *cartridgeWatcher) (stop func(), err error) {
 // cartridge boot would stall every other callback on the session — including
 // the unmount approvals a holder depends on.
 func watchCartridgesForMenubar(p cartridgePrompter) func() {
+	// The registry ROOT, not an instance state dir: this is where instances are
+	// listed from and where a new holder's entry is written. It does not become
+	// per-instance when several VMs are up.
 	root := config.DefaultStateDir()
 	w := newCartridgeWatcher(root, func(a watchAction) {
 		go handleMenubarCartridge(p, a)
