@@ -15,20 +15,70 @@ import (
 
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
-// errVMNotRunning is returned, with a clean message that omits the raw
-// control-socket dial failure, when a command needs the VM but it is not running
-// and was not started. The underlying socket error is logged at debug level.
-var errVMNotRunning = errors.New("VM is not running; start it with 'br start'")
+// errVMNotRunning identifies the "the instance this verb needs is not running"
+// condition. It is never returned as-is: notRunningError writes the message for
+// the actual target and matches this under errors.Is, so a caller can test for
+// the condition without matching on the wording. The raw control-socket dial
+// failure is logged at debug level and never printed, so the terminal stays
+// clean.
+var errVMNotRunning = errors.New("the VM is not running")
 
-// notRunningError reports that the instance a verb targets is not running.
+// notRunning is that condition, carrying the message written for one target.
+type notRunning struct{ message string }
+
+// Error returns the advice-bearing message.
+func (e *notRunning) Error() string { return e.message }
+
+// Is makes every notRunning match errVMNotRunning under errors.Is, whatever its
+// wording.
+func (e *notRunning) Is(target error) bool {
+	return target == errVMNotRunning
+}
+
+// instancesHint answers the question a "not running" message provokes: so what
+// IS running? It is the last line of every one of them.
+const instancesHint = "'br instances' lists what is running"
+
+// notRunningError reports that the instance a verb targets is not running, and
+// names the verb that brings THAT instance back.
+//
+// The message used to be "VM is not running; start it with 'br start'" for
+// every target, and it is reached by web, exec, logs, events, incus, reconnect,
+// ls and shell. For a disk slot or a cartridge that advice is not merely
+// unhelpful, it is harmful: 'br start' creates an ADDITIONAL flat VM rather
+// than bringing back the instance the user meant, so following it leaves two
+// VMs where one was wanted and the original still down.
 func notRunningError(target resolvedInstance) error {
-	if target.isDefaultSlot() {
-		return errVMNotRunning
+	switch {
+	case target.Fallback:
+		// Nothing answered anywhere, so name both ways in: a flat VM and a
+		// disk or cartridge.
+		return &notRunning{message: "no VM is running\n" +
+			"  start one with 'br up', or boot a disk or cartridge with 'br boot <name>'\n" +
+			"  " + instancesHint}
+	case target.isDefaultSlot():
+		return &notRunning{message: "the default VM is not running\n" +
+			"  start it with 'br up'\n" +
+			"  " + instancesHint}
+	default:
+		return &notRunning{message: fmt.Sprintf(
+			"instance %q (%s) is not running\n  boot it with 'br boot %s'\n  %s",
+			target.instanceName(), target.Kind, bootArgument(target), instancesHint)}
 	}
-	return fmt.Errorf("instance %q is not running", target.instanceName())
+}
+
+// bootArgument is what 'br boot' needs in order to bring target back: a
+// cartridge boots from its image file, because the mounted volume is only a
+// view of it; everything else boots by name.
+func bootArgument(target resolvedInstance) string {
+	if target.Kind == instance.KindCartridge && target.SourcePath != "" {
+		return target.SourcePath
+	}
+	return target.instanceName()
 }
 
 // vmStartReadyTimeout bounds how long requireRunningVM waits for an auto-started

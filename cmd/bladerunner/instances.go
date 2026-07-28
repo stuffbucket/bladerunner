@@ -165,7 +165,7 @@ func resolveInstanceTarget() (resolvedInstance, error) {
 // for it.
 //
 // This is the choke point: every verb that acts on a running VM goes through
-// here, so --instance is honoured in one place instead of being re-derived from
+// here, so --instance is honored in one place instead of being re-derived from
 // config.DefaultStateDir() in each of them (issue #9).
 func requireRunningTarget() (*control.Client, resolvedInstance, error) {
 	target, err := resolveInstanceTarget()
