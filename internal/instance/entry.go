@@ -94,6 +94,18 @@ type Entry struct {
 	DevNode    string `json:"devNode,omitempty"`
 	Mountpoint string `json:"mountpoint,omitempty"`
 
+	// UnmountProtection records whether the holder armed the DiskArbitration
+	// unmount veto for that device node, and if not, why not. It is the only
+	// way a process that did not start the VM can tell a cartridge whose eject
+	// spins the guest down from one whose eject pulls the disk out from under
+	// it; see Protection.
+	//
+	// Only a cartridge instance carries a value. An entry written before this
+	// field existed decodes to ProtectionUnrecorded and is omitted on the way
+	// back out, so an older record neither claims protection nor claims a
+	// fault.
+	UnmountProtection Protection `json:"unmountProtection,omitempty"`
+
 	// Ownership.
 	//
 	// PID is the holder process that owns the VM. It is the fallback liveness

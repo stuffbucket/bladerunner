@@ -201,14 +201,17 @@ func TestStartUnmountWatchArmsTheVeto(t *testing.T) {
 }
 
 // A non-cartridge instance has nothing to protect, so it is not "unprotected":
-// reporting a reason there would cry wolf on every flat instance.
+// reporting a reason there would cry wolf on every flat instance. It is not
+// UnprotectedNone either — that means the veto was ARMED, and a flat instance
+// must not claim protection it never registered. Nothing was decided, so
+// nothing is recorded, and `br instances` shows no eject state for it at all.
 func TestStartUnmountWatchLeavesFlatInstancesProtectionless(t *testing.T) {
 	host := newTestHost(t)
 	if err := host.startUnmountWatch(); err != nil {
 		t.Fatalf("startUnmountWatch: %v", err)
 	}
-	if got := host.UnmountProtection(); got != UnprotectedNone {
-		t.Fatalf("UnmountProtection() for a flat instance = %q, want %q", got, UnprotectedNone)
+	if got := host.UnmountProtection(); got != UnprotectedNotRecorded {
+		t.Fatalf("UnmountProtection() for a flat instance = %q, want %q", got, UnprotectedNotRecorded)
 	}
 }
 

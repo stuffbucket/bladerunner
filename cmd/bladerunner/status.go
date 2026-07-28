@@ -114,6 +114,19 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 	left.rowIf("Network", getConfig(control.ConfigKeyNetworkMode))
 
+	// Eject protection is only meaningful for a cartridge, so a flat or
+	// disk-slot instance shows no row at all rather than a row about a mount
+	// it does not have. When the veto is armed the label says it all; when it
+	// is not, the reason is what the user needs in order to act.
+	protection := protectionReportFor(target.Kind, target.Protection)
+	if protection != nil {
+		left.sep()
+		left.row("Eject", protectionStatusValue(protection.state))
+		if !protection.Protected {
+			left.row("Reason", value(protection.Reason))
+		}
+	}
+
 	right.sep()
 	right.rowIf("Image", getConfig(control.ConfigKeyBaseImageURL))
 	right.rowIf("Path", getConfig(control.ConfigKeyBaseImagePath))
@@ -124,7 +137,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.rowIf("Disk", getConfig(control.ConfigKeyDiskPath))
 
 	if jsonOutput {
-		return emitJSON(runningStatusReport(status, getConfig))
+		return emitJSON(runningStatusReport(status, protection, getConfig))
 	}
 
 	if b := bannerHeader(); b != "" {
@@ -148,6 +161,11 @@ type statusReport struct {
 	Status  string    `json:"status"`
 	Build   buildInfo `json:"build"`
 	VM      *vmInfo   `json:"vm,omitempty"`
+
+	// UnmountProtection mirrors the EJECT column of `br instances`: whether
+	// ejecting this cartridge shuts the guest down first. Absent for an
+	// instance with no cartridge to protect.
+	UnmountProtection *unmountProtectionReport `json:"unmount_protection,omitempty"`
 }
 
 type buildInfo struct {
@@ -180,11 +198,12 @@ func currentBuildInfo() buildInfo {
 	return buildInfo{Version: version, Commit: commit, Built: date}
 }
 
-func runningStatusReport(status string, get func(string) string) statusReport {
+func runningStatusReport(status string, protection *unmountProtectionReport, get func(string) string) statusReport {
 	return statusReport{
-		Running: true,
-		Status:  status,
-		Build:   currentBuildInfo(),
+		Running:           true,
+		Status:            status,
+		Build:             currentBuildInfo(),
+		UnmountProtection: protection,
 		VM: &vmInfo{
 			PID:          get(control.ConfigKeyPID),
 			Name:         get(control.ConfigKeyName),

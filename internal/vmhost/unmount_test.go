@@ -282,3 +282,41 @@ func waitForCount(t *testing.T, counter *atomic.Int64, want int64, budget time.D
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// The recorded outcome only helps a user if it LEAVES this process. The holder
+// runs in a different process from the CLI, so the registry entry is the whole
+// transport: a value that Info drops is a value `br instances` can never show,
+// which is the state this mechanism shipped in.
+func TestInfoPublishesTheUnmountProtection(t *testing.T) {
+	cartridge, err := New(Spec{
+		Kind:          instance.KindCartridge,
+		Name:          "veto-test",
+		CartridgePath: "/tmp/demo.dmg",
+		Mountpoint:    "/Volumes/bladerunner-demo",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, want := range []UnprotectedReason{
+		UnprotectedNone,
+		UnprotectedNoCartridge,
+		UnprotectedNoDevNode,
+		UnprotectedUnreadableDevNode,
+		UnprotectedNoSession,
+		UnprotectedWatchFailed,
+		UnprotectedUnsupported,
+	} {
+		cartridge.setUnmountProtection(want)
+		if got := cartridge.Info().UnmountProtection; got != want {
+			t.Errorf("Info().UnmountProtection = %q, want %q", got, want)
+		}
+	}
+
+	// A flat instance decides nothing, so it publishes nothing: the field is
+	// omitted from its record rather than claiming a protection it never had.
+	flat := newTestHost(t)
+	if got := flat.Info().UnmountProtection; got != UnprotectedNotRecorded {
+		t.Errorf("Info().UnmountProtection for a flat instance = %q, want %q", got, UnprotectedNotRecorded)
+	}
+}

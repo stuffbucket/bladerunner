@@ -527,3 +527,182 @@ func TestCartridgeMountCandidatesCoverBothMountPolicies(t *testing.T) {
 		}
 	}
 }
+
+// registerRaw writes a registry record verbatim, so a test can present the
+// exact JSON some other version of bladerunner would have left behind — one
+// that predates a field, or one that records a value this build never writes.
+func registerRaw(t *testing.T, root, name, body string) {
+	t.Helper()
+	dir := instance.Dir(root)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create registry dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write raw entry %q: %v", name, err)
+	}
+}
+
+// A cartridge whose holder could NOT arm the DiskArbitration unmount veto is
+// running with no orderly spin-down on eject, and until now the only trace of
+// that was a Warn line in the holder's log. `br instances --json` has to carry
+// it: a stable code a script can branch on, and the sentence a person reads.
+func TestInstanceListingsReportUnmountProtection(t *testing.T) {
+	root := t.TempDir()
+	cart := filepath.Join(root, "mnt", "demo")
+	registerRaw(t, root, "demo", `{
+  "name": "demo",
+  "kind": "cartridge",
+  "stateDir": "`+cart+`",
+  "mountpoint": "`+cart+`",
+  "unmountProtection": "diskarbitration-unavailable",
+  "ports": {"ssh": 51001}
+}`)
+
+	scanner := testScanner(root, cart)
+	listings := scanner.listings(scanner.runningInstances())
+	if len(listings) != 1 {
+		t.Fatalf("listings = %d, want 1", len(listings))
+	}
+
+	raw, err := json.Marshal(listings)
+	if err != nil {
+		t.Fatalf("marshal listings: %v", err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal listings: %v", err)
+	}
+
+	prot, ok := decoded[0]["unmount_protection"].(map[string]any)
+	if !ok {
+		t.Fatalf("json[\"unmount_protection\"] = %v, want an object", decoded[0]["unmount_protection"])
+	}
+	if prot["protected"] != false {
+		t.Errorf("protected = %v, want false", prot["protected"])
+	}
+	if prot["code"] != "diskarbitration-unavailable" {
+		t.Errorf("code = %v, want the stable code from the record", prot["code"])
+	}
+	reason, _ := prot["reason"].(string)
+	if reason == "" || strings.Contains(reason, "Protection") {
+		t.Errorf("reason = %q, want a human sentence rather than a constant name", reason)
+	}
+}
+
+// A flat VM has no cartridge and therefore nothing to protect. Reporting an
+// eject state for it would be noise in the table and, worse, a field a script
+// could branch on that means nothing.
+func TestInstanceListingsOmitProtectionForNonCartridges(t *testing.T) {
+	root := t.TempDir()
+	slot := makeDiskSlot(t, root, "builder")
+	register(t, root, instance.Entry{Name: "builder", Kind: instance.KindDisk, StateDir: slot})
+
+	scanner := testScanner(root, slot)
+	listings := scanner.listings(scanner.runningInstances())
+	if len(listings) != 1 {
+		t.Fatalf("listings = %d, want 1", len(listings))
+	}
+	if listings[0].UnmountProtection != nil {
+		t.Errorf("a %s instance reports %+v, want no eject state at all",
+			listings[0].Kind, listings[0].UnmountProtection)
+	}
+
+	raw, err := json.Marshal(listings)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "unmount_protection") {
+		t.Errorf("json carries an eject state for a non-cartridge:\n%s", raw)
+	}
+
+	var buf bytes.Buffer
+	if err := renderInstanceListings(&buf, listings); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(buf.String(), "eject protection") {
+		t.Errorf("table warns about a cartridge that does not exist:\n%s", buf.String())
+	}
+}
+
+// The table is where a user finds out. A protected cartridge says so in one
+// word and adds no note; an unprotected one says so AND says why, in language
+// that names the consequence rather than the constant.
+func TestRenderInstanceListingsReportsEjectProtection(t *testing.T) {
+	listing := func(name string, p instance.Protection) instanceListing {
+		return instanceListing{
+			Name:              name,
+			Kind:              string(instance.KindCartridge),
+			StateDir:          "/Volumes/bladerunner-" + name,
+			Running:           true,
+			UnmountProtection: protectionReportFor(instance.KindCartridge, p),
+		}
+	}
+
+	t.Run("protected is visible and quiet", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := renderInstanceListings(&buf, []instanceListing{listing("safe", instance.ProtectionArmed)}); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "EJECT") || !strings.Contains(out, "protected") {
+			t.Errorf("a protected cartridge is not visibly protected:\n%s", out)
+		}
+		if strings.Contains(out, "eject protection is") {
+			t.Errorf("a protected cartridge should need no note:\n%s", out)
+		}
+	})
+
+	t.Run("unprotected says so and says why", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := renderInstanceListings(&buf, []instanceListing{listing("demo", instance.ProtectionNoSession)})
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		out := buf.String()
+		for _, want := range []string{
+			"UNPROTECTED",
+			"demo: eject protection is off",
+			instance.ProtectionNoSession.Reason(),
+			unprotectedConsequence,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("table is missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Protection") {
+			t.Errorf("table leaks a constant name:\n%s", out)
+		}
+	})
+
+	t.Run("a host without DiskArbitration is stated, not blamed", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := renderInstanceListings(&buf, []instanceListing{listing("linuxish", instance.ProtectionUnsupported)})
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		out := buf.String()
+		if strings.Contains(out, "UNPROTECTED") {
+			t.Errorf("a platform with no DiskArbitration is shouted at as a defect:\n%s", out)
+		}
+		if !strings.Contains(out, "unavailable") || !strings.Contains(out, instance.ProtectionUnsupported.Reason()) {
+			t.Errorf("the platform limit is not explained:\n%s", out)
+		}
+	})
+
+	t.Run("an unrecorded state is unknown, not protected", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := renderInstanceListings(&buf, []instanceListing{listing("legacy", instance.ProtectionUnrecorded)})
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		out := buf.String()
+		if strings.Contains(out, "protected\n") || strings.Contains(out, "  protected  ") {
+			t.Errorf("a record with no state claims protection:\n%s", out)
+		}
+		for _, want := range []string{"unknown", "legacy: eject protection is unknown"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("table is missing %q:\n%s", want, out)
+			}
+		}
+	})
+}

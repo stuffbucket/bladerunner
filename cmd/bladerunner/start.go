@@ -107,7 +107,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	}
 	host.AdoptCartridge(takeBootCartridge())
 
-	obs := &cliObserver{json: jsonOutput}
+	obs := &cliObserver{json: jsonOutput, host: host}
 	defer obs.close()
 	host.SetObserver(obs)
 
@@ -289,9 +289,23 @@ func changedStartFlags(cmd *cobra.Command) []string {
 // the buildx-style boot board, and the running summary (human or --json). It
 // holds every piece of rendering state that used to be local to runStart.
 type cliObserver struct {
-	json       bool
+	json bool
+	// host is the instance being reported on. It is read only for state the
+	// summary needs and the config cannot carry — the cartridge eject veto,
+	// which is decided by the Host itself.
+	host       *vmhost.Host
 	board      *board.Board
 	tailCancel context.CancelFunc
+}
+
+// protection reports the eject veto of the instance being started, or nil when
+// it has no cartridge to protect.
+func (o *cliObserver) protection() *unmountProtectionReport {
+	if o.host == nil {
+		return nil
+	}
+	info := o.host.Info()
+	return protectionReportFor(info.Kind, info.UnmountProtection)
 }
 
 // Resolved prints the pre-boot banner.
@@ -348,10 +362,11 @@ func (o *cliObserver) report(cfg *config.Config, endpoint string, bootErr error)
 		o.tailCancel()
 	}
 	if o.json {
-		_ = startReportJSON(cfg, endpoint, bootErr)
+		_ = startReportJSON(cfg, endpoint, bootErr, o.protection())
 		return
 	}
 	printRunningSummary(cfg, endpoint, bootErr)
+	_ = writeUnprotectedCartridge(os.Stdout, o.protection())
 }
 
 // Waiting announces what the foreground is about to block on.
@@ -392,12 +407,15 @@ func (o *cliObserver) close() {
 // startReportJSON emits a one-line JSON object describing the running VM, used
 // by `br start --json`. The process keeps running afterward (start is a
 // foreground server); agents read this single object to learn the endpoints.
-func startReportJSON(cfg *config.Config, endpoint string, bootErr error) error {
+func startReportJSON(cfg *config.Config, endpoint string, bootErr error, protection *unmountProtectionReport) error {
 	r := map[string]any{
 		jsonFieldStatus: "running",
 		"ssh_addr":      fmt.Sprintf("localhost:%d", cfg.LocalSSHPort),
 		"api":           endpoint,
 		"log":           cfg.LogPath,
+	}
+	if protection != nil {
+		r["unmount_protection"] = protection
 	}
 	if bootErr != nil {
 		r[jsonFieldStatus] = "running-degraded"
