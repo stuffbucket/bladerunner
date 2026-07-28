@@ -389,8 +389,24 @@ func TestRenderInstanceListings(t *testing.T) {
 	if err := renderInstanceListings(&buf, nil); err != nil {
 		t.Fatalf("render empty: %v", err)
 	}
-	if !strings.Contains(buf.String(), "No VM instances are running") {
-		t.Errorf("empty listing output = %q", buf.String())
+	// The empty listing must name the verbs that actually bring an instance
+	// back, and how to discover what is bootable. Advising 'br start' here was
+	// the same defect notRunningError fixed in vmgate.go: for a disk or a
+	// cartridge 'br start' creates an ADDITIONAL flat VM instead of booting the
+	// instance the user meant.
+	empty := buf.String()
+	for _, want := range []string{
+		"No VM instances are running",
+		"br up",
+		"br boot <name>",
+		"br disks",
+	} {
+		if !strings.Contains(empty, want) {
+			t.Errorf("empty listing output = %q, want it to mention %q", empty, want)
+		}
+	}
+	if strings.Contains(empty, "'br start'") {
+		t.Errorf("empty listing output = %q, must not advise 'br start'", empty)
 	}
 
 	buf.Reset()
