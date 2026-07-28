@@ -111,4 +111,29 @@ func init() {
 	// doesn't force the extra bucket to render.)
 	rootCmd.SetHelpCommandGroupID(groupConfig)
 	rootCmd.SetCompletionCommandGroupID(groupConfig)
+
+	// --instance policy (issue #9). Cobra shows the flag in every command's
+	// help, so every command must answer for it. An UNDECLARED command refuses
+	// the flag, which is why only the two accepting policies are listed here.
+	// A subcommand inherits its parent unless it declares its own.
+	declareInstancePolicy(instanceHonored,
+		statusCmd, stopCmd, resetCmd, ejectCmd, saveCmd, restoreCmd, upgradeCmd,
+		reconnectCmd, sshCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd,
+		eventsCmd, webCmd, configCmd,
+	)
+	// `br instances` lists every instance; selecting one would mean nothing.
+	declareInstancePolicy(instanceAllInstances, instancesCmd)
+	// `br web untrust` only edits this Mac's keychain, so it refuses the flag
+	// its parent honors.
+	declareInstancePolicy(instanceRefused, webUntrustCmd)
+
+	declareInstanceHint(upCmd, "'br up' brings the default VM up; boot a named instance with 'br boot <name>'")
+	declareInstanceHint(startCmd, "'br start' creates an instance; choose where with --state-dir, or boot a named one with 'br boot <name>'")
+	declareInstanceHint(bootCmd, "'br boot' names the instance it creates in its own argument: 'br boot <name>'")
+	declareInstanceHint(watchCmd, "'br watch' spans every cartridge inserted on this Mac")
+	declareInstanceHint(webUntrustCmd, "'br web untrust' only edits this Mac's keychain, which no instance owns")
+
+	// The guard itself. Nothing else defines a PersistentPreRunE, so cobra runs
+	// this one for every command at every depth.
+	rootCmd.PersistentPreRunE = checkInstanceFlag
 }
