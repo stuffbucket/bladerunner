@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
 var resetCmd = &cobra.Command{
@@ -17,6 +18,10 @@ This keeps the base image, SSH keys, and client certificates intact.
 Reset acts on the instance selected by --instance (or the single running one),
 and refuses to delete the disk of a VM that is still running — stop it first, or
 pass --force.
+
+It resets a flat or disk-slot instance only. A cartridge keeps its disk and
+state inside its own image, so 'br reset' refuses one: eject it and boot the
+shipped .dmg again for a fresh working copy.
 
 Use --full to also remove the base image (will be re-downloaded on next start).
 Use --all to remove everything including keys and certificates.`,
@@ -52,6 +57,9 @@ func runReset(_ *cobra.Command, _ []string) error {
 // running-VM guard and the deletion below are exercisable without a live
 // control socket.
 func resetInstance(target resolvedInstance, force bool) error {
+	if err := ensureResetSupported(target); err != nil {
+		return jsonOrError(err)
+	}
 	if err := ensureResetSafe(target, force); err != nil {
 		return jsonOrError(err)
 	}
@@ -118,6 +126,30 @@ func resetInstance(target resolvedInstance, force bool) error {
 
 	reportResetHuman(outcome, resetFlags.all)
 	return nil
+}
+
+// ensureResetSupported refuses a kind of instance whose baseline this command
+// cannot restore.
+//
+// resetFileList names the FLAT layout: disk.raw, efi-vars.bin,
+// cloud-init/user-data. A cartridge's paths come from cartridge.Opened.ApplyTo
+// instead — root.img at the mount root, EFI vars and cloud-init under
+// <mount>/state — so not one candidate ever matched and `br reset` on a
+// cartridge printed "Nothing to reset - VM is already at baseline state" over a
+// VM that was nowhere near baseline.
+//
+// The fix is a refusal, not a second file list: those files live INSIDE the
+// user's cartridge image, and deleting the wrong ones there destroys the
+// artifact they would have AirDropped (CLAUDE.md section 8). A cartridge has a
+// baseline of its own — the shipped .dmg, which every boot re-converts into a
+// fresh working copy — so the message points at that instead.
+func ensureResetSupported(target resolvedInstance) error {
+	if target.Kind != instance.KindCartridge {
+		return nil
+	}
+	name := resetTargetName(target)
+	return fmt.Errorf("%q is a cartridge; 'br reset' cannot reset one — its disk, EFI state and cloud-init live inside the cartridge image, not in a host state directory. "+
+		"Eject it with 'br eject %s' and boot the shipped .dmg again for a fresh working copy, or rebuild it with 'br disk pack'", name, name)
 }
 
 // ensureResetSafe refuses to reset a VM that is still running.

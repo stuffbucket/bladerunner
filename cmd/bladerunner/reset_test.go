@@ -121,3 +121,79 @@ func TestResetTargetNameFallsBackToTheStateDir(t *testing.T) {
 		t.Fatal("an unnamed instance must still be nameable in an error")
 	}
 }
+
+// cartridgeResetFixture stages a mounted cartridge: its disk is root.img and
+// its state lives under <mount>/state (see cartridge.Opened.ApplyTo), so NONE
+// of the flat names resetFileList knows about are present.
+func cartridgeResetFixture(t *testing.T) (mount string, files []string) {
+	t.Helper()
+	mount = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mount, "state", "cloud-init"), 0o700); err != nil {
+		t.Fatalf("stage cartridge state: %v", err)
+	}
+	files = []string{
+		filepath.Join(mount, "root.img"),
+		filepath.Join(mount, "state", "efi-vars.bin"),
+		filepath.Join(mount, "state", "cloud-init", "user-data"),
+	}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("live-bytes"), 0o600); err != nil {
+			t.Fatalf("stage %s: %v", f, err)
+		}
+	}
+	return mount, files
+}
+
+// `br reset` on a cartridge reported success and did nothing. resetFileList
+// names the flat layout (disk.raw, efi-vars.bin, cloud-init/user-data) while a
+// cartridge's paths come from cartridge.Opened.ApplyTo (root.img,
+// <mount>/state/...), so nothing ever matched and reset printed "Nothing to
+// reset - VM is already at baseline state." — a false claim about a VM that was
+// not at baseline at all.
+//
+// Guessing at the cartridge layout here would delete files inside a user's
+// cartridge image (CLAUDE.md section 8), so the kind is refused outright, with
+// the way to a fresh cartridge in the message.
+func TestResetRefusesACartridge(t *testing.T) {
+	withResetFlags(t)
+	mount, files := cartridgeResetFixture(t)
+
+	target := resolvedInstance{
+		Name:       "demo",
+		Kind:       instance.KindCartridge,
+		StateDir:   mount,
+		Mountpoint: mount,
+		Explicit:   true,
+	}
+	err := resetInstance(target, false)
+	if err == nil {
+		t.Fatal("reset of a cartridge reported success instead of refusing")
+	}
+	for _, want := range []string{"demo", "cartridge", "br eject demo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err, want)
+		}
+	}
+	for _, f := range files {
+		if _, statErr := os.Stat(f); statErr != nil {
+			t.Errorf("the cartridge's %s was touched: %v", filepath.Base(f), statErr)
+		}
+	}
+}
+
+// --force is about a LIVE VM, not about the layout: it must not turn the
+// cartridge refusal into a deletion inside the user's cartridge.
+func TestResetForceDoesNotOverrideTheCartridgeRefusal(t *testing.T) {
+	withResetFlags(t)
+	mount, files := cartridgeResetFixture(t)
+
+	target := resolvedInstance{Name: "demo", Kind: instance.KindCartridge, StateDir: mount, Mountpoint: mount}
+	if err := resetInstance(target, true); err == nil {
+		t.Fatal("--force reset a cartridge")
+	}
+	for _, f := range files {
+		if _, statErr := os.Stat(f); statErr != nil {
+			t.Errorf("--force removed the cartridge's %s: %v", filepath.Base(f), statErr)
+		}
+	}
+}
