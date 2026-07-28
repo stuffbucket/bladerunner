@@ -117,3 +117,43 @@ func TestWriteFileAtomicConcurrentSamePath(t *testing.T) {
 		t.Errorf("directory holds %d files, want 1: %v", len(des), des)
 	}
 }
+
+func TestPublishFileAtomicReplacesTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "cartridge.dmg")
+	if err := os.WriteFile(dst, []byte("old"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	src := filepath.Join(dir, ".cartridge.commit.dmg")
+	if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatalf("seed temp: %v", err)
+	}
+
+	if err := PublishFileAtomic(src, dst); err != nil {
+		t.Fatalf("PublishFileAtomic: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "new" {
+		t.Fatalf("dst = %q, %v; want the published content", got, err)
+	}
+	if _, err := os.Stat(src); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the temporary %s survived the publish: %v", src, err)
+	}
+}
+
+// A publish that cannot happen must leave the target exactly as it was — that
+// is the whole reason the caller builds a temporary first.
+func TestPublishFileAtomicLeavesTheTargetAloneOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "cartridge.dmg")
+	if err := os.WriteFile(dst, []byte("original"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := PublishFileAtomic(filepath.Join(dir, "never-written.dmg"), dst); err == nil {
+		t.Fatal("publishing a missing source should fail")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "original" {
+		t.Fatalf("dst = %q, %v; want the original untouched", got, err)
+	}
+}

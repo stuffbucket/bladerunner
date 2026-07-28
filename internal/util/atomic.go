@@ -45,6 +45,43 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	return nil
 }
 
+// PublishFileAtomic makes an already-written file src the contents of dst, in
+// one step.
+//
+// It is the large-file counterpart of WriteFileAtomic, for bytes some other
+// tool produced for us (hdiutil converting a cartridge, qemu-img materializing
+// a disk): the data never passes through this process, but the publish is still
+// a single rename, so a reader of dst sees either the whole old file or the
+// whole new one. src is flushed to stable storage first and the directory is
+// fsynced after, so the swap survives a host crash.
+//
+// src and dst MUST live on the same filesystem, because os.Rename cannot cross
+// one — build the temporary in the destination's own directory.
+//
+// A failed publish leaves dst BYTE-FOR-BYTE UNTOUCHED and leaves src in place;
+// removing or salvaging it is the caller's decision, because for a large
+// artifact it may be the only copy of work worth keeping.
+func PublishFileAtomic(src, dst string) error {
+	// O_RDWR rather than O_RDONLY: fsync on a read-only descriptor is not
+	// portable, and this file is one we wrote, so write access is ours to take.
+	f, err := os.OpenFile(src, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("flush %s: %w", src, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", src, err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return fmt.Errorf("publish %s over %s: %w", src, dst, err)
+	}
+	syncDir(filepath.Dir(dst))
+	return nil
+}
+
 // writeSyncClose writes data to f with mode perm, flushes it to stable storage
 // and closes it. f is closed exactly once on every path.
 func writeSyncClose(f *os.File, data []byte, perm fs.FileMode) error {
