@@ -121,6 +121,11 @@ func nestedVirtBanner() string {
 // included.
 func runStart(cmd *cobra.Command, args []string) error {
 	spec := buildStartSpec(cmd)
+	// Refuse before spawning anything: a slot the registry cannot accept would
+	// otherwise boot a VM that never appears in 'br instances'.
+	if err := registrableSlotName(spec); err != nil {
+		return err
+	}
 	if guiRequested(spec) {
 		return runStartForeground(cmd, args, spec)
 	}
