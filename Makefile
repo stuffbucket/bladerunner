@@ -27,7 +27,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help setup cache deps tidy fmt fmt-check vet test test-linux test-isolation build build-release run sign check clean distclean lint vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
+.PHONY: help setup cache deps tidy fmt fmt-check vet test test-linux test-isolation build build-release run sign check clean distclean lint lint-docs vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -135,6 +135,18 @@ test-isolation: cache ## Prove the suite writes nothing outside its temp dirs
 lint: ## Run golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "Install: brew install golangci-lint"; exit 1; }
 	@golangci-lint run
+
+# DOC_SOURCES is the prose the STE gate applies to. CHANGELOG.md is excluded:
+# release-please generates it from commit subjects, so it is not hand-written
+# prose and rewriting it would be overwritten on the next release.
+DOC_SOURCES = README.md CLAUDE.md CONTRIBUTING.md RELEASE.md docs/
+
+lint-docs: ## Check docs against ASD-STE100 Simplified Technical English (errors only)
+	@command -v vale >/dev/null 2>&1 || { echo "Install: brew install vale"; exit 1; }
+	@out="$$(vale -min-severity error $(DOC_SOURCES) 2>&1)"; status=$$?; \
+	printf '%s\n' "$$out" | grep -E ': error: ' || true; \
+	printf '%s\n' "$$out" | tail -1; \
+	exit $$status
 
 vulncheck: ## Run govulncheck with suppression list
 	@./scripts/govulncheck.sh

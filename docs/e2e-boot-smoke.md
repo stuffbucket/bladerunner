@@ -68,7 +68,7 @@ BLADERUNNER_E2E=1 go test -run TestE2EBootSmoke -count=1 -timeout 30m -v ./test/
 | `BLADERUNNER_E2E=1`            | **Required.** Opt in to the real boot.                                          |
 | `BLADERUNNER_E2E_DEBIAN=1`     | Force the Debian escape hatch (`--debian-image`) instead of the pre-baked default. |
 | `BLADERUNNER_E2E_HOSTED=1`     | No-op alias (the hosted image is already the default); retained for compatibility. |
-| `BLADERUNNER_E2E_BIN=/path/br` | Use an already-signed `br` instead of building one. You vouch that it's signed. |
+| `BLADERUNNER_E2E_BIN=/path/br` | Use an already-signed `br` instead of building one. You vouch that it is signed. |
 | `BLADERUNNER_E2E_BOOT_TIMEOUT` | Readiness budget for first boot (Go duration; default `15m`).                   |
 
 Both provisioning paths are covered so this test can serve as the boot-verify
@@ -97,4 +97,4 @@ hatch).
 > a VZ VM will not start there. The job must run on a self-hosted macOS runner
 > (the stuffbucket mac mini) or be run locally. The workflow is deliberately
 > `workflow_dispatch`-only and **non-blocking** — it is never a required status
-> check, so a slow or flaky boot can't block a merge.
+> check, so a slow or flaky boot cannot block a merge.

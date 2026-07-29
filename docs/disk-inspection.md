@@ -1,6 +1,6 @@
 # Inspecting a guest disk offline (without booting the VM)
 
-When a guest won't boot, `br shell` can't connect, or you suspect filesystem or
+When a guest will not boot, `br shell` cannot connect, or you suspect filesystem or
 provisioning damage, you can read the guest's root filesystem directly from the
 host — no VM, no SSH — using read-only `ext4` tooling.
 

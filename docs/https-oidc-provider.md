@@ -24,7 +24,7 @@ and it is loopback-only (never on the wire, reachable only via host loopback and
 the guest's vsock-reverse forward). But it undercuts the "clean, no-warning
 sign-in" goal the web proxy was built for, so we want it gone.
 
-### Why the web proxy doesn't already cover it
+### Why the web proxy does not already cover it
 
 The web proxy (`internal/webproxy`, port `<web-port>`/18444) only fronts the
 **Incus** API. The OIDC provider is a separate host service on `<oidc-port>`
@@ -79,7 +79,7 @@ SAN already `127.0.0.1` / `::1` / `localhost`) then covers both browser origins
   complete before Incus first resolves the issuer, or token exchange fails.
 - **Cert timing.** The cert must be generated before cloud-init renders; today
   it is generated lazily at proxy start. Reordering needs care so a failure
-  can't strand boot.
+  cannot strand boot.
 - **Issuer-string consistency.** The `iss` claim, `oidc.issuer`, discovery
   document, and `br web`'s `providerBase` must all switch together; a mismatch
   silently breaks SSO (`iss` validation).
