@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -231,11 +230,7 @@ type diskActionReport struct {
 // plain os.WriteFile opens O_TRUNC, so a `br disk ls` racing a rewrite would
 // read a truncated manifest and drop the disk from the catalog.
 func writeManifest(path string, m *disk.Manifest) error {
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal disk: %w", err)
-	}
-	if err := util.WriteFileAtomic(path, b, manifestFilePerm); err != nil {
+	if err := util.WriteJSONAtomic(path, m, manifestFilePerm); err != nil {
 		return fmt.Errorf("write disk %s: %w", path, err)
 	}
 	return nil

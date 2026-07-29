@@ -10,7 +10,6 @@
 package cartridge
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,12 +98,8 @@ func (l Layout) LoadManifest() (*disk.Manifest, error) {
 // a reader — or a crash — must never find disk.json truncated. A plain
 // os.WriteFile opens O_TRUNC and would leave exactly that.
 func (l Layout) WriteManifest(m *disk.Manifest) error {
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal cartridge manifest: %w", err)
-	}
 	path := l.ManifestPath()
-	if err := util.WriteFileAtomic(path, b, layoutFilePerm); err != nil {
+	if err := util.WriteJSONAtomic(path, m, layoutFilePerm); err != nil {
 		return fmt.Errorf("write cartridge manifest %s: %w", path, err)
 	}
 	return nil
