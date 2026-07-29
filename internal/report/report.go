@@ -1,7 +1,6 @@
 package report
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -137,11 +136,7 @@ type Access struct {
 // because a diagnostic report that cannot be saved must not mask the boot error
 // that produced it.
 func SaveJSON(path string, report *StartupReport) error {
-	b, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal startup report: %w", err)
-	}
-	if err := util.WriteFileAtomic(path, b, reportFilePerm); err != nil {
+	if err := util.WriteJSONAtomic(path, report, reportFilePerm); err != nil {
 		return fmt.Errorf("write startup report: %w", err)
 	}
 	return nil

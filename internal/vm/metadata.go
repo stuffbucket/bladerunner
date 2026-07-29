@@ -54,11 +54,7 @@ func loadOrCreateMetadata(cfg *config.Config) (*runtimeMetadata, error) {
 // empty and loadOrCreateMetadata would invent a NEW MAC address on the next
 // boot, changing the VM's DHCP lease and its identity on the network.
 func saveMetadata(cfg *config.Config, md *runtimeMetadata) error {
-	b, err := json.MarshalIndent(md, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal runtime metadata: %w", err)
-	}
-	if err := util.WriteFileAtomic(cfg.MetadataPath, b, metadataFilePerm); err != nil {
+	if err := util.WriteJSONAtomic(cfg.MetadataPath, md, metadataFilePerm); err != nil {
 		return fmt.Errorf("write runtime metadata: %w", err)
 	}
 	return nil
