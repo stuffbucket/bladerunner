@@ -67,13 +67,13 @@ Define one shell snippet: `incus admin waitready` (reuse existing loop) → if n
 
 - `internal/provision/cloudinit.go:348,349-352,355` — append `btrfs-progs` to all three apt/dnf install invocations. Pure literal text in the `fmt.Sprintf` template — **mind `%%` escaping** (`cloudinit.go:430` precedent); no new format args.
 - `internal/provision/cloudinit.go:372` — replace `incus admin init --auto || true` with the canonical btrfs-init snippet. Keep the existing `waitready` loop (365–370) ahead of it.
-- `internal/provision/cloudinit.go:538-557` (`buildMinimalCloudInit`, the `UseGuestAgent=true` path) — this path defers to `br-agent`, so the canonical init must **also** land in the agent's `admin init` logic (documented at `internal/agent/protocol.go:33`; `cmd/br-agent` does not yet exist — leave a tracked TODO + the shared snippet ready so the agent path doesn't silently get a `dir` pool).
+- `internal/provision/cloudinit.go:538-557` (`buildMinimalCloudInit`, the `UseGuestAgent=true` path) — this path defers to `br-agent`, so the canonical init must **also** land in the agent's `admin init` logic (documented at `internal/agent/protocol.go:33`; `cmd/br-agent` does not yet exist — leave a tracked TODO + the shared snippet ready so the agent path does not silently get a `dir` pool).
 - `scripts/build-guest-image.sh:125` — add `btrfs-progs` to the virt-customize `--install` list; **do not** bake the pool (decision above). `:175` — same `btrfs-progs` addition in the nbd+chroot fallback to avoid divergence.
 - `scripts/build-guest-image.sh` — leave the first-boot pool init to the agent/cloud-init canonical snippet (image stays small; no `TARGET_SIZE_GIB:33` bump needed).
 
 ### Pre-baked image track (parallel, gated)
 
-- The publish machinery already exists (`.github/workflows/build-guest-image.yml:108-161` maintains `guest-image-latest`). **Do not flip `useHosted=true` (`internal/config/config.go:280`) yet.** Two blockers, both tracked here, neither blocking floppy code: (a) `guest-image-latest` is unpublished; (b) the artifact may carry a `-no-agent` suffix (`build-guest-image.yml:75-78,84`) that won't match the bare `bladerunner-guest-<arch>.qcow2` name `HostedGuestImageURL` (`config.go:253-262`) expects → 404. Reconcile artifact naming before flipping. Per-disk opt-in (`internal/disk/apply.go:27-31`) remains available for testing without touching the global default.
+- The publish machinery already exists (`.github/workflows/build-guest-image.yml:108-161` maintains `guest-image-latest`). **Do not flip `useHosted=true` (`internal/config/config.go:280`) yet.** Two blockers, both tracked here, neither blocking floppy code: (a) `guest-image-latest` is unpublished; (b) the artifact may carry a `-no-agent` suffix (`build-guest-image.yml:75-78,84`) that will not match the bare `bladerunner-guest-<arch>.qcow2` name `HostedGuestImageURL` (`config.go:253-262`) expects → 404. Reconcile artifact naming before flipping. Per-disk opt-in (`internal/disk/apply.go:27-31`) remains available for testing without touching the global default.
 
 ### Verbs/flags
 
@@ -104,7 +104,7 @@ None (provisioning only).
 - **`internal/floppy/floppy_darwin.go`** / **`internal/floppy/floppy_other.go`** (new) — `hostSupported()` true/false + `ErrUnsupported` sentinel; every public fn early-returns it on `!darwin`. **Copy `cartridge_darwin.go`/`cartridge_other.go` verbatim.**
 - **`internal/floppy/registry.go`** (new) — `Registry` keyed by `instance name + Stamp`. Persisted JSON under `config.DefaultStateDir()`. Uses a **separate `mnt-floppy/` subtree** (or a typed marker file) so `listAttachedCartridges`/`resolveEjectSlot` (`cartridge.go:480`, `eject.go:96`) never mis-detect a floppy as a bootable cartridge (PRD §6.6, §8.G).
 - **`internal/incus/instance.go`** (edit) — add `ImportInstance` (+ stub `ExportInstance`/`SnapshotInstance`/`SetInstanceState`/`DeleteInstance` so the Phase-2 surface compiles referenced; keep exported API used on Linux to dodge the unused-code trap).
-- **`internal/cartridge/cartridge.go`** (edit) — add floppy-sized `SizeGiB` variant or a `SizeGiBFor(bytes)` helper (don't reuse the VM-scale `HeadroomGiB=8`/`MinSizeGiB=10`).
+- **`internal/cartridge/cartridge.go`** (edit) — add floppy-sized `SizeGiB` variant or a `SizeGiBFor(bytes)` helper (do not reuse the VM-scale `HeadroomGiB=8`/`MinSizeGiB=10`).
 - **`cmd/bladerunner/floppy.go`** (new) — `floppy` command tree; `floppy insert <name.dmg>`, `floppy new <name>`, `floppy list`.
 
 ### Insert flow (J1)
@@ -139,7 +139,7 @@ All hdiutil/attach paths behind `floppy_darwin.go`; `floppy_other.go` returns `E
 ### Files
 
 - **`internal/incus/instance.go`** (edit) — flesh out `ExportInstance` (`CreateInstanceBackup`+`GetInstanceBackupFile`/`CreateInstanceBackupStream`, `OptimizedStorage=true`, `op.WaitContext(ctx)`), `SnapshotInstance`, `SetInstanceState(Stop)`.
-- **`internal/floppy/writeback.go`** (new) — `WriteBack`: export→temp-in-DMG→**fsync**→verify(size+sha256)→atomic rename→one `.prev`. Identity-stamp compare; on mismatch write `<name>.conflict-<ts>.dmg`, on DMG-deleted write a recovery path, both with loud warnings. **Invariant: never delete the VM-pool copy until export is confirmed.** Per-floppy `sync.Mutex` so a checkpoint can't overlap an eject or another checkpoint of the same instance (no such lock exists today).
+- **`internal/floppy/writeback.go`** (new) — `WriteBack`: export→temp-in-DMG→**fsync**→verify(size+sha256)→atomic rename→one `.prev`. Identity-stamp compare; on mismatch write `<name>.conflict-<ts>.dmg`, on DMG-deleted write a recovery path, both with loud warnings. **Invariant: never delete the VM-pool copy until export is confirmed.** Per-floppy `sync.Mutex` so a checkpoint cannot overlap an eject or another checkpoint of the same instance (no such lock exists today).
 - **`internal/control/control.go`** (edit) — add `CmdFloppyCheckpoint`/`CmdFloppyEject` (or a mounted `floppy.*` sub-router via `Router.Mount`, mirroring `config_handler.go:79-81`).
 - **`cmd/bladerunner/start.go`** (edit) — in `registerUpgradeHandlers` (`:88`), register the floppy checkpoint/eject handlers (reach the runner via `getRunner()` + `cfg`, same as `CmdSave`/`CmdEject`). In `runStart` (`:144`), after the VM is up and the Incus client connects (same place `ProbeGuest` attaches), start the **checkpoint goroutine** (`time.Ticker`, cancellable via the `runStart` ctx at `:145`).
 - **`cmd/bladerunner/floppy.go`** (edit) — `floppy checkpoint <name>`, `floppy eject <name>`.
