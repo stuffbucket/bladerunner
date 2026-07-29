@@ -119,7 +119,13 @@ make -C "$PROJECT_ROOT" sign >/dev/null
 [[ -x "$BIN" ]] || fail "binary not built at $BIN"
 ok "signed binary ready"
 
-note "Preflight: required local ports must be free (bladerunner uses fixed ports — one VM at a time)"
+# Ports are a PREFERENCE, not a fixed allocation: the default instance prefers
+# 6022/18443 and any instance that finds them taken falls back to ephemeral ones
+# (internal/portalloc.Reserve). So a second VM no longer makes this boot FAIL —
+# it makes it succeed on ports this script did not expect, which is worse to
+# diagnose. The check below therefore stays: it keeps the smoke run on the
+# well-known ports it asserts against.
+note "Preflight: required local ports must be free (the default instance only PREFERS these; another VM holding them silently pushes this boot onto ephemeral ports)"
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&-; return 0; } || return 1; }
 for p in 6022 18443; do
   if port_in_use "$p"; then

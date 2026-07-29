@@ -112,7 +112,7 @@ sign: build ## Codesign binary with virtualization entitlements
 	@codesign --entitlements "$(ENTITLEMENTS)" -s "$(CODESIGN_IDENTITY)" "$(BIN_PATH)"
 	@echo "Signed $(BIN_PATH) with $(ENTITLEMENTS)"
 
-smoke-cartridge: ## Live end-to-end cartridge smoke (pack -> boot -> RW share -> ACPI eject); needs codesign+network, ~5-10min
+smoke-cartridge: ## Live end-to-end cartridge smoke (pack -> boot -> RW share -> ACPI eject); needs codesign+network, ~15-25min
 	@./scripts/smoke-cartridge.sh
 
 smoke-holder: ## Live end-to-end holder smoke (spawn -> kill the spawner -> VM survives -> drain); needs codesign+network, ~5-15min
