@@ -371,3 +371,77 @@ func TestListAttachedCartridgesSeesRegisteredCartridges(t *testing.T) {
 		t.Errorf("cartridge = %+v, want demo at %q", got[0], mount)
 	}
 }
+
+// --- --private-mount and --persist ---------------------------------------
+
+// The browsable default is what Finder-eject (design goal 5) depends on, so it
+// must survive the arrival of the flag that opts out of it.
+func TestCartridgeOpenOptionsDefaultsToBrowsable(t *testing.T) {
+	opts := cartridgeOpenOptions("demo", false, false)
+	if !opts.Policy.Browsable() {
+		t.Fatalf("Policy = %q, want the browsable default", opts.Policy)
+	}
+	if opts.Mountpoint != "" {
+		t.Errorf("a browsable attach must dictate no mountpoint, got %q", opts.Mountpoint)
+	}
+	if opts.Persist {
+		t.Errorf("Persist must default to false: booting a .dmg discards by default")
+	}
+}
+
+// --private-mount attaches -nobrowse at the dictated <state>/mnt/<name>.
+func TestCartridgeOpenOptionsPrivateMountDictatesTheMountpoint(t *testing.T) {
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
+	opts := cartridgeOpenOptions("demo", true, false)
+	if !opts.Policy.Private() {
+		t.Fatalf("Policy = %q, want private", opts.Policy)
+	}
+	if want := cartridgeMountpoint("demo"); opts.Mountpoint != want {
+		t.Errorf("Mountpoint = %q, want %q", opts.Mountpoint, want)
+	}
+}
+
+func TestCartridgeOpenOptionsPersistIsOptIn(t *testing.T) {
+	if opts := cartridgeOpenOptions("demo", false, true); !opts.Persist {
+		t.Fatalf("--persist did not reach OpenOptions: %+v", opts)
+	}
+}
+
+// Both flags are cartridge-only. Silently ignoring one on a disk boot would
+// tell the user their changes are being kept when nothing of the sort happens.
+func TestCartridgeOnlyFlagsAreRefusedOnADiskBoot(t *testing.T) {
+	for _, name := range cartridgeOnlyFlags {
+		err := cartridgeOnlyFlagError(func(n string) bool { return n == name })
+		if err == nil {
+			t.Fatalf("--%s on a disk boot was accepted", name)
+		}
+		if !strings.Contains(err.Error(), "--"+name) {
+			t.Errorf("error %q does not name --%s", err, name)
+		}
+	}
+	if err := cartridgeOnlyFlagError(func(string) bool { return false }); err != nil {
+		t.Errorf("a plain disk boot must not be refused: %v", err)
+	}
+}
+
+// The flags have to be discoverable and unambiguous in `br boot --help`.
+func TestBootHelpDocumentsTheCartridgeFlags(t *testing.T) {
+	for _, name := range cartridgeOnlyFlags {
+		f := bootCmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("br boot has no --%s flag", name)
+		}
+		if f.DefValue != "false" {
+			t.Errorf("--%s defaults to %q, want false", name, f.DefValue)
+		}
+		if len(f.Usage) < 40 {
+			t.Errorf("--%s usage %q is too terse to be unambiguous", name, f.Usage)
+		}
+	}
+	long := bootCmd.Long
+	for _, want := range []string{"--persist", "--private-mount", "discard"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("br boot --help does not explain %q", want)
+		}
+	}
+}
