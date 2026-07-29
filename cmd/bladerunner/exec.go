@@ -22,8 +22,8 @@ var execCmd = &cobra.Command{
 	Long: `Execute a command inside the named Incus instance. Use -- to separate
 br flags from the command. Examples:
 
-  runner exec mybox -- ls /
-  runner exec -i -t mybox -- /bin/bash`,
+  br exec mybox -- ls /
+  br exec -i -t mybox -- /bin/bash`,
 	Args:              cobra.MinimumNArgs(2),
 	RunE:              runExec,
 	ValidArgsFunction: instanceNameCompletion,

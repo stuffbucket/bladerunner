@@ -127,7 +127,7 @@ func installMenubarAgent() error {
 	fmt.Printf("✓ Installed the bladerunner menubar agent\n")
 	fmt.Printf("  app:   %s\n", appDir)
 	fmt.Printf("  agent: %s (starts at login, no dock icon)\n", agentPath)
-	fmt.Printf("  remove with: runner menubar uninstall\n")
+	fmt.Printf("  remove with: br menubar uninstall\n")
 	return nil
 }
 

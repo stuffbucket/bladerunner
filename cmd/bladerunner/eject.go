@@ -19,7 +19,7 @@ var ejectCmd = &cobra.Command{
 	Use:   "eject [name]",
 	Short: "Cleanly power off the active VM (and detach its cartridge)",
 	Long: `Gracefully shut the running guest down via the ACPI power button and tear the
-VM down — the clean inverse of 'br boot'. The foreground runner loops the
+VM down — the clean inverse of 'br boot'. The foreground process loops the
 ACPI request and waits for the guest to power off (up to --timeout), then forces
 the stop. For a cartridge boot, the released image is detached on the way out, so
 the cartridge is left in a consistent cold-boot state ready to AirDrop.

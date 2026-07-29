@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,10 @@ const (
 	// defaultBakeTimeoutMin caps how long a bake build may run.
 	defaultBakeTimeoutMin = 60
 )
+
+// scaffoldArchList is every architecture the pinned Debian genericcloud image
+// is published for, and so what `br disk new` writes when --arch is not given.
+var scaffoldArchList = []string{"arm64", "amd64"}
 
 // diskSlotDir returns the per-disk state slot baseDir, isolated from the flat
 // default layout: <DefaultStateDir>/disks/<name>. Passing it to config.Default
@@ -154,8 +159,10 @@ var diskNewCmd = &cobra.Command{
 
 By default the disk targets the Debian Trixie genericcloud image for both
 arm64/amd64 with empty SHA-256 digests (filled in later by 'br disk bake',
-or verified via sidecar at boot). Use --from <disk> to fork an existing catalog
-disk's image and sizing. --gui sets boot mode to "gui"; otherwise "headless".`,
+or verified via sidecar at boot). Use --arch to scaffold one architecture
+alone. Use --from <disk> to fork an existing catalog disk's image and sizing;
+--size then overrides the forked size and --arch narrows the forked images.
+--gui sets boot mode to "gui"; otherwise "headless".`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDiskNew,
 }
@@ -193,8 +200,8 @@ func init() {
 	diskNewCmd.Flags().StringVar(&diskNewFlags.from, "from", "", "Fork an existing catalog disk's image and sizing")
 	diskNewCmd.Flags().BoolVar(&diskNewFlags.gui, "gui", false, "Set boot mode to gui (default: headless)")
 	diskNewCmd.Flags().BoolVar(&diskNewFlags.force, "force", false, "Overwrite an existing manifest")
-	diskNewCmd.Flags().StringVar(&diskNewFlags.arch, "arch", runtime.GOARCH, "Target architecture for the scaffold")
-	diskNewCmd.Flags().IntVar(&diskNewFlags.size, "size", config.DefaultDiskSizeGiB, "Disk size in GiB written into the manifest")
+	diskNewCmd.Flags().StringVar(&diskNewFlags.arch, "arch", "", "Scaffold this architecture alone (default: every architecture the image publishes)")
+	diskNewCmd.Flags().IntVar(&diskNewFlags.size, "size", 0, fmt.Sprintf("Disk size in GiB written into the manifest (default: the --from disk's size, else %d)", config.DefaultDiskSizeGiB))
 
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.output, "output", "", "Output qcow2 path (default: <disks-dir>/<name>-<arch>.qcow2)")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.arch, "arch", runtime.GOARCH, "Target architecture to build")
@@ -227,6 +234,55 @@ func writeManifest(path string, m *disk.Manifest) error {
 	return nil
 }
 
+// scaffoldArches returns the image.arches map a new disk is scaffolded with:
+// the one architecture --arch named, or every architecture the pinned Debian
+// genericcloud image is published for.
+//
+// A scaffold used to write both entries unconditionally, which made --arch a
+// flag with no read site at all. Defaulting to "every arch" keeps the portable
+// manifest that behavior produced, while an explicit --arch now narrows it —
+// and an architecture with no published image is refused here rather than
+// written as an empty URL.
+func scaffoldArches(arch string) (map[string]disk.ArchImage, error) {
+	wanted := scaffoldArchList
+	if arch != "" {
+		wanted = []string{arch}
+	}
+	arches := make(map[string]disk.ArchImage, len(wanted))
+	for _, a := range wanted {
+		url, err := config.DebianTrixieGenericCloudURL(a)
+		if err != nil {
+			return nil, fmt.Errorf("--arch %s: %w", a, err)
+		}
+		arches[a] = disk.ArchImage{URL: url}
+	}
+	return arches, nil
+}
+
+// narrowToArch restricts a FORKED manifest's per-arch images to arch, so
+// --arch means the same thing on both `br disk new` paths. A disk that carries
+// no per-arch images (a hosted or path image) cannot honor it, so it says so
+// rather than dropping the flag.
+func narrowToArch(m *disk.Manifest, arch, from string) error {
+	if arch == "" {
+		return nil
+	}
+	if m.Image.Arches == nil {
+		return fmt.Errorf("--arch %s cannot be applied to %q: it does not carry per-architecture images", arch, from)
+	}
+	img, ok := m.Image.Arches[arch]
+	if !ok {
+		have := make([]string, 0, len(m.Image.Arches))
+		for a := range m.Image.Arches {
+			have = append(have, a)
+		}
+		sort.Strings(have)
+		return fmt.Errorf("--arch %s is not published by %q (it has %s)", arch, from, strings.Join(have, ", "))
+	}
+	m.Image.Arches = map[string]disk.ArchImage{arch: img}
+	return nil
+}
+
 func runDiskNew(_ *cobra.Command, args []string) error {
 	name := args[0]
 	if !disk.ValidName(name) {
@@ -252,21 +308,25 @@ func runDiskNew(_ *cobra.Command, args []string) error {
 		m = src.Manifest.Clone()
 		m.Name = name
 		m.Boot.Mode = mode
+		if err := narrowToArch(m, diskNewFlags.arch, diskNewFlags.from); err != nil {
+			return jsonOrError(err)
+		}
+		// A fork keeps the sizing it was forked from unless --size says
+		// otherwise; the flag used to be read on the scaffold path only, so it
+		// was silently dropped here.
+		m.VM.DiskSizeGiB = pickDiskGiB(diskNewFlags.size, m.VM.DiskSizeGiB)
 	} else {
-		armURL, _ := config.DebianTrixieGenericCloudURL("arm64")
-		amdURL, _ := config.DebianTrixieGenericCloudURL("amd64")
+		arches, err := scaffoldArches(diskNewFlags.arch)
+		if err != nil {
+			return jsonOrError(err)
+		}
 		m = &disk.Manifest{
 			Name:        name,
 			Description: "User disk scaffolded from Debian Trixie genericcloud.",
 			Version:     time.Now().Format("2006.01.02"),
-			Image: disk.ImageSpec{
-				Arches: map[string]disk.ArchImage{
-					"arm64": {URL: armURL},
-					"amd64": {URL: amdURL},
-				},
-			},
-			VM:   disk.VMSpec{DiskSizeGiB: diskNewFlags.size},
-			Boot: disk.BootSpec{Mode: mode},
+			Image:       disk.ImageSpec{Arches: arches},
+			VM:          disk.VMSpec{DiskSizeGiB: pickDiskGiB(diskNewFlags.size, 0)},
+			Boot:        disk.BootSpec{Mode: mode},
 		}
 	}
 

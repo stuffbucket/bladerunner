@@ -41,9 +41,17 @@ a prior 'br eject'), the guest is restored where it left off instead of
 cold-booting (use --no-restore to force a cold boot).
 
 The argument resolves in this order:
-  - a URL (contains "://")        — booted as a one-off disk named after its basename
-  - a path ending in ".disk"      — loaded as a manifest file
-  - otherwise a catalog disk name — looked up in the shelf ('br disks')
+  - a URL (contains "://")            — booted as a one-off disk named after its basename
+  - an existing .sparseimage or .dmg  — booted as a cartridge
+  - an existing path ending in ".disk" — loaded as a manifest file
+  - otherwise a catalog disk name     — looked up in the shelf ('br disks')
+
+A cartridge is one file holding a whole VM, built by 'br disk pack': the
+runnable .sparseimage, or the compressed .dmg that --ship produces for AirDrop.
+Booting a .dmg converts a fresh writable working copy beside it, so the shipped
+file stays pristine. The cartridge carries its own disk, EFI state and
+cloud-init, so it always cold-boots and the slot flags below do not apply to it;
+put it away with 'br eject'.
 
 Sizing and boot-mode flags override the disk's recommendations. The disk carries
 its own image, so there is no --image-url/--image-path here.`,
@@ -161,6 +169,14 @@ func resolveBootManifest(t bootTarget, cat *disk.Catalog) (*disk.Manifest, error
 		return disk.Load(t.arg)
 
 	default: // bootTargetName
+		// A path that names a cartridge image reached this branch because no
+		// such FILE exists (classifyBootArg requires it). Answering that with
+		// the disk catalog told a user who had passed a path to go and consult
+		// a shelf of names; the extension says what was meant, so say that.
+		if cartridge.HasImageExt(t.arg) {
+			return nil, fmt.Errorf("no cartridge at %q: the path names a cartridge image (%s or %s) but no such file exists; check the path, or pack one with 'br disk pack <disk> --out <name>%s'",
+				t.arg, cartridge.SparseExt, cartridge.DMGExt, cartridge.SparseExt)
+		}
 		e, ok := cat.Lookup(t.arg)
 		if !ok {
 			return nil, fmt.Errorf("unknown disk %q; %s", t.arg, availableDisksHint(cat))

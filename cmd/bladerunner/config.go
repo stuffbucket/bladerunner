@@ -12,7 +12,7 @@ import (
 
 const maxDisplayValueLen = 60
 
-// --- JSON output (runner config ... --json) ---
+// --- JSON output (br config ... --json) ---
 
 // configGetResult is the JSON shape for `br config get <key> --json`.
 type configGetResult struct {
@@ -47,16 +47,13 @@ to be started.
 
 Examples:
   # List all config keys with their defaults and status
-  runner config keys
+  br config keys
 
   # Get a specific config value
-  runner config get base-image-url
+  br config get base-image-url
 
   # Set a config value (only certain keys are modifiable)
-  runner config set base-image-url https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img
-
-  # List all available config keys
-  runner config keys`,
+  br config set base-image-url https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runConfig,
 }
@@ -118,7 +115,7 @@ func defaultConfigValue(cfg *config.Config, k string) string {
 
 func runConfigGet(args []string) error {
 	if len(args) != 1 {
-		err := fmt.Errorf("usage: runner config get <key>")
+		err := fmt.Errorf("usage: br config get <key>")
 		if jsonOutput {
 			emitJSONError(err)
 		}
@@ -184,7 +181,7 @@ func runConfigGet(args []string) error {
 
 func runConfigSet(args []string) error {
 	if len(args) != 2 {
-		err := fmt.Errorf("usage: runner config set <key> <value>")
+		err := fmt.Errorf("usage: br config set <key> <value>")
 		if jsonOutput {
 			emitJSONError(err)
 		}

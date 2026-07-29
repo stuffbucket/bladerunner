@@ -711,7 +711,7 @@ var challengeTmpl = template.Must(template.New("challenge").Parse(`<!doctype htm
 <p class="muted">Known accounts:</p>
 <ul>
 {{range .Accounts}}<li><code>{{.Fingerprint}}</code>{{if .Comment}} — {{.Comment}}{{end}}</li>
-{{else}}<li class="muted">No accounts registered. Add one with <code>runner user add &lt;pubkey&gt;</code>.</li>
+{{else}}<li class="muted">No accounts registered. Add one with <code>br user add &lt;pubkey&gt;</code>.</li>
 {{end}}</ul>
 <div id="status">Waiting for approval…</div>
 <script>

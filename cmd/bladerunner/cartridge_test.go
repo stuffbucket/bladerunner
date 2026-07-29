@@ -95,14 +95,65 @@ func TestPackOutPathAndCartridgeNameAgree(t *testing.T) {
 		}
 	}
 	// `disk pack` writes the runnable form; --ship writes the .dmg. Asking for
-	// a .dmg output is refused rather than silently producing
+	// a .dmg output is refused by packOutPath itself (see
+	// TestPackOutPathRejectsANonSparseExtension) rather than silently producing
 	// demo.dmg.sparseimage under the unusable name "demo.dmg".
-	resolved, err := packOutPath("/x/demo"+cartridge.DMGExt, "incus")
-	if err != nil {
-		t.Fatalf("packOutPath: %v", err)
+	if resolved, err := packOutPath("/x/demo"+cartridge.DMGExt, "incus"); err == nil {
+		t.Fatalf("packOutPath(.dmg) = %q, want a refusal", resolved)
 	}
-	if _, err := packCartridgeName(resolved); !errors.Is(err, instance.ErrInvalidName) {
-		t.Fatalf("packCartridgeName(%q) = %v, want an invalid-name error", resolved, err)
+}
+
+// `br disk pack incus --out demo.dmg` used to be accepted here, appended
+// .sparseimage (hdiutil does that regardless), derive the cartridge name
+// "demo.dmg" from the result and die three calls later on instance.ValidName's
+// regex. --ship advertises a .dmg, so .dmg is exactly what a user reaches for;
+// the extension is now refused up front, in a message that names both right
+// answers instead of a regex.
+func TestPackOutPathRejectsANonSparseExtension(t *testing.T) {
+	for _, out := range []string{
+		"demo" + cartridge.DMGExt,
+		"/x/demo" + cartridge.DMGExt,
+		"/x/demo.img",
+		"/x/demo.sparsebundle",
+	} {
+		got, err := packOutPath(out, "incus")
+		if err == nil {
+			t.Errorf("packOutPath(%q) = %q, want a refusal", out, got)
+			continue
+		}
+		if !errors.Is(err, errPackOutExtension) {
+			t.Errorf("packOutPath(%q) error = %v, want it to wrap errPackOutExtension", out, err)
+		}
+		// The message has to carry the offending path and both fixes: the
+		// runnable extension, and --ship for the AirDrop artifact.
+		for _, want := range []string{out, cartridge.SparseExt, "--ship", cartridge.DMGExt} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("packOutPath(%q) error %q does not mention %q", out, err, want)
+			}
+		}
+		// And it must not be the name regex the user cannot act on.
+		if strings.Contains(err.Error(), nameRulePattern) {
+			t.Errorf("packOutPath(%q) error %q still surfaces the name regex", out, err)
+		}
+	}
+}
+
+// nameRulePattern is instance.ValidName's regex, which is what the old failure
+// put in front of the user.
+const nameRulePattern = `^[a-z0-9][a-z0-9-]*$`
+
+// A bare --out with no extension is still accepted and gets .sparseimage — the
+// behavior the flag help now states.
+func TestPackOutPathAcceptsABareName(t *testing.T) {
+	got, err := packOutPath("/x/demo", "incus")
+	if err != nil {
+		t.Fatalf("packOutPath(bare): %v", err)
+	}
+	if want := "/x/demo" + cartridge.SparseExt; got != want {
+		t.Fatalf("packOutPath(bare) = %q, want %q", got, want)
+	}
+	if usage := diskPackCmd.Flags().Lookup("out").Usage; !strings.Contains(usage, cartridge.SparseExt) {
+		t.Errorf("--out help %q does not state the required extension", usage)
 	}
 }
 
