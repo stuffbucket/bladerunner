@@ -202,12 +202,26 @@ func applianceBlockers(caps Capabilities) []string {
 
 // vmBlockers reports whether a short-lived bladerunner VM can be booted.
 func vmBlockers(caps Capabilities) []string {
-	var blockers []string
+	// Returning early rather than accumulating avoids a redundant second
+	// GOOS test: off macOS the platform is the only blocker worth reporting,
+	// and asking about the VM runtime there is meaningless.
 	if caps.GOOS != osDarwin {
-		blockers = append(blockers, fmt.Sprintf("needs macOS to boot a bladerunner VM, but this host is %s", caps.GOOS))
+		return []string{fmt.Sprintf("needs macOS to boot a bladerunner VM, but this host is %s", caps.GOOS)}
 	}
-	if caps.GOOS == osDarwin && !caps.VMUsable {
-		blockers = append(blockers, "no usable VM runtime (Virtualization.framework needs a signed binary; run make sign)")
+	if !caps.VMUsable {
+		return []string{"no usable VM runtime (Virtualization.framework needs a signed binary; run make sign)"}
 	}
-	return blockers
+	return nil
+}
+
+// shouldProbeAppliance reports whether running the libguestfs launch check can
+// still change the outcome.
+//
+// The check boots a real appliance and costs seconds, so it is worth skipping
+// when native is already viable. It is a separate predicate rather than an
+// inline condition so it can be tested on any platform: inside Probe its effect
+// is invisible off Linux, where applianceUsable always reports false and both
+// branches therefore produce the same capabilities.
+func shouldProbeAppliance(want Method, targetArch string, caps Capabilities) bool {
+	return want == MethodAppliance || len(nativeBlockers(targetArch, caps)) > 0
 }

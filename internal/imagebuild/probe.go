@@ -26,7 +26,7 @@ func Probe(ctx context.Context, want Method, targetArch string) Capabilities {
 		VMUsable:   vmRuntimeUsable(),
 	}
 
-	if want == MethodAppliance || len(nativeBlockers(targetArch, caps)) > 0 {
+	if shouldProbeAppliance(want, targetArch, caps) {
 		caps.ApplianceUsable = applianceUsable(ctx)
 	}
 	return caps
