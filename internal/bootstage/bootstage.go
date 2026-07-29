@@ -28,6 +28,14 @@ import (
 // stage — never string matching.
 type Stage string
 
+// The boot-phase stages, listed in the order a start passes through them.
+// stageOrder below derives Rank from that order; Failed is terminal and is
+// deliberately left out of it, so Rank(Failed) is -1. The shutdown-phase
+// counterparts live in drain.go.
+//
+// These strings are the on-disk wire format of State.Stage, read by a menubar
+// that may be an older build than the producer. Add a stage rather than
+// renaming or reusing one.
 const (
 	Boot    Stage = "boot"    // VM/kernel coming up
 	Setup   Stage = "setup"   // cloud-init configuring the guest

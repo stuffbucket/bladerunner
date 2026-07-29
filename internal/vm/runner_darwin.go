@@ -64,6 +64,15 @@ const (
 	StopOutcomeForced StopOutcome = "forced"
 )
 
+// Runner owns one guest VM for its whole lifetime. It provisions the disk image
+// and the cloud-init seed, builds the Virtualization.framework configuration,
+// starts the machine together with the host-side vsock forwarders and the
+// console log, and drains the guest again on shutdown. A Runner is single-use:
+// once it has been stopped it cannot start another VM.
+//
+// Drive the start path (Start, StartVM, WaitForIncus) from one goroutine. The
+// shutdown paths (Stop, StopWithTimeout, Eject) and ProbeGuest may be called
+// from another one; Stop is idempotent and only the first call does the work.
 type Runner struct {
 	cfg *config.Config
 
@@ -377,6 +386,12 @@ type StartVMResult struct {
 	Endpoint string
 }
 
+// NewRunner validates cfg and returns a Runner bound to it. It touches no disk
+// and starts nothing: no image is created and no VM exists until StartVM (or
+// Start) is called, so a failure here is purely a configuration failure. The
+// Runner reports boot progress through a default timed reporter; install your
+// own with SetProgress, and any restore source with SetRestoreFrom, before you
+// start it.
 func NewRunner(cfg *config.Config) (*Runner, error) {
 	if cfg == nil {
 		return nil, errors.New("config is nil")
@@ -554,6 +569,12 @@ func (r *Runner) Start(ctx context.Context) (*report.StartupReport, error) {
 	return r.WaitForIncus(ctx)
 }
 
+// StartGUI opens the VZ graphical console window onto the running VM. It hands
+// the calling thread to the macOS event loop and does not return while the
+// window is open, so it must be called on the main thread (main.go holds it
+// with runtime.LockOSThread) and any wait that has to keep running -- the Incus
+// readiness wait, for one -- belongs on another goroutine. See vmhost.block.
+// It returns an error if no VM has been started.
 func (r *Runner) StartGUI() error {
 	if r.vm == nil {
 		return errors.New("vm is not running")
@@ -563,6 +584,13 @@ func (r *Runner) StartGUI() error {
 	return r.vm.StartGraphicApplication(1920, 1200, vz.WithWindowTitle("Bladerunner Incus VM"), vz.WithController(true))
 }
 
+// Wait blocks until the guest leaves the running state, and reports why it
+// did: nil once the VM reaches stopped (the ordinary end of a headless run,
+// including a shutdown from inside the guest), an error if the VM enters the
+// error state, and ctx.Err() if the caller cancels first. A canceled Wait
+// leaves the VM alone -- it observes, it does not stop anything -- so a caller
+// that wants the guest down must still call Stop or Eject. Waiting on a Runner
+// that was never started returns nil at once.
 func (r *Runner) Wait(ctx context.Context) error {
 	if r.vm == nil {
 		return nil

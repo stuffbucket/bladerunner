@@ -25,9 +25,17 @@ import (
 type State int
 
 const (
+	// StatePending is the state every stage starts in: dim, no elapsed time,
+	// no spinner.
 	StatePending State = iota
+	// StateRunning is the only state that animates — spinner, a live elapsed
+	// counter, and the optional substatus set by Board.Substatus.
 	StateRunning
+	// StateDone freezes the elapsed time at the moment Complete was called.
 	StateDone
+	// StateFailed also freezes the elapsed time and renders the error after the
+	// label. A failed stage does not stop the board: the remaining stages keep
+	// rendering until Stop is called.
 	StateFailed
 )
 

@@ -15,6 +15,21 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
+// BuildCloudInit renders the NoCloud seed pair for one guest: the
+// "#cloud-config" user-data document and the matching meta-data document, in
+// that order. The user-data carries everything the guest needs to provision
+// itself unattended -- the host's Incus client certificate (clientCertPEM), the
+// grub console drop-in, and the whole first-boot bootstrap script from
+// renderBootstrapScript -- because nothing is pushed over SSH afterwards; SSH
+// only exists once that script has run.
+//
+// The meta-data instance-id is derived from cfg.Name. cloud-init runs its
+// per-instance modules (runcmd, and so the bootstrap) exactly once per
+// instance-id, so a guest that keeps its name never re-bootstraps on a later
+// boot, however that boot went.
+//
+// It only renders text. WriteSeedFiles and BuildCloudInitISO put the result
+// where the guest datasource can read it.
 func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	bootstrapScript := renderBootstrapScript(cfg)
 
@@ -85,6 +100,12 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	return b.String(), metaData
 }
 
+// WriteSeedFiles stages the two documents from BuildCloudInit in
+// cfg.CloudInitDir, creating the directory if it is absent. The file names
+// "user-data" and "meta-data" are fixed by the NoCloud datasource: the guest
+// looks for exactly those on the seed volume, so they are not configurable.
+// This only populates the staging directory; BuildCloudInitISO turns it into
+// the volume the VM attaches.
 func WriteSeedFiles(cfg *config.Config, userData, metaData string) error {
 	start := time.Now()
 	if err := os.MkdirAll(cfg.CloudInitDir, 0o755); err != nil {
@@ -102,6 +123,16 @@ func WriteSeedFiles(cfg *config.Config, userData, metaData string) error {
 	return nil
 }
 
+// BuildCloudInitISO packs the staging directory cfg.CloudInitDir into the image
+// at cfg.CloudInitISO, with the volume name "cidata" that the guest NoCloud
+// datasource searches for. The VM configuration attaches that file read-only as
+// a disk (see vmconfig_darwin.go), which is how the seed reaches the guest.
+//
+// Any existing image at the path is replaced first, so a boot always presents
+// the seed files as they are on disk now. hdiutil picks its own extension for
+// the output, so the produced file is renamed to cfg.CloudInitISO when it lands
+// under another name. It shells out to hdiutil and therefore works on macOS
+// only.
 func BuildCloudInitISO(ctx context.Context, cfg *config.Config) error {
 	start := time.Now()
 	if err := os.MkdirAll(filepath.Dir(cfg.CloudInitISO), 0o755); err != nil {
