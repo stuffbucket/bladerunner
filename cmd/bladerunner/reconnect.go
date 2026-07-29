@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
 const guestExecTimeout = 20 * time.Second
@@ -34,7 +35,7 @@ Restart).`,
 }
 
 func runReconnect(_ *cobra.Command, _ []string) error {
-	configPath, err := sshConfigFromControl()
+	configPath, instanceName, err := sshTarget()
 	if err != nil {
 		if jsonOutput {
 			emitJSONError(err)
@@ -50,7 +51,7 @@ func runReconnect(_ *cobra.Command, _ []string) error {
 	// 'date -s @epoch' (TZ/DST-fragile, and needed a sudo-date path) nor bounce
 	// the relays here: the NTP relay is Restart=always and the watchdog owns
 	// wedged-relay recovery, so a manual clock kick is all reconnect needs to be.
-	if err := guestExec(configPath, sudoCmd, "-n", "sh", "-c", "chronyc burst 4/4 && chronyc makestep"); err != nil {
+	if err := guestExec(ssh.HostAlias(instanceName), configPath, sudoCmd, "-n", "sh", "-c", "chronyc burst 4/4 && chronyc makestep"); err != nil {
 		err = fmt.Errorf("reconnect failed (guest may be fully unresponsive — try a restart): %w", err)
 		if jsonOutput {
 			emitJSONError(err)
@@ -66,9 +67,11 @@ func runReconnect(_ *cobra.Command, _ []string) error {
 }
 
 // guestExec runs a single non-interactive command in the guest over the vsock
-// SSH path, failing fast if the guest is unreachable.
-func guestExec(configPath string, args ...string) error {
-	sshPath, argv, err := sshArgv(configPath, []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}, args...)
+// SSH path, failing fast if the guest is unreachable. alias is the ssh host
+// alias of the selected instance, so a named instance is reached through its
+// own config.d fragment rather than the default one.
+func guestExec(alias, configPath string, args ...string) error {
+	sshPath, argv, err := sshArgvFor(alias, configPath, []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}, args...)
 	if err != nil {
 		return err
 	}

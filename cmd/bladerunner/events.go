@@ -48,7 +48,7 @@ func runEvents(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	client, err := connectIncus()
+	client, err := incusClientForTarget()
 	if err != nil {
 		return err
 	}

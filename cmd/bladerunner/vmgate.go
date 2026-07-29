@@ -14,43 +14,102 @@ import (
 	"golang.org/x/term"
 
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
-	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
-// errVMNotRunning is returned, with a clean message that omits the raw
-// control-socket dial failure, when a command needs the VM but it is not running
-// and was not started. The underlying socket error is logged at debug level.
-var errVMNotRunning = errors.New("VM is not running; start it with 'br start'")
+// errVMNotRunning identifies the "the instance this verb needs is not running"
+// condition. It is never returned as-is: notRunningError writes the message for
+// the actual target and matches this under errors.Is, so a caller can test for
+// the condition without matching on the wording. The raw control-socket dial
+// failure is logged at debug level and never printed, so the terminal stays
+// clean.
+var errVMNotRunning = errors.New("the VM is not running")
+
+// notRunning is that condition, carrying the message written for one target.
+type notRunning struct{ message string }
+
+// Error returns the advice-bearing message.
+func (e *notRunning) Error() string { return e.message }
+
+// Is makes every notRunning match errVMNotRunning under errors.Is, whatever its
+// wording.
+func (e *notRunning) Is(target error) bool {
+	return target == errVMNotRunning
+}
+
+// instancesHint answers the question a "not running" message provokes: so what
+// IS running? It is the last line of every one of them.
+const instancesHint = "'br instances' lists what is running"
+
+// notRunningError reports that the instance a verb targets is not running, and
+// names the verb that brings THAT instance back.
+//
+// The message used to be "VM is not running; start it with 'br start'" for
+// every target, and it is reached by web, exec, logs, events, incus, reconnect,
+// ls and shell. For a disk slot or a cartridge that advice is not merely
+// unhelpful, it is harmful: 'br start' creates an ADDITIONAL flat VM rather
+// than bringing back the instance the user meant, so following it leaves two
+// VMs where one was wanted and the original still down.
+func notRunningError(target resolvedInstance) error {
+	switch {
+	case target.Fallback:
+		// Nothing answered anywhere, so name both ways in: a flat VM and a
+		// disk or cartridge.
+		return &notRunning{message: "no VM is running\n" +
+			"  start one with 'br up', or boot a disk or cartridge with 'br boot <name>'\n" +
+			"  " + instancesHint}
+	case target.isDefaultSlot():
+		return &notRunning{message: "the default VM is not running\n" +
+			"  start it with 'br up'\n" +
+			"  " + instancesHint}
+	default:
+		return &notRunning{message: fmt.Sprintf(
+			"instance %q (%s) is not running\n  boot it with 'br boot %s'\n  %s",
+			target.instanceName(), target.Kind, bootArgument(target), instancesHint)}
+	}
+}
+
+// bootArgument is what 'br boot' needs in order to bring target back: a
+// cartridge boots from its image file, because the mounted volume is only a
+// view of it; everything else boots by name.
+func bootArgument(target resolvedInstance) string {
+	if target.Kind == instance.KindCartridge && target.SourcePath != "" {
+		return target.SourcePath
+	}
+	return target.instanceName()
+}
 
 // vmStartReadyTimeout bounds how long requireRunningVM waits for an auto-started
 // VM to publish its readiness signal.
 const vmStartReadyTimeout = 3 * time.Minute
 
-// requireRunningVM returns a control client for a running VM. If the VM is not
-// running it offers to start it when attached to an interactive terminal;
-// otherwise (or if the user declines) it returns errVMNotRunning. The raw
-// control-socket dial failure is logged, never printed, so the terminal stays
-// clean. Commands that need the VM (all except `status`) should funnel through
-// this rather than touching the control client directly.
-func requireRunningVM() (*control.Client, error) {
-	stateDir := config.DefaultStateDir()
-	client := control.NewClient(stateDir)
+// requireRunningVM returns a control client for the instance a verb resolved.
+//
+// When that instance is not running and it is the flat default, it offers to
+// start it on an interactive terminal; otherwise (or if the user declines) it
+// returns notRunningError. Every other instance — a disk slot, a cartridge — is
+// never auto-started, because bringing one back needs its own source and
+// 'br boot' owns that. The raw control-socket dial failure is logged, never
+// printed, so the terminal stays clean.
+//
+// Commands that need a VM funnel through requireRunningTarget, which resolves
+// --instance and then calls this, rather than touching the control client
+// directly.
+func requireRunningVM(target resolvedInstance) (*control.Client, error) {
+	client := control.NewClient(target.StateDir)
 	if client.IsRunning() {
 		return client, nil
 	}
 	// Log the detail for `BLADERUNNER_LOG_LEVEL=debug`; keep it off the terminal.
 	logging.L().Debug("VM control socket unreachable; VM not running",
-		"socket", control.SocketPath(stateDir))
+		"instance", target.instanceName(), "socket", control.SocketPath(target.StateDir))
 
-	if !interactiveTerminal() {
-		return nil, errVMNotRunning
+	if !target.isDefaultSlot() || !interactiveTerminal() || !confirmStartVM() {
+		return nil, notRunningError(target)
 	}
-	if !confirmStartVM() {
-		return nil, errVMNotRunning
-	}
-	if err := startVMDetachedAndWait(stateDir); err != nil {
+	if err := startVMDetachedAndWait(target.StateDir); err != nil {
 		return nil, err
 	}
 	return client, nil

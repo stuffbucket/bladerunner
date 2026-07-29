@@ -108,20 +108,6 @@ func (r resolvedInstance) instanceName() string {
 	return cfg.InstanceName()
 }
 
-// controlClient returns a control client for this instance. For the flat
-// default it funnels through requireRunningVM, preserving the "the VM is not
-// running, start it now?" prompt; a named instance is never auto-started.
-func (r resolvedInstance) controlClient() (*control.Client, error) {
-	if r.isDefaultSlot() {
-		return requireRunningVM()
-	}
-	client := control.NewClient(r.StateDir)
-	if !client.IsRunning() {
-		return nil, fmt.Errorf("instance %q is not running", r.Name)
-	}
-	return client, nil
-}
-
 // instanceScanner discovers instances. The lookups are function fields so the
 // resolution policy can be tested against a temporary state dir without a live
 // control socket.
@@ -174,6 +160,25 @@ func resolveInstanceTarget() (resolvedInstance, error) {
 	return defaultScanner().resolve(selectedInstanceName())
 }
 
+// requireRunningTarget resolves the instance the user selected (--instance,
+// BLADERUNNER_INSTANCE, or the single running VM) and returns a control client
+// for it.
+//
+// This is the choke point: every verb that acts on a running VM goes through
+// here, so --instance is honored in one place instead of being re-derived from
+// config.DefaultStateDir() in each of them (issue #9).
+func requireRunningTarget() (*control.Client, resolvedInstance, error) {
+	target, err := resolveInstanceTarget()
+	if err != nil {
+		return nil, resolvedInstance{}, err
+	}
+	client, err := requireRunningVM(target)
+	if err != nil {
+		return nil, target, err
+	}
+	return client, target, nil
+}
+
 // targetStateDir resolves the selected instance's state dir. A resolution
 // failure (an ambiguous selection, or an unknown name) is reported through the
 // --json envelope as well, so callers can `return err` directly.
@@ -183,6 +188,28 @@ func targetStateDir() (string, error) {
 		return "", jsonOrError(err)
 	}
 	return target.StateDir, nil
+}
+
+// requireDefaultInstance resolves the selection for a verb that can only act on
+// the flat default, and refuses an explicit selection of anything else.
+//
+// `br restore` and `br upgrade` both hand the instance to runStart, which
+// rebuilds the flat default's specification only: a disk slot needs its
+// manifest and a cartridge needs its image, and 'br boot' is what carries
+// those. Acting on the default while the user named another instance is the
+// defect; refusing and naming the verbs that do work is the honest answer.
+func requireDefaultInstance(verb string) (string, error) {
+	target, err := resolveInstanceTarget()
+	if err != nil {
+		return "", err
+	}
+	if target.Explicit && !target.isDefaultSlot() {
+		name := target.instanceName()
+		return "", fmt.Errorf("'br %s' acts on the default instance only, not the %s instance %q; "+
+			"stop that one with 'br eject %s' and bring it back with 'br boot %s'",
+			verb, target.Kind, name, name, name)
+	}
+	return config.DefaultStateDir(), nil
 }
 
 // resolve applies the selection policy:
@@ -432,46 +459,26 @@ func (s instanceScanner) portSummary(r *resolvedInstance) string {
 // to reach the selected VM. The returned name feeds ssh.HostAlias, so a named
 // instance is reached through its own config.d fragment and alias.
 func sshTarget() (configPath, instanceName string, err error) {
-	r, err := resolveInstanceTarget()
-	if err != nil {
-		return "", "", err
-	}
-	if r.isDefaultSlot() {
-		// Unchanged path for the single-VM install, including the offer to
-		// start the VM when it is not running.
-		path, cerr := sshConfigFromControl()
-		if cerr != nil {
-			return "", "", cerr
-		}
-		return path, config.DefaultInstanceName, nil
-	}
-	client, err := r.controlClient()
+	client, target, err := requireRunningTarget()
 	if err != nil {
 		return "", "", err
 	}
 	path, err := client.GetConfig(control.ConfigKeySSHConfigPath)
 	if err != nil {
-		logging.L().Debug("get ssh config path failed", "instance", r.Name, "err", err)
-		return "", "", fmt.Errorf("instance %q: %w", r.Name, errVMNotRunning)
+		logging.L().Debug("get ssh config path failed", "instance", target.instanceName(), "err", err)
+		return "", "", notRunningError(target)
 	}
-	return path, r.instanceName(), nil
+	return path, target.instanceName(), nil
 }
 
 // incusClientForTarget dials the Incus API of the selected instance, taking the
 // port and the client certificate from that same instance.
 func incusClientForTarget() (*incus.Client, error) {
-	r, err := resolveInstanceTarget()
+	client, target, err := requireRunningTarget()
 	if err != nil {
 		return nil, err
 	}
-	if r.isDefaultSlot() {
-		return connectIncus()
-	}
-	client, err := r.controlClient()
-	if err != nil {
-		return nil, err
-	}
-	return incusClientFromControl(client, r.StateDir)
+	return incusClientFromControl(client, target)
 }
 
 // --- `br instances` -------------------------------------------------------

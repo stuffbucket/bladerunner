@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
@@ -32,9 +31,16 @@ func init() {
 }
 
 func runSave(_ *cobra.Command, _ []string) error {
-	client := control.NewClient(config.DefaultStateDir())
+	// Snapshot the instance the user selected, not whatever lives in the
+	// default state dir. No prompt: offering to START a VM you asked to
+	// snapshot would be nonsense.
+	target, err := resolveInstanceTarget()
+	if err != nil {
+		return jsonOrError(err)
+	}
+	client := control.NewClient(target.StateDir)
 	if !client.IsRunning() {
-		return jsonOrError(fmt.Errorf("VM is not running"))
+		return jsonOrError(notRunningError(target))
 	}
 
 	// keepPaused=false: a live snapshot — the server resumes the guest after

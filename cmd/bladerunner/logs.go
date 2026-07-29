@@ -34,7 +34,7 @@ func runLogs(_ *cobra.Command, args []string) error {
 
 	instance := args[0]
 
-	client, err := connectIncus()
+	client, err := incusClientForTarget()
 	if err != nil {
 		return err
 	}

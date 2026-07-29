@@ -33,7 +33,11 @@ func init() {
 }
 
 func runRestore(cmd *cobra.Command, args []string) error {
-	if control.NewClient(config.DefaultStateDir()).IsRunning() {
+	stateDir, err := requireDefaultInstance("restore")
+	if err != nil {
+		return jsonOrError(err)
+	}
+	if control.NewClient(stateDir).IsRunning() {
 		return jsonOrError(fmt.Errorf("VM is already running; stop it first ('br stop') before restoring"))
 	}
 

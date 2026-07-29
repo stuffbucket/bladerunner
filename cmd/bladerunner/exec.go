@@ -55,7 +55,7 @@ func runExec(cmdCobra *cobra.Command, args []string) error {
 	cmdCobra.SilenceErrors = true
 	cmdCobra.SilenceUsage = true
 
-	client, err := connectIncus()
+	client, err := incusClientForTarget()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return &exitError{code: 1}

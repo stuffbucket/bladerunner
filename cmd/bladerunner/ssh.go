@@ -8,22 +8,15 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/ssh"
 )
 
-// sshHostAlias is the SSH host alias written into the generated ssh config for
-// the default instance (see internal/ssh/config.go "Host bladerunner").
-const sshHostAlias = ssh.DefaultInstanceName
-
-// sshArgv builds the argument vector for the default instance's host alias.
-// See sshArgvFor; kept as the single-instance shorthand used by the commands
-// that always talk to whichever instance owns the config they were handed.
-func sshArgv(configPath string, opts []string, tail ...string) (sshPath string, argv []string, err error) {
-	return sshArgvFor(sshHostAlias, configPath, opts, tail...)
-}
-
 // sshArgvFor resolves the ssh binary and builds the argument vector the CLI
 // uses to reach an instance: "ssh -F <configPath> <opts...> <alias> <tail...>".
 // argv[0] is "ssh" (as syscall.Exec requires); callers that shell out via
 // exec.Command* should pass argv[1:]. This is the single builder shared by the
 // shell/incus/reconnect commands so they agree on the -F/host wiring.
+//
+// There is deliberately no shorthand that fills in the DEFAULT instance's
+// alias: every caller resolves its alias from sshTarget, so pointing a verb at
+// --instance <name> reaches that instance's own config.d fragment (issue #9).
 func sshArgvFor(alias, configPath string, opts []string, tail ...string) (sshPath string, argv []string, err error) {
 	sshPath, err = exec.LookPath("ssh")
 	if err != nil {
