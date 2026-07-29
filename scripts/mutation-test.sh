@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.." || exit 1
 # it holds the unmount-veto decision logic, where an untested branch means the
 # cartridge silently loses crash protection. It needs a higher timeout
 # coefficient than the rest — see TIMEOUT_FOR below.
-PKGS=(timesource config disk oidc portalloc instance bootstage vmhost)
+PKGS=(timesource config disk oidc portalloc instance bootstage imagebuild vmhost)
 
 # timeout_for echoes the --timeout-coefficient for a package. The default of 10
 # is enough for the pure packages; vmhost links objc, so its baseline test run is
