@@ -61,7 +61,7 @@ func (h *Host) startUnmountWatch() error {
 // Host carries rather than a line that scrolled past in a log.
 func (h *Host) watchUnmount(newSession func() (unmountSession, error)) error {
 	if h.spec.Kind != instance.KindCartridge {
-		return nil // nothing to protect; UnprotectedNone stands
+		return nil // nothing to protect; UnprotectedNotRecorded stands
 	}
 	if h.cartridge == nil {
 		return h.unprotect(UnprotectedNoCartridge)
@@ -109,6 +109,6 @@ func (h *Host) watchUnmount(newSession func() (unmountSession, error)) error {
 // degradation and is recorded there at Debug instead.
 func (h *Host) unprotect(why UnprotectedReason, args ...any) error {
 	h.setUnmountProtection(why)
-	logging.L().Warn(string(why)+"; unmount protection is off", args...)
+	logging.L().Warn(why.Reason()+"; unmount protection is off", args...)
 	return nil
 }
