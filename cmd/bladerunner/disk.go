@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
+	"github.com/stuffbucket/bladerunner/internal/imagebuild"
+	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/util"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
@@ -186,6 +188,7 @@ var diskBakeFlags struct {
 	arch       string
 	size       int
 	release    string
+	method     string
 	timeoutMin int
 }
 
@@ -200,6 +203,9 @@ func init() {
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.arch, "arch", runtime.GOARCH, "Target architecture to build")
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.size, "size", defaultBakeSizeGiB, "Working image size in GiB passed to the build script")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.release, "debian-release", "trixie", "Debian release to build from")
+	diskBakeCmd.Flags().StringVar(&diskBakeFlags.method, "method", string(imagebuild.MethodAuto),
+		fmt.Sprintf("Customize method: %s|%s|%s|%s (%s prefers the fastest mechanic that will actually work here)",
+			imagebuild.MethodAuto, imagebuild.MethodNative, imagebuild.MethodAppliance, imagebuild.MethodVM, imagebuild.MethodAuto))
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.timeoutMin, "timeout", defaultBakeTimeoutMin, "Build timeout in minutes")
 
 	diskCmd.AddCommand(diskNewCmd, diskBakeCmd)
@@ -296,6 +302,40 @@ func runDiskNew(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// Script method names, as understood by scripts/build-guest-image.sh.
+//
+// The names differ from the Go ones because the script names each path after
+// the tool it reaches for, while internal/imagebuild names it after what it
+// does. Mapping here keeps that vocabulary mismatch in one place until the
+// mechanics move into Go and the script goes away.
+const (
+	// scriptMethodNative is the script's qemu-nbd + chroot path.
+	scriptMethodNative = "nbd"
+	// scriptMethodAppliance is the script's libguestfs path.
+	scriptMethodAppliance = "guestfish"
+)
+
+// scriptMethodFor translates a selected mechanic into the build script's own
+// --method vocabulary.
+//
+// It is deliberately total and returns an error for anything unmapped: passing
+// an empty --method through would let the script silently apply its own default,
+// which is how a deliberate selection could turn into a different build than the
+// one the probe chose.
+func scriptMethodFor(m imagebuild.Method) (string, error) {
+	switch m {
+	case imagebuild.MethodNative:
+		return scriptMethodNative, nil
+	case imagebuild.MethodAppliance:
+		return scriptMethodAppliance, nil
+	case imagebuild.MethodVM:
+		return "", fmt.Errorf("building inside a bladerunner VM is not implemented yet, so %q cannot be baked on macOS; "+
+			"build on a Linux host (or in WSL2), or use the published guest image from the guest-image-latest release", imagebuild.MethodVM)
+	default:
+		return "", fmt.Errorf("no build script equivalent for method %q", m)
+	}
+}
+
 // runDiskBake builds the disk's qcow2 and records its SHA-256. The branches are
 // sequential preflight + shell-out + manifest rewrite, not nested logic.
 func runDiskBake(cmd *cobra.Command, args []string) error {
@@ -316,6 +356,25 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(fmt.Errorf("no user disk %q at %s (create it with 'br disk new %s')", name, manifestPath, name))
 	}
 	m, err := disk.Load(manifestPath)
+	if err != nil {
+		return jsonOrError(err)
+	}
+
+	// Decide HOW to build before checking any one mechanic's tools. The probe
+	// establishes what this host can actually do — root, a loop device, a
+	// matching architecture, a libguestfs that really launches — so an
+	// unusable fast path is reported up front with the specific blocking
+	// condition, instead of failing halfway through a build.
+	want := imagebuild.Method(diskBakeFlags.method)
+	caps := imagebuild.Probe(cmd.Context(), want, arch)
+	sel, err := imagebuild.Select(want, arch, caps)
+	if err != nil {
+		return jsonOrError(err)
+	}
+	for _, w := range sel.Warnings {
+		logging.L().Warn("guest image build: falling back", "reason", w)
+	}
+	scriptMethod, err := scriptMethodFor(sel.Method)
 	if err != nil {
 		return jsonOrError(err)
 	}
@@ -353,6 +412,7 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	build := exec.CommandContext(ctx, "bash", scriptPath,
 		"--arch", arch,
 		"--output", absOut,
+		"--method", scriptMethod,
 		"--size", strconv.Itoa(diskBakeFlags.size),
 		"--debian-release", diskBakeFlags.release)
 	build.Stderr = os.Stderr // script logs go to stderr; stdout is the bare digest

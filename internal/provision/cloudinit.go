@@ -477,7 +477,7 @@ func renderTimeHeal(cfg *config.Config) string {
 	b.WriteString("#     after a host suspend (makestep 1.0 -1). The guest gets no paravirt\n")
 	b.WriteString("#     \"you were stopped\" signal, so this guest-local NTP step is the only\n")
 	b.WriteString("#     automatic recovery for post-sleep clock skew. See chrony.conf comments.\n")
-	b.WriteString("cat >/etc/chrony/chrony.conf <<'CHRONY'\n")
+	fmt.Fprintf(&b, "cat >%s <<'CHRONY'\n", GuestChronyConfPath)
 	b.WriteString(chronyConf)
 	b.WriteString("CHRONY\n")
 	b.WriteString("systemctl enable --now chrony || true\n")
@@ -497,13 +497,13 @@ func renderTimeHeal(cfg *config.Config) string {
 	fmt.Fprintf(&b, "cat >/etc/default/bladerunner-watchdog <<EOF\nVSOCK_OIDC_LOCAL_PORT=%d\nEOF\n", cfg.LocalOIDCPort)
 
 	// Watchdog script body (quoted heredoc; byte-for-byte the checked-in file).
-	b.WriteString("cat >/usr/local/sbin/bladerunner-watchdog.sh <<'WATCHDOG'\n")
+	fmt.Fprintf(&b, "cat >%s <<'WATCHDOG'\n", GuestWatchdogScriptPath)
 	b.WriteString(watchdogScript)
 	b.WriteString("WATCHDOG\n")
-	b.WriteString("chmod 0755 /usr/local/sbin/bladerunner-watchdog.sh\n")
+	fmt.Fprintf(&b, "chmod %04o %s\n", watchdogScriptMode.Perm(), GuestWatchdogScriptPath)
 
 	// Watchdog systemd unit (quoted heredoc).
-	b.WriteString("cat >/etc/systemd/system/bladerunner-watchdog.service <<'WATCHDOGUNIT'\n")
+	fmt.Fprintf(&b, "cat >%s <<'WATCHDOGUNIT'\n", GuestWatchdogUnitPath)
 	b.WriteString(watchdogUnit)
 	b.WriteString("WATCHDOGUNIT\n")
 	b.WriteString("systemctl daemon-reload\n")
