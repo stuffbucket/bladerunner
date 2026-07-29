@@ -3,8 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+  # No branch filter. A PR that targets another feature branch (a stacked PR)
+  # would otherwise get NO checks at all — `gh pr checks` reports "no checks
+  # reported", which reads like a failure but is the trigger not matching. That
+  # silently removes the CI signal from every PR above the base of a stack,
+  # which is exactly where the riskiest changes tend to sit.
   pull_request:
-    branches: [main]
   schedule:
     # Run weekly to catch new CVEs in existing deps
     - cron: '0 9 * * 1'
@@ -41,6 +45,32 @@ jobs:
         with:
           files: ./coverage.out
           fail_ci_if_error: false
+
+  # bladerunner only runs on macOS, but every other job here is ubuntu, so the
+  # whole darwin half of the tree was never exercised by CI: 12 `//go:build
+  # darwin` test files carrying 69 top-level tests — all of internal/vm, the
+  # DiskArbitration suite, vmhost's unmount veto and most of cmd/bladerunner —
+  # ran only on a developer's Mac. A GitHub macOS runner cannot start a VM (no
+  # Virtualization.framework entitlement, no nested virt), so this runs with
+  # -short, which is the switch CLAUDE.md section 6.4 puts hardware tests
+  # behind. That still covers every darwin unit test that does not need a VM.
+  macos:
+    name: Build & Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test (short - hardware tests need a signed binary and a real VM)
+        run: go test -short -race ./...
 
   lint:
     name: Lint
@@ -115,7 +145,7 @@ jobs:
     # don't gate routine PRs — upstream CVE drops shouldn't block
     # unrelated work, and govulncheck/trivy already upload SARIF.
     runs-on: ubuntu-latest
-    needs: [build, lint]
+    needs: [build, lint, macos]
     if: always()
     steps:
       - name: Aggregate result
