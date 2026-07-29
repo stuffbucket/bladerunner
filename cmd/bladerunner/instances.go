@@ -578,7 +578,15 @@ func (s instanceScanner) listings(running []resolvedInstance) []instanceListing 
 // cartridge is not protected goes underneath it — see writeProtectionNotes.
 func renderInstanceListings(out io.Writer, listings []instanceListing) error {
 	if len(listings) == 0 {
-		fmt.Fprintln(out, subtle("No VM instances are running. Start one with 'br start'."))
+		// Name the verbs that actually bring an instance back, and how to find
+		// out what there is to bring back. This used to say "Start one with 'br
+		// start'", which is the defect notRunningError fixed in vmgate.go: for a
+		// disk or a cartridge, 'br start' creates an ADDITIONAL flat VM rather
+		// than booting the instance the user meant, so following the advice
+		// leaves two VMs where one was wanted and the original still down.
+		fmt.Fprintln(out, subtle("No VM instances are running.\n"+
+			"  start the default VM with 'br up', or boot a disk or cartridge with 'br boot <name>'\n"+
+			"  'br disks' lists what you can boot"))
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

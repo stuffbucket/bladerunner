@@ -133,6 +133,18 @@ func SetTheme(theme Theme) {
 		Padding(0, 1)
 }
 
+// GetTheme, ThemeByName and ListThemes are INTENTIONALLY UNREACHABLE from
+// production today. `deadcode -test ./...` reports all three, and they are the
+// only entries in that list which are not //export'ed cgo callbacks — so a
+// reader running the tool will find them and should not have to re-litigate the
+// decision.
+//
+// They are the selection half of the theme system, kept for open issue #27
+// (`br theme`), whose plan names ThemeByName(name) explicitly. There is no
+// `br theme` command and no Theme settings key yet, so nothing calls them.
+// Delete them together with #27 if that issue is closed unimplemented; do not
+// delete them piecemeal because a linter flagged one.
+
 // GetTheme returns the currently active theme.
 func GetTheme() Theme {
 	return currentTheme
@@ -174,6 +186,20 @@ func TerminalWidth() int {
 }
 
 // styled applies a style only if output is a TTY.
+//
+// This looks like internal/ui/board.applyStyle and is deliberately NOT shared
+// with it. The two ask different questions of different sinks: this one gates on
+// os.Stdout, because the Title/Subtle/Success/... helpers below are package-level
+// functions that always write there and have no receiver to inject anything
+// into. A Board gates on its own injected `interactive` flag, because a Board
+// may be constructed over any io.Writer and must stay plain when it is writing
+// to a buffer even though os.Stdout happens to be a terminal.
+//
+// Folding them together would need a shared helper taking the gate as an
+// argument, which trades three obvious lines for an exported API and a
+// board -> ui dependency, and would let a future reader believe the two sinks
+// are the same. They are not, and they cannot drift into disagreement, because
+// neither is the authority for the other's writer.
 func styled(style lipgloss.Style, s string) string {
 	if !IsTTY() {
 		return s

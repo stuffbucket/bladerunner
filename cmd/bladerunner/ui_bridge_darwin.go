@@ -81,6 +81,13 @@ func (s *cgoSplash) SetStatus(msg string) {
 // (Booting Linux… -> Setting up… -> Starting Incus…) instead of a static line.
 // Returns when stop is closed (Hide) or the channel is replaced (a new Show).
 func (s *cgoSplash) pollBootStage(stop <-chan struct{}) {
+	// The default state dir is correct here and is not a missed instance
+	// lookup. The splash is only ever shown by vmNotifier.onStart, whose single
+	// caller is menubarItems.triggerStart, and that always launches a plain
+	// `br start` — a flat default-instance boot. So the boot this splash is
+	// tracking is by construction the default instance's. A cartridge insertion
+	// goes through the prompter and notifications instead, and never raises the
+	// splash.
 	stateDir := config.DefaultStateDir()
 	last := ""
 	tick := time.NewTicker(500 * time.Millisecond)

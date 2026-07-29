@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
 )
@@ -170,19 +171,39 @@ func includeLine() string {
 	return "Include " + filepath.Join(InstanceConfigDir(), "*")
 }
 
-// validInstanceName rejects names that would escape the config.d directory or
-// confuse ssh_config's Host patterns. internal/instance.ValidName is the
-// authoritative check on the way in; this is the local guard so a bad name can
-// never turn into a path traversal or a wildcard alias.
+// safeInstanceName is the allowlist a name must match to be rendered into the
+// ssh config tree: an alphanumeric, then alphanumerics, dot, dash or
+// underscore. It rejects "." and ".." and any leading dot by construction (the
+// first character must be alphanumeric), so a name can never escape config.d,
+// and it rejects every control character, ssh_config metacharacter and shell
+// metacharacter by construction too.
+//
+// It is deliberately WIDER than instance.ValidName, which additionally demands
+// lowercase and bounds the length at instance.MaxNameLen. A slot basename may
+// legitimately carry uppercase, an underscore or a dot and may be longer than
+// that bound — see buildStartSpec in cmd/bladerunner/start.go, which documents
+// why it does not impose instance.ValidName on those boots.
+var safeInstanceName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validInstanceName rejects names that would escape the config.d directory,
+// confuse ssh_config's parser, or turn the command string CommandFor prints
+// into something else when pasted into a shell.
+//
+// This is NOT a redundant second layer. instance.ValidName does not run on
+// every route that reaches WriteConfigFor: on the `br start --state-dir <path>`
+// route, vmhost.Spec.Name is left empty on purpose, so Spec.validateIdentity
+// skips ValidName, and Host.instanceName falls through to
+// config.Config.InstanceName — which is filepath.Base of the state directory,
+// validated nowhere. internal/vm.Runner.makeReport reads the same unvalidated
+// value straight from cfg.InstanceName(). This guard is therefore the only
+// check standing between that basename and a file written under ~/.config, so
+// it is an allowlist rather than a list of characters someone thought of.
 func validInstanceName(instance string) error {
 	if instance == "" {
 		return errors.New("ssh: instance name must not be empty")
 	}
-	if instance == "." || instance == ".." || strings.HasPrefix(instance, ".") {
-		return fmt.Errorf("ssh: invalid instance name %q", instance)
-	}
-	if strings.ContainsAny(instance, `/\ *?[]!"'`+"\t\n") {
-		return fmt.Errorf("ssh: invalid instance name %q", instance)
+	if !safeInstanceName.MatchString(instance) {
+		return fmt.Errorf("ssh: invalid instance name %q: must match %s", instance, safeInstanceName.String())
 	}
 	return nil
 }

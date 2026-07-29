@@ -497,6 +497,15 @@ func (b *Board) divider(label string) string {
 	return left + strings.Repeat("─", remaining)
 }
 
+// applyStyle renders style only when this Board is drawing interactively.
+//
+// The gate is the injected b.interactive, NOT ui.IsTTY(): a Board is built over
+// whatever io.Writer the caller hands it, so "is os.Stdout a terminal" is the
+// wrong question — a Board writing into a test buffer must stay plain even when
+// the process does own a terminal. See the note on internal/ui.styled, which
+// has the same three-line shape for the opposite reason: those helpers always
+// write to os.Stdout and have no receiver to inject a gate into. The two are
+// intentionally separate.
 func (b *Board) applyStyle(style lipgloss.Style, s string) string {
 	if !b.interactive {
 		return s
