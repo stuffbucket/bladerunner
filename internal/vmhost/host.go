@@ -440,7 +440,7 @@ func (h *Host) Info() instance.Entry {
 		PID:               os.Getpid(),
 		ProtocolVersion:   control.ProtocolVersion,
 		BinaryVersion:     h.spec.BinaryVersion,
-		StartedAt:         h.startedAt,
+		StartedAt:         h.runStartedAt(),
 		UnmountProtection: h.UnmountProtection(),
 	}
 	if h.cfg != nil {
@@ -473,11 +473,17 @@ func (h *Host) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
+	// startedAt is published under the same lock as cancel. Info() is
+	// documented as safe from any goroutine, and it reads this field; every
+	// goroutine that calls Info in production today is created BY A STEP, so
+	// the write below happens-before every read by accident of ordering. A
+	// caller that holds a *Host and polls Info() from a goroutine started
+	// before Run has no such edge, and the race detector proves it.
 	h.mu.Lock()
 	h.cancel = func() { cancel(ErrStopRequested) }
+	h.startedAt = time.Now()
 	h.mu.Unlock()
 
-	h.startedAt = time.Now()
 	defer h.teardown()
 
 	if err := h.stack.run(ctx, h.lifecycleSteps(), h.onStopErr); err != nil {
@@ -614,6 +620,18 @@ func (h *Host) setUnmountProtection(why UnprotectedReason) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.unprotected = why
+}
+
+// runStartedAt reports when Run stamped this instance's start, or the zero time
+// if it has not started.
+//
+// It exists so Info can read startedAt under h.mu without holding that lock
+// across the whole of Info: h.mu is a plain Mutex, and Info already calls the
+// locking UnmountProtection, so a single lock spanning both would deadlock.
+func (h *Host) runStartedAt() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.startedAt
 }
 
 // The session type the veto registers on, the constructor that opens it and the
