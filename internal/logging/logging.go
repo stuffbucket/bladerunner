@@ -24,8 +24,8 @@ var (
 		TimeFormat:      "2006-01-02 15:04:05",
 	})
 
-	// fileWriter holds the rotator-only writer set by Init so SetQuiet can
-	// swap between (terminal + file) and (file only) at runtime.
+	// fileWriter holds the rotator-only writer set by Init. writerForTTY
+	// picks between it and (terminal + file) when the logger is configured.
 	fileWriter io.Writer
 )
 
@@ -55,8 +55,7 @@ func levelFromEnv() charmlog.Level {
 // Init configures the structured logger. When stdout is a terminal the
 // logger writes to the rotating log file only — the assumption is that an
 // interactive caller has its own UI (e.g. the boot board) owning the
-// screen, and slog spam would interfere with it. SetQuiet flips this at
-// runtime if a caller needs the inverse.
+// screen, and slog spam would interfere with it.
 //
 // In non-TTY environments (CI, log capture) the logger writes to both the
 // file and stdout so existing scrapers keep working.
@@ -96,18 +95,6 @@ func Init(logPath string) error {
 	return nil
 }
 
-// SetQuiet routes log output to the rotating file only (quiet=true) or to
-// both the file and stdout (quiet=false). No-op until Init has been called.
-// Used by interactive callers to silence slog while a TUI owns the screen.
-func SetQuiet(quiet bool) {
-	mu.Lock()
-	defer mu.Unlock()
-	if fileWriter == nil {
-		return
-	}
-	logger.SetOutput(writerLocked(quiet))
-}
-
 // writerForTTY returns the writer to install given whether stdout is a TTY.
 // Caller must ensure fileWriter is populated.
 func writerForTTY(tty bool) io.Writer {
@@ -117,23 +104,8 @@ func writerForTTY(tty bool) io.Writer {
 	return io.MultiWriter(os.Stdout, fileWriter)
 }
 
-// writerLocked returns the appropriate writer for the given quiet flag.
-// Caller must hold mu.
-func writerLocked(quiet bool) io.Writer {
-	if quiet {
-		return fileWriter
-	}
-	return io.MultiWriter(os.Stdout, fileWriter)
-}
-
 func isStdoutTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
-}
-
-func SetLevel(level charmlog.Level) {
-	mu.Lock()
-	defer mu.Unlock()
-	logger.SetLevel(level)
 }
 
 func L() *charmlog.Logger {

@@ -79,13 +79,17 @@ const (
 	archAMD64 = "amd64"
 
 	// Validation constraints
-	MinDiskSizeGiB     = 16
-	DefaultStopTimeout = 30 // seconds
+	MinDiskSizeGiB = 16
 
 	// XDG directory structure
-	xdgLocalDir    = ".local"
-	xdgStateSubdir = "state"
-	appName        = "bladerunner"
+	xdgLocalDir     = ".local"
+	xdgStateSubdir  = "state"
+	xdgConfigSubdir = ".config"
+	appName         = "bladerunner"
+
+	// identityDirName is the DefaultConfigDir subdirectory of registered identity
+	// .pub files.
+	identityDirName = "identities"
 
 	// DefaultInstanceName names the single flat instance that lives directly in
 	// the default state dir. It is the instance that keeps the well-known ports
@@ -740,19 +744,31 @@ func ImageCachePath(sha256hex string) string {
 	return filepath.Join(ImageCacheDir(), sha256hex+".raw")
 }
 
+// DefaultConfigDir returns the XDG-compliant configuration directory for
+// bladerunner.
+// Precedence: XDG_CONFIG_HOME/bladerunner > ~/.config/bladerunner, falling back
+// to ./.config/bladerunner when the home directory cannot be determined.
+//
+// This is the single source of truth for the configuration directory. Every
+// other package that needs a path under it (internal/disk, internal/ssh,
+// internal/oidc) builds on this helper rather than repeating the lookup.
+func DefaultConfigDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, appName)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", xdgConfigSubdir, appName)
+	}
+	return filepath.Join(home, xdgConfigSubdir, appName)
+}
+
 // DefaultIdentityDir returns the XDG-compliant directory of registered identity
 // .pub files. This is the single source of truth for the identity directory
 // layout; internal/oidc wraps it (config is imported by oidc, so the helper
 // lives here to avoid an import cycle).
 func DefaultIdentityDir() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, appName, "identities")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".config", appName, "identities")
-	}
-	return filepath.Join(home, ".config", appName, "identities")
+	return filepath.Join(DefaultConfigDir(), identityDirName)
 }
 
 // DefaultAptMirrorURI returns the apt mirror URI used by the default base image.

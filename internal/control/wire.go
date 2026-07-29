@@ -110,16 +110,3 @@ func (JSONFormat) Decode(r io.Reader) (*Message, error) {
 
 // DefaultWireFormat is the wire format used by default (line-based).
 var DefaultWireFormat WireFormat = LineFormat{}
-
-// Backward compatibility aliases
-type (
-	// Codec is deprecated, use WireFormat instead.
-	Codec = WireFormat
-	// LineCodec is deprecated, use LineFormat instead.
-	LineCodec = LineFormat
-	// JSONCodec is deprecated, use JSONFormat instead.
-	JSONCodec = JSONFormat
-)
-
-// DefaultCodec is deprecated, use DefaultWireFormat instead.
-var DefaultCodec = DefaultWireFormat

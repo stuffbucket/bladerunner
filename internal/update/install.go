@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 // ErrHomebrewManaged is returned when the running binary lives inside a
@@ -96,10 +98,10 @@ func extractAppBundle(tarball []byte, destDir string) (string, error) {
 		}
 
 		// Guard against path traversal: the joined, cleaned path must stay
-		// within destDir.
-		target, err := safeJoin(cleanDest, hdr.Name)
+		// within destDir. internal/util owns the containment rule.
+		target, err := util.SafeJoin(cleanDest, hdr.Name)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("update: tar entry escapes destination: %w", err)
 		}
 
 		// Record the top-level .app directory to return.
@@ -118,16 +120,6 @@ func extractAppBundle(tarball []byte, destDir string) (string, error) {
 		return "", fmt.Errorf("update: tarball did not contain a .app bundle")
 	}
 	return appRoot, nil
-}
-
-// safeJoin joins name onto cleanDest and refuses any result that escapes
-// cleanDest (path traversal).
-func safeJoin(cleanDest, name string) (string, error) {
-	target := filepath.Join(cleanDest, name) //#nosec G305 -- escape is rejected on the next line
-	if target != cleanDest && !strings.HasPrefix(target, cleanDest+string(os.PathSeparator)) {
-		return "", fmt.Errorf("update: tar entry escapes destination: %q", name)
-	}
-	return target, nil
 }
 
 // extractEntry writes a single tar entry (dir, regular file, or in-tree
