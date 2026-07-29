@@ -1,8 +1,28 @@
 name: triage
 
-# Caller stub for repoman's reusable triage workflow.
-# Runs under this repo's GITHUB_TOKEN on every new/edited issue and
-# delegates to the canonical triage logic. Pin moves with @v1.
+# Auto-applies `needs-triage` (with a one-line explainer comment) to any issue
+# that arrives without `needs-bot` or `needs-triage`, UNLESS the issue is
+# already assigned to a milestone (a milestoned issue is treated as already
+# triaged — sorted into a release).
+#
+# WHY THIS IS INLINE RATHER THAN A CALLER STUB
+#
+# This was a stub delegating to
+# `stuffbucket/repoman/.github/workflows/triage-reusable.yml@v1`. That could
+# never run: GitHub only lets a PUBLIC caller repository reach a PUBLIC
+# workflow repository, and repoman is private. Every issue event failed at
+# workflow resolution, before any job started, which is why it surfaced as
+# "this run likely failed because of a workflow file issue" with no job logs.
+# The Access policy on repoman does not lift that restriction; it governs
+# private-to-private access only.
+#
+# Do not turn this back into a `uses:` stub while bladerunner is public and
+# repoman is private. The alternative fix is to make the reusable workflows
+# public, and then this file can go back to being a two-line caller.
+#
+# The logic below is copied from triage-reusable.yml at tag v1. It is a COPY:
+# a change in repoman will not reach here. If the two are meant to agree, check
+# them against each other whenever either one moves.
 
 on:
   issues:
@@ -13,8 +33,28 @@ permissions:
   contents: read
 
 jobs:
-  call:
-    uses: stuffbucket/repoman/.github/workflows/triage-reusable.yml@v1
-    with:
-      issue_number: ${{ github.event.issue.number }}
-    secrets: inherit
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Triage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          info=$(gh issue view "$ISSUE_NUM" --repo "$REPO" --json labels,milestone)
+          labels=$(echo "$info" | jq -r '.labels[].name' | tr '\n' ' ')
+          milestone=$(echo "$info" | jq -r '.milestone.title // ""')
+          # These are substring tests, matching the upstream behaviour being
+          # copied: a label such as `needs-triage-urgent` therefore also
+          # suppresses triage. Kept as-is so this copy stays comparable with
+          # repoman. Tighten it in both places if it ever matters.
+          if [[ -n "$milestone" ]]; then
+            echo "Issue #$ISSUE_NUM is in milestone '$milestone' — already triaged; skipping."
+          elif [[ ! "$labels" =~ "needs-bot" && ! "$labels" =~ "needs-triage" ]]; then
+            gh issue edit "$ISSUE_NUM" --repo "$REPO" --add-label "needs-triage"
+            gh issue comment "$ISSUE_NUM" --repo "$REPO" --body "Auto-tagged \`needs-triage\`. Add \`needs-bot\` to route this through repoman, or another label to indicate manual triage."
+          fi
