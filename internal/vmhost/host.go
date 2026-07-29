@@ -320,6 +320,42 @@ type Host struct {
 	mu     sync.Mutex
 	runner *vm.Runner
 	cancel context.CancelFunc
+
+	// stepsFn and waitReady are TEST SEAMS. Neither is ever set outside a test
+	// — New leaves both nil and every production path resolves to h.steps and
+	// h.waitForGuestReady — so do not delete them as unused (CLAUDE.md section
+	// 9 point 4: a name only a test needs).
+	//
+	// They exist because Run and block are the two functions in this package
+	// that no unit test could reach: every one of the fourteen real steps
+	// attaches a disk image, binds a socket or starts a VM, and the readiness
+	// wait dials a guest through a live vm.Runner that only exists after
+	// Virtualization.framework has booted one from a signed binary. That left
+	// Run's OWN guarantees — the recorded cancel cause, the startedAt stamp,
+	// teardown on every exit path including a step failure — verifiable only by
+	// running a VM by hand. Substituting the step list and the readiness wait
+	// makes those guarantees testable without booting anything; nothing else
+	// about Run is faked.
+	stepsFn   func() []step
+	waitReady func(context.Context) error
+}
+
+// lifecycleSteps resolves the ordered lifecycle Run drives: the real one from
+// steps, unless a test installed a substitute.
+func (h *Host) lifecycleSteps() []step {
+	if h.stepsFn != nil {
+		return h.stepsFn()
+	}
+	return h.steps()
+}
+
+// guestReady resolves the readiness wait block performs: the real one from
+// waitForGuestReady, unless a test installed a substitute.
+func (h *Host) guestReady(ctx context.Context) error {
+	if h.waitReady != nil {
+		return h.waitReady(ctx)
+	}
+	return h.waitForGuestReady(ctx)
 }
 
 // New validates spec and returns a Host ready to Run. It performs no I/O and
@@ -444,7 +480,7 @@ func (h *Host) Run(ctx context.Context) error {
 	h.startedAt = time.Now()
 	defer h.teardown()
 
-	if err := h.stack.run(ctx, h.steps(), h.onStopErr); err != nil {
+	if err := h.stack.run(ctx, h.lifecycleSteps(), h.onStopErr); err != nil {
 		return err
 	}
 	return h.block(ctx)
@@ -775,14 +811,14 @@ func (h *Host) block(ctx context.Context) error {
 		// macOS event loop must run on the main thread immediately. We
 		// don't yet know if boot will succeed, so don't claim it did.
 		h.obs.Started(h.cfg, h.endpoint)
-		go func() { h.publishBootOutcome(h.waitForGuestReady(ctx)) }()
+		go func() { h.publishBootOutcome(h.guestReady(ctx)) }()
 
 		h.obs.Waiting(true)
 		if err := h.activeRunner().StartGUI(); err != nil {
 			return fmt.Errorf("start gui: %w", err)
 		}
 	} else {
-		bootErr := h.waitForGuestReady(ctx)
+		bootErr := h.guestReady(ctx)
 		h.publishBootOutcome(bootErr)
 		h.obs.Ready(h.cfg, h.endpoint, bootErr)
 		h.obs.Waiting(false)
