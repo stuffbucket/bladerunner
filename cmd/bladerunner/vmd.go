@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 // configured by the state directory (or cartridge) it is pointed at, not by a
 // second copy of every `br start` knob.
 var vmdFlags struct {
+	specPath      string
 	stateDir      string
 	cartridgePath string
 	name          string
@@ -47,11 +49,20 @@ var vmdFlags struct {
 	drainTimeout  time.Duration
 }
 
+// vmdSpecFlag names the hand-off flag, so the spawner and the holder cannot
+// spell it differently.
+const vmdSpecFlag = "spec"
+
 // errVMDStateDirRequired is returned when `br vmd` is invoked without the one
 // argument it cannot default: which instance to hold. A holder is spawned by
 // the manager, which always knows the answer, so guessing here would only ever
 // hide a bug in the spawner.
 var errVMDStateDirRequired = errors.New("--state-dir is required: br vmd holds one specific instance and never guesses which")
+
+// errVMDSpecConflict refuses a launch that describes the instance twice. The
+// hand-off file is the complete description, so a flag beside it could only
+// disagree with it.
+var errVMDSpecConflict = errors.New("--spec carries the whole instance description; do not combine it with --state-dir, --cartridge, --name or --gui")
 
 var vmdCmd = &cobra.Command{
 	Use:   "vmd",
@@ -60,7 +71,13 @@ var vmdCmd = &cobra.Command{
 
 br vmd is an internal command. It is spawned by bladerunner itself as a
 detached process that outlives the CLI and the menubar, and it is not intended
-to be run by hand.`,
+to be run by hand.
+
+Ordinarily it is handed --spec <file>: the complete, serialized description of
+the instance written by the spawning process, which it reads and then removes.
+The individual flags below describe the same thing in the small number of cases
+a human can express, and exist so a holder can be started by hand for
+diagnosis.`,
 	Hidden: true,
 	Args:   cobra.NoArgs,
 	RunE:   runVMD,
@@ -73,7 +90,8 @@ to be run by hand.`,
 
 func init() {
 	f := vmdCmd.Flags()
-	f.StringVar(&vmdFlags.stateDir, "state-dir", "", "State directory of the instance to hold (required)")
+	f.StringVar(&vmdFlags.specPath, vmdSpecFlag, "", "Serialized instance description written by the spawning process (consumed on read)")
+	f.StringVar(&vmdFlags.stateDir, "state-dir", "", "State directory of the instance to hold (required without --spec)")
 	f.StringVar(&vmdFlags.cartridgePath, "cartridge", "", "Cartridge image to attach and boot")
 	f.StringVar(&vmdFlags.name, "name", "", "Instance name (default: derived from the state directory)")
 	f.BoolVar(&vmdFlags.gui, "gui", false, "Open the GUI console window")
@@ -122,9 +140,38 @@ func runVMD(cmd *cobra.Command, _ []string) error {
 	return explainHostError(host.Run(ctx))
 }
 
-// buildVMDSpec turns the holder flags into the serializable description of the
-// instance to run. It is pure: it validates and maps, and touches nothing.
+// buildVMDSpec resolves the description of the instance to run: the hand-off
+// file when the spawner wrote one, else the hand-written flags.
 func buildVMDSpec() (vmhost.Spec, error) {
+	if vmdFlags.specPath == "" {
+		return buildVMDSpecFromFlags()
+	}
+	if vmdFlags.stateDir != "" || vmdFlags.cartridgePath != "" || vmdFlags.name != "" || vmdFlags.gui {
+		return vmhost.Spec{}, errVMDSpecConflict
+	}
+	spec, err := readHolderSpec(vmdFlags.specPath)
+	if err != nil {
+		return vmhost.Spec{}, err
+	}
+	// The spawner may have left the drain budget to this process's default
+	// rather than asserting one, which is the same "zero means unset" rule the
+	// flag path follows.
+	if spec.DrainTimeout <= 0 {
+		spec.DrainTimeout = vmdFlags.drainTimeout
+	}
+	return spec, nil
+}
+
+// buildVMDSpecFromFlags turns the hand-written holder flags into the
+// serializable description of the instance to run. It is pure: it validates and
+// maps, and touches nothing.
+//
+// The cartridge it describes is attached under the BROWSABLE default, which is
+// what this path has always actually done: it used to compute a private
+// mountpoint and pass it with no policy beside it, and cartridge.Open ignores a
+// mountpoint under the browsable policy. Naming the policy makes the code say
+// what the process does.
+func buildVMDSpecFromFlags() (vmhost.Spec, error) {
 	if vmdFlags.stateDir == "" {
 		return vmhost.Spec{}, errVMDStateDirRequired
 	}
@@ -141,22 +188,9 @@ func buildVMDSpec() (vmhost.Spec, error) {
 	if vmdFlags.cartridgePath != "" {
 		spec.Kind = instance.KindCartridge
 		spec.CartridgePath = vmdFlags.cartridgePath
-		// The holder attaches the cartridge itself (nothing handed it an open
-		// one), so it needs the conventional per-instance mountpoint. An
-		// unnamed holder takes the cartridge's own name rather than mounting
-		// every cartridge on top of <stateDir>/mnt.
-		spec.Mountpoint = cartridge.MountpointFor(vmdFlags.stateDir, vmdMountName())
+		spec.MountPolicy = cartridge.DefaultMountPolicy
 	}
 	return spec, nil
-}
-
-// vmdMountName is the mount-slot name for a cartridge holder: the explicit
-// --name when given, otherwise the cartridge image's own basename.
-func vmdMountName() string {
-	if vmdFlags.name != "" {
-		return vmdFlags.name
-	}
-	return cartridge.NameFromPath(vmdFlags.cartridgePath)
 }
 
 // vmdChangedFlags reports which overrides the holder actually asserts. Only
@@ -264,6 +298,17 @@ func vmdLogName(name string) string {
 	}
 	return vmdLogPrefix + name + vmdLogExt
 }
+
+// vmdSpecName is the hand-off file name for an instance: the holder log's name
+// with a JSON extension, so the two files that describe one holder are keyed by
+// exactly one rule — including the fallback for a name that is not a usable
+// path element.
+func vmdSpecName(name string) string {
+	return strings.TrimSuffix(vmdLogName(name), vmdLogExt) + vmdSpecExt
+}
+
+// vmdSpecExt is the extension of the hand-off file.
+const vmdSpecExt = ".json"
 
 const (
 	// vmdDefaultLogName is the holder log of the flat default instance, which

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/vm"
+	"github.com/stuffbucket/bladerunner/internal/vmhost"
 )
 
 // This file is the CLI surface over internal/cartridge: `br disk pack` (build a
@@ -438,21 +440,98 @@ func ensureCartridgeBootable(path, name string) error {
 	return nil
 }
 
-// runBootCartridge boots a .sparseimage/.dmg cartridge. Opening it converts a
-// shipped .dmg to a writable working copy (the read-only ship form stays
-// pristine), attaches the image where the user can eject it, and verifies its
-// layout; the VM is then rooted inside the mount and the foreground runStart
-// owns it — detaching on exit.
+// runBootCartridge boots a .sparseimage/.dmg cartridge.
+//
+// Headless — the ordinary case — the CLI does NOT open the cartridge. The
+// holder does, because the holder is what will own the mount for as long as the
+// VM runs: a mount opened here would be claimed by a process the user is about
+// to close, and releasing that claim while the VM ran is precisely the
+// stranding this design removes. So everything the boot needs travels in the
+// Spec — the image, --persist, --private-mount and the sizing flags the user
+// set — and the holder attaches, verifies and reads the packed manifest itself.
+//
+// With --gui the CLI opens it, because a GUI VM runs in this process (see
+// runStart) and the Host it hands the cartridge to is right here.
 func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	name := cartridge.NameFromPath(path)
 	if !disk.ValidName(name) {
 		return jsonOrError(fmt.Errorf("invalid cartridge name %q derived from %s", name, path))
 	}
-
 	if err := ensureCartridgeBootable(path, name); err != nil {
 		return jsonOrError(err)
 	}
+	if bootFlags.gui {
+		return runBootCartridgeForeground(cmd, args, path, name)
+	}
 
+	reportPlannedPersistence(path)
+	spec := cartridgeBootSpec(cmd, path, name)
+	if !jsonOutput {
+		fmt.Printf("%s cartridge %s\n", subtle("Booting"), value(name))
+	}
+	return runStartUnderHolder(spec)
+}
+
+// cartridgeBootSpec describes a holder-run cartridge boot.
+//
+// Its sizing is NOT pre-resolved, which is the one structural difference from
+// every other `br boot`: the recommended CPU/memory/disk numbers live in the
+// manifest packed inside the image, and nothing has attached the image yet. So
+// the spec is not Driven — it carries only the flags the user actually set, and
+// the Host layers the cartridge's own manifest underneath them once it has the
+// mount (see vmhost.Host.startConfig).
+func cartridgeBootSpec(cmd *cobra.Command, path, name string) vmhost.Spec {
+	spec := vmhost.Spec{
+		Kind:          instance.KindCartridge,
+		Name:          name,
+		StateDir:      config.DefaultStateDir(),
+		CartridgePath: path,
+		Persist:       bootFlags.persist,
+		MountPolicy:   cartridge.MountPolicyFor(bootFlags.privateMount),
+		BinaryVersion: version,
+	}
+	if spec.MountPolicy.Private() {
+		spec.Mountpoint = cartridgeMountpoint(name)
+	}
+	spec.Overrides, spec.ChangedFlags = bootOverrides(cmd)
+	return spec
+}
+
+// bootOverrides maps the `br boot` flags the user explicitly set onto the
+// `br start` override vocabulary a Spec speaks.
+//
+// Only flags that were CHANGED are reported, so the cartridge's own manifest
+// and the persisted Settings keep their say over everything the user left
+// alone. --headless is spelled as the "gui" override turned off, because that
+// is the field it contradicts.
+func bootOverrides(cmd *cobra.Command) (vmhost.Overrides, []string) {
+	changed := func(name string) bool { return cmd != nil && cmd.Flags().Changed(name) }
+	o := vmhost.Overrides{
+		CPUs:        bootFlags.cpus,
+		MemoryGiB:   bootFlags.memory,
+		DiskSizeGiB: bootFlags.disk,
+		Timeout:     bootFlags.timeout,
+	}
+	var names []string
+	for flag, name := range map[string]string{
+		"cpus": "cpus", "memory": "memory", "disk": "disk", "timeout": "timeout",
+	} {
+		if changed(flag) {
+			names = append(names, name)
+		}
+	}
+	if changed("headless") {
+		o.GUI = false
+		names = append(names, "gui")
+	}
+	sort.Strings(names)
+	return o, names
+}
+
+// runBootCartridgeForeground is the pre-holder path, kept for --gui: the CLI
+// opens the cartridge and hands it to a Host running in this very process,
+// whose main thread the console window then takes.
+func runBootCartridgeForeground(cmd *cobra.Command, args []string, path, name string) error {
 	// No mountpoint is passed under the browsable default: macOS picks the
 	// location (under /Volumes, visible and ejectable in Finder) and Open
 	// reports back where it landed. --private-mount dictates one instead.
@@ -469,14 +548,6 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	bootCartridge.opened = opened
 	bootCartridge.mountpoint = opened.Mountpoint()
 
-	guiMode := opened.GUI()
-	switch {
-	case bootFlags.gui:
-		guiMode = true
-	case bootFlags.headless:
-		guiMode = false
-	}
-
 	// Cartridges cold-boot by design (no host-bound RAM snapshot), so never set
 	// restoreFrom. The mount roots state inside the cartridge.
 	m := opened.Manifest
@@ -484,7 +555,7 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	startFlags.cpus = pickCPUs(bootFlags.cpus, m.VM.CPUs)
 	startFlags.memory = pickMemoryGiB(bootFlags.memory, m.VM.MemoryGiB)
 	startFlags.disk = pickDiskGiB(bootFlags.disk, m.VM.DiskSizeGiB)
-	startFlags.gui = guiMode
+	startFlags.gui = true
 	startFlags.timeout = bootFlags.timeout
 	startFlags.imageURL = ""
 	startFlags.imagePath = ""
@@ -497,9 +568,27 @@ func runBootCartridge(cmd *cobra.Command, args []string, path string) error {
 	bootManifest = nil
 
 	if !jsonOutput {
-		fmt.Printf("%s cartridge %s (%s)\n", subtle("Booting"), value(name), modeLabel(guiMode))
+		fmt.Printf("%s cartridge %s (%s)\n", subtle("Booting"), value(name), disk.BootModeGUI)
 	}
 	return runStart(cmd, args)
+}
+
+// reportPlannedPersistence is reportPersistence for a boot that has not opened
+// the cartridge — the holder will. It answers the same question at the same
+// moment (before the guest starts, while canceling is free) from the only thing
+// available here: the image's own extension, which is what decides whether
+// there is a working copy to write back at all.
+func reportPlannedPersistence(path string) {
+	if !bootFlags.persist || jsonOutput {
+		return
+	}
+	if cartridge.WritesBack(path, true) {
+		fmt.Printf("  %s changes will be written back over %s once the guest powers off\n",
+			key("persist:"), value(path))
+		return
+	}
+	fmt.Printf("  %s %s is a runnable cartridge, so the guest writes into it directly; --persist changes nothing\n",
+		key("persist:"), value(path))
 }
 
 // reportPersistence tells the user, before the guest even starts, what will

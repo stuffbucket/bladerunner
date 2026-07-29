@@ -3,13 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"time"
 
 	"golang.org/x/term"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
+	"github.com/stuffbucket/bladerunner/internal/util"
+	"github.com/stuffbucket/bladerunner/internal/vmhost"
 )
 
 // errVMNotRunning identifies the "the instance this verb needs is not running"
@@ -81,10 +84,6 @@ func bootArgument(target resolvedInstance) string {
 	return target.instanceName()
 }
 
-// vmStartReadyTimeout bounds how long requireRunningVM waits for an auto-started
-// VM to publish its readiness signal.
-const vmStartReadyTimeout = 3 * time.Minute
-
 // requireRunningVM returns a control client for the instance a verb resolved.
 //
 // When that instance is not running and it is the flat default, it offers to
@@ -145,36 +144,27 @@ func confirmStartVMFrom(r io.Reader) bool {
 	}
 }
 
-// startVMDetachedAndWait launches `br start` as a detached background process
-// (so it outlives this short-lived command and becomes the VM host) and waits
-// until the VM publishes its SSH config path — the signal that StartVM has
-// returned and the VM is up — or the timeout elapses.
+// startVMDetachedAndWait brings the flat default instance up under a holder and
+// waits until it answers.
+//
+// It used to fork `br start` detached and poll for its SSH config path — a
+// SECOND way to run a VM out of process, alongside the holder the watcher
+// spawns. There is now one: this spawns the same `br vmd` every other path
+// does, and waits with the same attachment. `br start` itself would only have
+// spawned a holder and exited, so the extra CLI in between bought nothing but a
+// process that had to be kept alive long enough to hand over.
 func startVMDetachedAndWait(stateDir string) error {
-	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", os.DevNull, err)
+	spec := vmhost.Spec{
+		Kind:          instance.KindFlat,
+		StateDir:      stateDir,
+		BinaryVersion: version,
 	}
-	defer func() { _ = devnull.Close() }()
-
-	pid, err := spawnDetached(detachedSpawn{Args: []string{"start"}, Stdio: devnull})
-	if err != nil {
-		return fmt.Errorf("start VM: %w", err)
+	fmt.Printf("%s Starting VM…\n", subtle("›"))
+	if err := startUnderHolder(context.Background(), spec, holderAttachOptions{Quiet: true}); err != nil {
+		return err
 	}
-
-	fmt.Printf("%s Starting VM (pid %d)…\n", subtle("›"), pid)
-
-	client := control.NewClient(stateDir)
-	deadline := time.Now().Add(vmStartReadyTimeout)
-	for time.Now().Before(deadline) {
-		if client.IsRunning() {
-			if v, _ := client.GetConfig(control.ConfigKeySSHConfigPath); v != "" {
-				fmt.Println(success("✓ VM is running"))
-				return nil
-			}
-		}
-		time.Sleep(750 * time.Millisecond)
-	}
-	return errors.New("timed out waiting for the VM to start; check 'br status' and the log")
+	fmt.Println(success("✓ VM is running"))
+	return nil
 }
 
 // detachedSpawn describes a re-exec of this very binary as a process that
@@ -225,19 +215,19 @@ func spawnDetached(spawn detachedSpawn) (int, error) {
 	return pid, nil
 }
 
-// holderSpawn describes a `br vmd` launch: which instance to hold, and how.
+// holderSpawn describes a `br vmd` launch: the complete description of the one
+// instance the holder is to own.
+//
+// It carries a whole vmhost.Spec rather than a handful of scalars because every
+// ordinary path — `br start`, `br up`, `br boot` — now runs its VM under a
+// holder, and those paths configure sizing, an image, a disk manifest, a
+// restore file and the cartridge options. Mirroring each of them as a `br vmd`
+// flag would grow the holder into a second copy of the `br start` flag set; a
+// Spec is already declared to be serializable for exactly this hop.
 type holderSpawn struct {
-	// StateDir is the instance's state directory. Required — it is both the
-	// holder's only mandatory argument and where its log file goes.
-	StateDir string
-	// CartridgePath, when set, makes the holder attach and boot a cartridge.
-	CartridgePath string
-	// Name overrides the instance name derived from the state directory.
-	Name string
-	// GUI opens the VM console window.
-	GUI bool
-	// DrainTimeout bounds the orderly guest shutdown. Zero uses the default.
-	DrainTimeout time.Duration
+	// Spec is the instance to hold. Spec.StateDir is required: it is where the
+	// holder's log and hand-off file go.
+	Spec vmhost.Spec
 }
 
 // errHolderStateDir is returned when a holder is asked for without saying which
@@ -246,22 +236,17 @@ var errHolderStateDir = errors.New("a holder needs a state directory")
 
 // args builds the argv tail for `br vmd`. It is pure, so the exact command line
 // a holder is launched with is testable without spawning anything.
-func (h holderSpawn) args() []string {
-	args := []string{"vmd", "--state-dir", h.StateDir}
-	if h.CartridgePath != "" {
-		args = append(args, "--cartridge", h.CartridgePath)
-	}
-	if h.Name != "" {
-		args = append(args, "--name", h.Name)
-	}
-	if h.GUI {
-		args = append(args, "--gui")
-	}
-	if h.DrainTimeout > 0 {
-		args = append(args, "--drain-timeout", h.DrainTimeout.String())
-	}
-	return args
+//
+// The Spec travels in a FILE rather than on the command line. A command line is
+// world-readable through ps(1), it is bounded by ARG_MAX, and a JSON blob in an
+// argv slot is unreadable in exactly the place — a wedged holder in a process
+// listing — where a human most needs to read it.
+func (h holderSpawn) args(specPath string) []string {
+	return []string{vmdVerb, "--" + vmdSpecFlag, specPath}
 }
+
+// vmdVerb is the hidden subcommand a holder runs as.
+const vmdVerb = "vmd"
 
 // logName is the instance name this spawn's holder log is keyed on: the
 // explicit name, else the cartridge's own name (a cartridge holder is spawned
@@ -269,13 +254,63 @@ func (h holderSpawn) args() []string {
 // separates its log from every other cartridge's), else "" for the flat
 // default.
 func (h holderSpawn) logName() string {
-	if h.Name != "" {
-		return h.Name
+	if h.Spec.Name != "" {
+		return h.Spec.Name
 	}
-	if h.CartridgePath == "" {
+	if h.Spec.CartridgePath == "" {
 		return ""
 	}
-	return cartridge.NameFromPath(h.CartridgePath)
+	return cartridge.NameFromPath(h.Spec.CartridgePath)
+}
+
+// specPath is where this spawn's hand-off file goes: beside the holder log, and
+// keyed the same way, so two instances spawned into one state directory (every
+// cartridge shares the registry root) never overwrite each other's.
+func (h holderSpawn) specPath() string {
+	return filepath.Join(h.Spec.StateDir, vmdSpecName(h.logName()))
+}
+
+// specPerm is the mode of the hand-off file. It names the user's image paths
+// and state directory and is nobody else's business.
+const specPerm = 0o600
+
+// stateDirPerm is the mode a state directory is created with when a spawn has
+// to materialize one (a disk slot booted for the first time). It matches what
+// internal/config uses for the state dir it creates.
+const stateDirPerm = 0o755
+
+// writeHolderSpec serializes the Spec for the holder to pick up and returns the
+// path it was written to.
+func writeHolderSpec(spawn holderSpawn) (string, error) {
+	blob, err := json.Marshal(spawn.Spec)
+	if err != nil {
+		return "", fmt.Errorf("encode holder spec: %w", err)
+	}
+	path := spawn.specPath()
+	if err := util.WriteFileAtomic(path, blob, specPerm); err != nil {
+		return "", fmt.Errorf("write holder spec: %w", err)
+	}
+	return path, nil
+}
+
+// readHolderSpec loads a hand-off file and consumes it.
+//
+// The file is removed only after it parsed: a spec that could not be read is
+// the one a human will want to look at, and leaving it costs a few hundred
+// bytes in the state directory.
+func readHolderSpec(path string) (vmhost.Spec, error) {
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return vmhost.Spec{}, fmt.Errorf("read holder spec: %w", err)
+	}
+	var spec vmhost.Spec
+	if err := json.Unmarshal(blob, &spec); err != nil {
+		return vmhost.Spec{}, fmt.Errorf("decode holder spec %s: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil {
+		logging.L().Warn("could not remove the holder hand-off file", "path", path, "err", err)
+	}
+	return spec, nil
 }
 
 // spawnHolder starts a detached `br vmd` for one instance and returns its PID.
@@ -286,18 +321,34 @@ func (h holderSpawn) logName() string {
 // terminal to write to. This function returns as soon as the child is running;
 // readiness is observed through the control socket and the instance registry
 // the holder publishes, not by waiting on the process.
+//
+// It is the ONE way a VM is started out-of-process. `br start`, `br up`,
+// `br boot`, the auto-start behind verbs that need a VM, `br watch` and the
+// menubar watcher all reach the VM through here.
 func spawnHolder(spawn holderSpawn) (int, error) {
-	if spawn.StateDir == "" {
+	if spawn.Spec.StateDir == "" {
 		return 0, errHolderStateDir
 	}
-	logFile, err := openVMDLog(spawn.StateDir, spawn.logName())
+	// A disk slot booted for the first time has no directory yet, and both the
+	// log and the hand-off file live in it. config.Default does not create it
+	// either; the Host would, far too late to log this spawn.
+	if err := os.MkdirAll(spawn.Spec.StateDir, stateDirPerm); err != nil {
+		return 0, fmt.Errorf("create state directory: %w", err)
+	}
+	specPath, err := writeHolderSpec(spawn)
 	if err != nil {
+		return 0, err
+	}
+	logFile, err := openVMDLog(spawn.Spec.StateDir, spawn.logName())
+	if err != nil {
+		_ = os.Remove(specPath)
 		return 0, err
 	}
 	defer func() { _ = logFile.Close() }()
 
-	pid, err := spawnDetached(detachedSpawn{Args: spawn.args(), Stdio: logFile})
+	pid, err := spawnDetached(detachedSpawn{Args: spawn.args(specPath), Stdio: logFile})
 	if err != nil {
+		_ = os.Remove(specPath)
 		return 0, fmt.Errorf("start holder: %w", err)
 	}
 	return pid, nil

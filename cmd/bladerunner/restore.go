@@ -23,8 +23,9 @@ The CPU/memory/disk configuration is read from the saved state's metadata, so
 you don't need to re-specify it. The restore is refused if the disk image has
 changed since the snapshot (which would corrupt the guest).
 
-This is a foreground process, like 'br start'. The VM must not already be
-running.`,
+The restored VM is owned by a holder process, like 'br start': this command
+returns once the guest is up and the VM keeps running. The VM must not already
+be running.`,
 	RunE: runRestore,
 }
 

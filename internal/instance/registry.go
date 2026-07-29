@@ -254,10 +254,19 @@ func Alive(e Entry) bool {
 	return LivenessOf(e) != Dead
 }
 
-// processAlive reports whether pid names a live process, using the signal-0
+// ProcessAlive reports whether pid names a live process, using the signal-0
 // probe: kill(pid, 0) performs the permission and existence checks without
 // delivering a signal. EPERM counts as alive (the process exists, it just
 // belongs to another user).
+//
+// It is exported because a holder's liveness is asked about in one more place
+// than its registry entry: a front end that has just SPAWNED a holder knows its
+// PID and has no entry to read yet, and "the process is gone" is the difference
+// between a boot still in progress and one that failed with its reason in a log
+// file. Liveness of an INSTANCE is still LivenessOf's question — see LivenessOf
+// and Alive; this is only the process half of it.
+func ProcessAlive(pid int) bool { return processAlive(pid) }
+
 func processAlive(pid int) bool {
 	p, err := os.FindProcess(pid)
 	if err != nil {
