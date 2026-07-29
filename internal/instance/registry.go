@@ -240,7 +240,7 @@ func livenessWith(e Entry, probe Probe) Liveness {
 	if e.StateDir != "" && probe(ControlSocketPath(e.StateDir)) {
 		return Serving
 	}
-	if e.PID > 0 && processAlive(e.PID) {
+	if ProcessAlive(e.PID) {
 		return ProcessOnly
 	}
 	return Dead
@@ -265,9 +265,21 @@ func Alive(e Entry) bool {
 // between a boot still in progress and one that failed with its reason in a log
 // file. Liveness of an INSTANCE is still LivenessOf's question — see LivenessOf
 // and Alive; this is only the process half of it.
-func ProcessAlive(pid int) bool { return processAlive(pid) }
-
-func processAlive(pid int) bool {
+//
+// This package owns the question "is the holder of an instance still running",
+// so this is the one implementation of it; internal/control calls it for the
+// holder recorded in a control lock. Do not write a second copy.
+//
+// A pid of zero or less is never alive. kill(2) reads a negative argument as a
+// process GROUP, so kill(-N, 0) succeeds whenever group N exists — an unguarded
+// probe would call such a record alive, livenessWith would return ProcessOnly,
+// and Prune (which removes only Dead entries) could never reap it. Go's os
+// package happens to reject -1 and 0 on its own; everything at -2 and below
+// reaches kill(2), so the guard has to be here.
+func ProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return false

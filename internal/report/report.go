@@ -3,9 +3,14 @@ package report
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
+
+// reportFilePerm is the mode startup-report.json is published with. The report
+// is a human-readable summary of an already-running VM, so it is world-readable.
+const reportFilePerm = 0o644
 
 // StartupReport is the machine-readable record of one boot: the host it ran on,
 // the guest that was built, how to reach it, and what the Incus API said about
@@ -118,9 +123,13 @@ type Access struct {
 	LogPath             string `json:"log_path"`
 }
 
-// SaveJSON writes report to path as indented JSON, replacing whatever was
+// SaveJSON publishes report to path as indented JSON, replacing whatever was
 // there. Indentation is deliberate: the file is meant to be read by a person
 // with `cat` as often as by a program.
+//
+// The write goes through internal/util, the owner of atomic file writes: a
+// plain os.WriteFile opens O_TRUNC, so a reader (or `br status`) racing a
+// rewrite would find the report empty or half-formed.
 //
 // The parent directory must already exist — this does not create it, and a
 // missing directory is returned as a wrapped write error. The caller decides
@@ -132,7 +141,7 @@ func SaveJSON(path string, report *StartupReport) error {
 	if err != nil {
 		return fmt.Errorf("marshal startup report: %w", err)
 	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := util.WriteFileAtomic(path, b, reportFilePerm); err != nil {
 		return fmt.Errorf("write startup report: %w", err)
 	}
 	return nil

@@ -25,6 +25,9 @@ const (
 	defaultBakeSizeGiB = 8
 	// defaultBakeTimeoutMin caps how long a bake build may run.
 	defaultBakeTimeoutMin = 60
+	// manifestFilePerm is the mode a user disk manifest is published with. A
+	// manifest names an image and its sizing; it carries no secret.
+	manifestFilePerm = 0o644
 )
 
 // scaffoldArchList is every architecture the pinned Debian genericcloud image
@@ -222,13 +225,17 @@ type diskActionReport struct {
 	SHA256 string `json:"sha256,omitempty"`
 }
 
-// writeManifest marshals m and writes it to path (0o644), mirroring oidc.Store.Add.
+// writeManifest marshals m and publishes it to path.
+//
+// The write goes through internal/util, the owner of atomic file writes: a
+// plain os.WriteFile opens O_TRUNC, so a `br disk ls` racing a rewrite would
+// read a truncated manifest and drop the disk from the catalog.
 func writeManifest(path string, m *disk.Manifest) error {
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal disk: %w", err)
 	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := util.WriteFileAtomic(path, b, manifestFilePerm); err != nil {
 		return fmt.Errorf("write disk %s: %w", path, err)
 	}
 	return nil

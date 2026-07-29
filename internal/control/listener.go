@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
@@ -185,7 +185,7 @@ func acquireStartLock(dir string) (*startLock, error) {
 				"path", path, "error", err)
 			return unlockedStartLock, nil
 		}
-		if owner, readErr := readLockPID(path); readErr == nil && owner != pid && processAlive(owner) {
+		if owner, readErr := readLockPID(path); readErr == nil && owner != pid && instance.ProcessAlive(owner) {
 			return nil, fmt.Errorf("%w: pid %d holds %s", ErrInstanceLocked, owner, path)
 		}
 		// The recorded holder is gone (or the record is unreadable): reclaim
@@ -246,22 +246,6 @@ func readLockPID(path string) (int, error) {
 		return 0, fmt.Errorf("parse control lock %s: pid %d is not a process", path, pid)
 	}
 	return pid, nil
-}
-
-// processAlive reports whether pid names a live process, using the signal-0
-// probe: kill(pid, 0) performs the existence and permission checks without
-// delivering a signal. EPERM counts as alive — the process exists, it just
-// belongs to another user.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EPERM)
 }
 
 // RegisterCommand adds a custom command handler.

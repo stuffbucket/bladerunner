@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -172,5 +174,119 @@ func TestDiskNewArchRefusesAForkWithoutPerArchImages(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "incus") {
 		t.Errorf("error %q does not name the forked disk", err)
+	}
+}
+
+// Bounds for the concurrent-reader hammer below.
+const (
+	// diskManifestPadBytes makes the payload big enough that a truncating write
+	// has a window a concurrent reader can land in.
+	diskManifestPadBytes = 1 << 18
+	// diskManifestRewrites is how many times the writer republishes the manifest.
+	diskManifestRewrites = 200
+	// diskManifestReaders is how many goroutines read the manifest concurrently.
+	diskManifestReaders = 4
+)
+
+// paddedDiskManifest returns a manifest whose serialized form is large enough to
+// expose a truncate-then-write race.
+func paddedDiskManifest() *disk.Manifest {
+	return &disk.Manifest{
+		Name:        "hammer",
+		Description: strings.Repeat("d", diskManifestPadBytes),
+		Image:       disk.ImageSpec{Arches: map[string]disk.ArchImage{"arm64": {URL: "https://x/a.qcow2"}}},
+		VM:          disk.VMSpec{DiskSizeGiB: 32},
+		Boot:        disk.BootSpec{Mode: disk.BootModeHeadless},
+	}
+}
+
+// A reader must never see a user disk manifest missing, empty or short while it
+// is being rewritten. os.WriteFile opens O_TRUNC, so the destination is briefly
+// zero-length; only a temp-file-and-rename publish makes the swap atomic.
+func TestWriteManifestNeverExposesAPartialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hammer"+disk.ManifestExt)
+	m := paddedDiskManifest()
+	if err := writeManifest(path, m); err != nil {
+		t.Fatalf("seed writeManifest: %v", err)
+	}
+	full, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read seeded manifest: %v", err)
+	}
+	wantLen := len(full)
+
+	var partials atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range diskManifestReaders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				b, readErr := os.ReadFile(path)
+				if readErr != nil || len(b) != wantLen {
+					partials.Add(1)
+				}
+			}
+		}()
+	}
+	for range diskManifestRewrites {
+		if err := writeManifest(path, m); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("writeManifest: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	if n := partials.Load(); n != 0 {
+		t.Errorf("a concurrent reader saw a partial disk manifest %d times (want %d bytes every time): the publish is not atomic", n, wantLen)
+	}
+}
+
+// The manifest keeps its published mode across a rewrite. os.CreateTemp makes
+// 0600 files, so an atomic publish that forgets to chmod would narrow it and
+// a disk a second user could read would become unreadable.
+func TestWriteManifestKeepsFileMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "modes"+disk.ManifestExt)
+	m := &disk.Manifest{
+		Name:  "modes",
+		Image: disk.ImageSpec{Arches: map[string]disk.ArchImage{"arm64": {URL: "https://x/a.qcow2"}}},
+		VM:    disk.VMSpec{DiskSizeGiB: 32},
+		Boot:  disk.BootSpec{Mode: disk.BootModeHeadless},
+	}
+	for i := range 2 {
+		if err := writeManifest(path, m); err != nil {
+			t.Fatalf("writeManifest #%d: %v", i, err)
+		}
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat manifest #%d: %v", i, err)
+		}
+		if perm := st.Mode().Perm(); perm != manifestFilePerm {
+			t.Errorf("manifest mode after write #%d = %o, want %o", i, perm, manifestFilePerm)
+		}
+	}
+}
+
+// A completed publish must leave no staging file in the user's disks directory.
+func TestWriteManifestLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	name := "tidy" + disk.ManifestExt
+	if err := writeManifest(filepath.Join(dir, name), paddedDiskManifest()); err != nil {
+		t.Fatalf("writeManifest: %v", err)
+	}
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(des) != 1 || des[0].Name() != name {
+		t.Errorf("disks directory has %d entries, want only %q", len(des), name)
 	}
 }

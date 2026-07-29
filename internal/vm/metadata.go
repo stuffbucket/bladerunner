@@ -16,6 +16,10 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
+// metadataFilePerm is the mode runtime-metadata.json is published with. It
+// records the VM's generated MAC address, which is not a secret.
+const metadataFilePerm = 0o644
+
 type runtimeMetadata struct {
 	MACAddress string `json:"mac_address"`
 }
@@ -43,12 +47,18 @@ func loadOrCreateMetadata(cfg *config.Config) (*runtimeMetadata, error) {
 	return md, nil
 }
 
+// saveMetadata publishes md to cfg.MetadataPath.
+//
+// The write goes through internal/util, the owner of atomic file writes: a
+// plain os.WriteFile opens O_TRUNC, so a crash mid-write would leave the file
+// empty and loadOrCreateMetadata would invent a NEW MAC address on the next
+// boot, changing the VM's DHCP lease and its identity on the network.
 func saveMetadata(cfg *config.Config, md *runtimeMetadata) error {
 	b, err := json.MarshalIndent(md, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal runtime metadata: %w", err)
 	}
-	if err := os.WriteFile(cfg.MetadataPath, b, 0o644); err != nil {
+	if err := util.WriteFileAtomic(cfg.MetadataPath, b, metadataFilePerm); err != nil {
 		return fmt.Errorf("write runtime metadata: %w", err)
 	}
 	return nil
