@@ -29,8 +29,31 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # full cloud-init, which installs the templated bladerunner-vsock-relay@ unit +
 # per-channel arg files fresh each boot, so baking them would be redundant.
 ASSET_DIR="$(cd -- "${SCRIPT_DIR}/../internal/provision/scripts" && pwd)"
-WORK_DIR="${WORK_DIR:-$(mktemp -d)}"
-trap 'rm -rf "${WORK_DIR}"' EXIT
+# WORK_DIR may be supplied by the caller. Only a directory this script created
+# is safe to delete on exit: an override may be a shared CI workspace, a home
+# directory, or a mistyped path, and `rm -rf` on one of those destroys work the
+# script does not own. Ownership is therefore tracked, not assumed.
+if [[ -n "${WORK_DIR:-}" ]]; then
+    WORK_DIR_OWNED=0
+    mkdir -p "${WORK_DIR}"
+else
+    WORK_DIR="$(mktemp -d)"
+    WORK_DIR_OWNED=1
+fi
+
+# cleanup_work_dir removes the working tree only when this invocation created
+# it. For a caller-supplied directory it removes just this script's own
+# artifacts and leaves everything else alone, so repeated builds into a shared
+# workspace still do not accumulate multi-gigabyte images.
+cleanup_work_dir() {
+    if [[ "${WORK_DIR_OWNED}" -eq 1 ]]; then
+        rm -rf "${WORK_DIR}"
+        return
+    fi
+    rm -f  -- "${WORK_DIR}/base.qcow2" "${WORK_DIR}/out.qcow2" "${WORK_DIR}/resolv.conf.orig"
+    rm -rf -- "${WORK_DIR}/mnt"
+}
+trap 'cleanup_work_dir' EXIT
 
 ARCH=""
 OUTPUT=""
@@ -201,7 +224,7 @@ else
         umount "${MNT}" 2>/dev/null || true
         qemu-nbd --disconnect "${NBD_DEV}" 2>/dev/null || true
     }
-    trap 'cleanup_nbd; rm -rf "${WORK_DIR}"' EXIT
+    trap 'cleanup_nbd; cleanup_work_dir' EXIT
 
     sleep 2  # let kernel surface partitions
     log "partition layout of ${NBD_DEV}:"
