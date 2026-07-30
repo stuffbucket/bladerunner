@@ -3,6 +3,8 @@ package provision
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,10 +25,11 @@ import (
 // renderBootstrapScript -- because nothing is pushed over SSH afterwards; SSH
 // only exists once that script has run.
 //
-// The meta-data instance-id is derived from cfg.Name. cloud-init runs its
-// per-instance modules (runcmd, and so the bootstrap) exactly once per
-// instance-id, so a guest that keeps its name never re-bootstraps on a later
-// boot, however that boot went.
+// The meta-data instance-id is derived from cfg.Name AND a digest of the
+// user-data. cloud-init runs its per-instance modules (users, runcmd, and so
+// the bootstrap) exactly once per instance-id, so an identity that tracked the
+// name alone left a guest permanently provisioned with whatever user-data it
+// first saw — see instanceID for what that cost.
 //
 // It only renders text. WriteSeedFiles and BuildCloudInitISO put the result
 // where the guest datasource can read it.
@@ -96,8 +99,34 @@ func BuildCloudInit(cfg *config.Config, clientCertPEM string) (string, string) {
 	b.WriteString("runcmd:\n")
 	b.WriteString("  - [bash, /usr/local/sbin/bladerunner-bootstrap.sh]\n")
 
-	metaData := fmt.Sprintf("instance-id: bladerunner-%s\nlocal-hostname: %s\n", cfg.Name, cfg.Hostname)
-	return b.String(), metaData
+	userData := b.String()
+	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", instanceID(cfg.Name, userData), cfg.Hostname)
+	return userData, metaData
+}
+
+// instanceIDDigestLength is how many hex characters of the user-data digest
+// take part in the instance identity. Twelve is far beyond what is needed to
+// separate the handful of payloads one guest ever sees, and keeps the
+// identity short enough to read in a log line.
+const instanceIDDigestLength = 12
+
+// instanceID derives the cloud-init instance identity for a guest from its name
+// and the exact user-data it is being given.
+//
+// The name alone is not enough. cloud-init runs its per-instance modules once
+// per instance-id and never again, so an identity that ignores the payload
+// means a disk keeps whatever it was first provisioned with: a rotated SSH key,
+// a renamed user, a reissued certificate are all accepted, written to the seed,
+// and then silently ignored by the guest. Every stage still reports success,
+// which is what makes the failure so hard to see from the host.
+//
+// Including the payload digest keeps both halves of the contract. An unchanged
+// configuration produces an unchanged identity, so an ordinary reboot does not
+// re-run the bootstrap; a changed one produces a new identity, so the change is
+// actually applied.
+func instanceID(name, userData string) string {
+	sum := sha256.Sum256([]byte(userData))
+	return fmt.Sprintf("bladerunner-%s-%s", name, hex.EncodeToString(sum[:])[:instanceIDDigestLength])
 }
 
 // WriteSeedFiles stages the two documents from BuildCloudInit in
