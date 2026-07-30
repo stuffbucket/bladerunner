@@ -23,12 +23,12 @@ func TestProbeReportsTheRealHost(t *testing.T) {
 
 // The native mechanic mounts and chroots, which cannot work off Linux. The probe
 // must say so rather than letting policy discover it later.
-func TestProbeNeverClaimsALoopDeviceOffLinux(t *testing.T) {
+func TestProbeNeverClaimsANativeAttachOffLinux(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("meaningful only off Linux")
 	}
-	if caps := Probe(context.Background(), MethodAuto, runtime.GOARCH); caps.LoopDevice {
-		t.Errorf("LoopDevice = true on %s, want false", runtime.GOOS)
+	if caps := Probe(context.Background(), MethodAuto, runtime.GOARCH); caps.NativeAttach {
+		t.Errorf("NativeAttach = true on %s, want false", runtime.GOOS)
 	}
 }
 
@@ -39,7 +39,7 @@ func TestProbeSkipsTheApplianceCheckWhenNativeIsViable(t *testing.T) {
 		t.Skip("needs a Linux host running as root for native to be viable")
 	}
 	caps := Probe(context.Background(), MethodAuto, runtime.GOARCH)
-	if !caps.LoopDevice {
+	if !caps.NativeAttach {
 		t.Skip("no loop device, so native is not viable here")
 	}
 	if caps.ApplianceUsable {

@@ -13,7 +13,7 @@ func linuxCapable() Capabilities {
 		GOOS:            "linux",
 		HostArch:        "arm64",
 		Elevated:        true,
-		LoopDevice:      true,
+		NativeAttach:    true,
 		ApplianceUsable: true,
 	}
 }
@@ -53,15 +53,15 @@ func TestSelectFallsBackLoudlyWithASpecificReason(t *testing.T) {
 			wantReason: "root",
 		},
 		{
-			name:       "no loop device",
+			name:       "cannot attach the image",
 			targetArch: "arm64",
 			caps: func() Capabilities {
 				c := linuxCapable()
-				c.LoopDevice = false
+				c.NativeAttach = false
 				return c
 			}(),
 			wantMethod: MethodAppliance,
-			wantReason: "loop device",
+			wantReason: "block device",
 		},
 		{
 			name:       "cross architecture",

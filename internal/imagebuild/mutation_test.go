@@ -47,7 +47,7 @@ func TestVMBlockersDistinguishesPlatformFromRuntime(t *testing.T) {
 		wantReason  string
 	}{
 		{"macOS with a usable runtime", Capabilities{GOOS: "darwin", VMUsable: true}, false, ""},
-		{"macOS without a usable runtime", Capabilities{GOOS: "darwin"}, true, "make sign"},
+		{"macOS without a usable runtime", Capabilities{GOOS: "darwin"}, true, "not implemented yet"},
 		{"Linux, where the VM is not the mechanic", Capabilities{GOOS: "linux", VMUsable: true}, true, "macOS"},
 	}
 

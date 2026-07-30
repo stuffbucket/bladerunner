@@ -11,7 +11,7 @@ import (
 // appliance. Asserting them here means deleting either one breaks a test rather
 // than silently breaking ARM image builds.
 func TestApplianceEnvCarriesTheSettingsThatMakeItBoot(t *testing.T) {
-	env := applianceEnv(nil)
+	env := ApplianceEnv(nil)
 
 	tests := []struct {
 		name string
@@ -53,10 +53,10 @@ func TestApplianceEnvCarriesTheSettingsThatMakeItBoot(t *testing.T) {
 func TestApplianceEnvPreservesTheInheritedEnvironment(t *testing.T) {
 	base := []string{"HTTPS_PROXY=http://proxy.example:3128", "TMPDIR=/var/tmp/custom"}
 
-	env := applianceEnv(base)
+	env := ApplianceEnv(base)
 	for _, want := range base {
 		if !slices.Contains(env, want) {
-			t.Errorf("applianceEnv() dropped %q from the inherited environment", want)
+			t.Errorf("ApplianceEnv() dropped %q from the inherited environment", want)
 		}
 	}
 }
@@ -64,7 +64,7 @@ func TestApplianceEnvPreservesTheInheritedEnvironment(t *testing.T) {
 // A caller-supplied value must win, so an operator debugging a specific host can
 // override the defaults without editing the binary.
 func TestApplianceEnvLetsTheCallerOverride(t *testing.T) {
-	env := applianceEnv([]string{"LIBGUESTFS_BACKEND=libvirt"})
+	env := ApplianceEnv([]string{"LIBGUESTFS_BACKEND=libvirt"})
 
 	got, ok := lookupEnv(env, "LIBGUESTFS_BACKEND")
 	if !ok {
