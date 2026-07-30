@@ -27,7 +27,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help setup cache deps tidy fmt fmt-check vet test test-linux test-isolation build build-release run sign check clean distclean lint lint-docs vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
+.PHONY: help setup cache deps tidy fmt fmt-check vet test test-linux test-isolation build build-release run sign check clean distclean lint lint-linux lint-docs vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -127,7 +127,7 @@ clonedetect: cache ## Rank duplicated concepts across packages (pass ARGS='-json
 clonedetect-test: cache ## Run the clonedetect tool's own tests
 	@$(GO_ENV) $(GO) -C tools/clonedetect test ./...
 
-check: fmt-check vet lint test ## Run fast checks (format, vet, lint, test)
+check: fmt-check vet lint lint-linux test ## Run fast checks (format, vet, lint, test)
 
 test-isolation: cache ## Prove the suite writes nothing outside its temp dirs
 	@$(GO_ENV) ./scripts/test-isolation.sh
@@ -135,6 +135,14 @@ test-isolation: cache ## Prove the suite writes nothing outside its temp dirs
 lint: ## Run golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "Install: brew install golangci-lint"; exit 1; }
 	@golangci-lint run
+
+# On a Mac, `golangci-lint run` analyses the darwin build only, so nothing in a
+# *_linux.go file is ever examined until CI does it. CI lints on Linux and fails
+# there instead. Setting GOOS selects the other half of the tree, which is
+# static analysis and needs no Linux host.
+lint-linux: ## Run golangci-lint against the Linux build
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "Install: brew install golangci-lint"; exit 1; }
+	@GOOS=linux golangci-lint run
 
 # DOC_SOURCES is the prose the STE gate applies to. CHANGELOG.md is excluded:
 # release-please generates it from commit subjects, so it is not hand-written
