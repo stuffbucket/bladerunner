@@ -9,8 +9,8 @@ import "context"
 // compiles the linux file instead. Every capability is false, so policy reports
 // an unsupported platform rather than choosing something that cannot run.
 
-// loopDeviceAvailable reports no loop device on an unsupported platform.
-func loopDeviceAvailable() bool { return false }
+// nativeAttachAvailable reports no block-device attach on an unsupported platform.
+func nativeAttachAvailable() bool { return false }
 
 // applianceUsable reports no libguestfs on an unsupported platform.
 func applianceUsable(context.Context) bool { return false }

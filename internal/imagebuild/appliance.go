@@ -29,15 +29,20 @@ const (
 	libguestfsForceTCG = "force_tcg"
 )
 
-// applianceEnv returns the environment for a libguestfs invocation: base with
+// ApplianceEnv returns the environment for a libguestfs invocation: base with
 // the settings above applied.
+//
+// It is exported because the settings must reach BOTH the capability probe and
+// the build that follows it. Applying them only to the probe made the two
+// disagree: the probe booted an appliance successfully and the build then hit
+// the very aarch64 defect force_tcg exists to avoid.
 //
 // The defaults are placed BEFORE base so that a value already present in base
 // wins, since a process resolves duplicate environment entries last-first. That
 // ordering is deliberate: an operator debugging one awkward host can export
 // LIBGUESTFS_BACKEND themselves and have it take effect without editing the
 // binary.
-func applianceEnv(base []string) []string {
+func ApplianceEnv(base []string) []string {
 	env := make([]string, 0, len(base)+2)
 	env = append(env,
 		libguestfsBackendEnv+"="+libguestfsBackendDirect,

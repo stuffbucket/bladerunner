@@ -398,6 +398,21 @@ func scriptMethodFor(m imagebuild.Method) (string, error) {
 	}
 }
 
+// buildEnv returns the environment for the build subprocess.
+//
+// The appliance mechanic needs the same libguestfs settings the capability
+// probe used. Without them the two disagree: the probe boots an appliance
+// successfully, then the build fails on the aarch64 defect those settings
+// exist to work around. The native path boots no appliance, so it is left
+// alone rather than being loaded with settings that would mislead anyone
+// reading a build log.
+func buildEnv(base []string, m imagebuild.Method) []string {
+	if m == imagebuild.MethodAppliance {
+		return imagebuild.ApplianceEnv(base)
+	}
+	return base
+}
+
 // runDiskBake builds the disk's qcow2 and records its SHA-256. The branches are
 // sequential preflight + shell-out + manifest rewrite, not nested logic.
 func runDiskBake(cmd *cobra.Command, args []string) error {
@@ -478,6 +493,7 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		"--size", strconv.Itoa(diskBakeFlags.size),
 		"--debian-release", diskBakeFlags.release)
 	build.Stderr = os.Stderr // script logs go to stderr; stdout is the bare digest
+	build.Env = buildEnv(os.Environ(), sel.Method)
 	out, err := build.Output()
 	if err != nil {
 		return jsonOrError(fmt.Errorf("build-guest-image.sh failed: %w", err))

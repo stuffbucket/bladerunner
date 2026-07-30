@@ -63,8 +63,11 @@ type Capabilities struct {
 	HostArch string
 	// Elevated reports an effective uid of 0.
 	Elevated bool
-	// LoopDevice reports that a loop device could be obtained.
-	LoopDevice bool
+	// NativeAttach reports that the host can attach a guest image as a block
+	// device by the means the native mechanic actually uses. That is the nbd
+	// path today, not a loop device: probing the wrong one accepts hosts the
+	// build then fails on.
+	NativeAttach bool
 	// ApplianceUsable reports that libguestfs actually launched its appliance,
 	// not merely that its binaries are installed. Presence is not function:
 	// an installed-but-broken libguestfs is the failure this distinction
@@ -182,8 +185,8 @@ func nativeBlockers(targetArch string, caps Capabilities) []string {
 	if !caps.Elevated {
 		blockers = append(blockers, "needs root (euid 0) to mount the image and chroot")
 	}
-	if !caps.LoopDevice {
-		blockers = append(blockers, "no loop device is available to attach the image")
+	if !caps.NativeAttach {
+		blockers = append(blockers, "cannot attach the image as a block device (needs qemu-nbd and an nbd device)")
 	}
 	if targetArch != caps.HostArch {
 		blockers = append(blockers, fmt.Sprintf("cross-architecture build (host %s, target %s) and chroot cannot run foreign binaries",
@@ -209,7 +212,8 @@ func vmBlockers(caps Capabilities) []string {
 		return []string{fmt.Sprintf("needs macOS to boot a bladerunner VM, but this host is %s", caps.GOOS)}
 	}
 	if !caps.VMUsable {
-		return []string{"no usable VM runtime (Virtualization.framework needs a signed binary; run make sign)"}
+		return []string{"the bladerunner VM mechanic is not implemented yet, so macOS cannot bake locally; " +
+			"build on a Linux host (or in WSL2), or use the published image from the guest-image-latest release"}
 	}
 	return nil
 }

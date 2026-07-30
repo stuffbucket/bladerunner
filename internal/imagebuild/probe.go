@@ -19,11 +19,11 @@ import (
 // presence is not accepted as evidence of function.
 func Probe(ctx context.Context, want Method, targetArch string) Capabilities {
 	caps := Capabilities{
-		GOOS:       runtime.GOOS,
-		HostArch:   runtime.GOARCH,
-		Elevated:   os.Geteuid() == 0,
-		LoopDevice: loopDeviceAvailable(),
-		VMUsable:   vmRuntimeUsable(),
+		GOOS:         runtime.GOOS,
+		HostArch:     runtime.GOARCH,
+		Elevated:     os.Geteuid() == 0,
+		NativeAttach: nativeAttachAvailable(),
+		VMUsable:     vmRuntimeUsable(),
 	}
 
 	if shouldProbeAppliance(want, targetArch, caps) {
