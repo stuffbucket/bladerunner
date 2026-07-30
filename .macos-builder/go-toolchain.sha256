@@ -1,0 +1,13 @@
+# Pinned SHA-256 digests for the Go toolchain archives the signed release build
+# may download.
+#
+# This file is the trust anchor. The builder is self-hosted, so its cache lives
+# on a machine whose filesystem is not part of the reviewed artefact; a digest
+# recorded there could be rewritten by whatever rewrote the cache. A digest that
+# only changes through a reviewed commit cannot.
+#
+# Format is `sha256sum -c` compatible: <digest>  <filename>
+#
+# To add a version, take the digest from https://go.dev/dl/?mode=json (the
+# `sha256` field of the darwin-arm64 archive), never from the download itself.
+984521ae978a5377c7d782fd2dd953291840d7d3d0bd95781a1f32f16d94a006  go1.25.6.darwin-arm64.tar.gz
