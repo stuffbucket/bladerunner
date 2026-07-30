@@ -36,6 +36,8 @@ const (
 	// for itself. Only the build reads or writes it, and it lives in the work
 	// directory rather than /dev.
 	partitionNodeMode = 0o600
+	// devDir is where the system publishes device nodes.
+	devDir = "/dev"
 )
 
 // guestPATH is the search path for commands run inside the guest. It is set
@@ -122,40 +124,40 @@ func attachImage(ctx context.Context, image, workDir, device string) (_ *nativeM
 		}
 	}()
 
-	if err = ensureNBDModule(ctx, device); err != nil {
+	if err := ensureNBDModule(ctx, device); err != nil {
 		return nil, err
 	}
-	if err = run(ctx, "qemu-nbd", "--connect="+device, image); err != nil {
+	if err := run(ctx, "qemu-nbd", "--connect="+device, image); err != nil {
 		return nil, fmt.Errorf("attach %s to %s: %w", image, device, err)
 	}
 	m.push("disconnect "+device, func() error {
 		return run(context.WithoutCancel(ctx), "qemu-nbd", "--disconnect", device)
 	})
 
-	var rootPart string
-	if rootPart, err = waitForRootPartition(ctx, device); err != nil {
+	rootPart, err := waitForRootPartition(ctx, device)
+	if err != nil {
 		return nil, err
 	}
 
-	var node string
-	if node, err = m.partitionNode(rootPart, workDir); err != nil {
+	node, err := m.partitionNode(rootPart, workDir)
+	if err != nil {
 		return nil, err
 	}
 
 	mountpoint := filepath.Join(workDir, "mnt")
-	if err = os.MkdirAll(mountpoint, guestDirMode); err != nil {
+	if err := os.MkdirAll(mountpoint, guestDirMode); err != nil {
 		return nil, fmt.Errorf("create mount point %s: %w", mountpoint, err)
 	}
-	if err = unix.Mount(node, mountpoint, "ext4", 0, ""); err != nil {
+	if err := unix.Mount(node, mountpoint, "ext4", 0, ""); err != nil {
 		return nil, fmt.Errorf("mount %s at %s: %w", node, mountpoint, err)
 	}
 	m.Root = mountpoint
 	m.push("unmount "+mountpoint, func() error { return unmount(mountpoint) })
 
-	if err = m.bindPseudoFilesystems(); err != nil {
+	if err := m.bindPseudoFilesystems(); err != nil {
 		return nil, err
 	}
-	if err = m.installResolver(); err != nil {
+	if err := m.installResolver(); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -230,6 +232,7 @@ func (m *nativeMount) installResolver() error {
 	if err != nil || len(body) == 0 {
 		body = []byte(fallbackNameservers)
 	}
+	//nolint:gosec // G703: target is m.Root, a mount point this package created, joined with a constant.
 	if err := os.WriteFile(target, body, aptConfMode); err != nil {
 		return fmt.Errorf("install a build-time resolv.conf: %w", err)
 	}
@@ -304,7 +307,7 @@ func rootPartitionNode(device string) (string, error) {
 // unprivileged appliance exists to avoid needing. The node is made from the
 // kernel's own major:minor, so it names the same device either way.
 func (m *nativeMount) partitionNode(name, workDir string) (string, error) {
-	published := filepath.Join("/dev", name)
+	published := filepath.Join(devDir, name)
 	if _, err := os.Stat(published); err == nil {
 		return published, nil
 	}

@@ -34,6 +34,7 @@ func requireNativeMechanic(t *testing.T) string {
 	if image == "" {
 		t.Skipf("%s is unset: point it at a Debian genericcloud qcow2 to run this", baseImageEnv)
 	}
+	//nolint:gosec // G703: the path is an env var the operator running the test set.
 	if _, err := os.Stat(image); err != nil {
 		t.Fatalf("%s=%s is not readable: %v", baseImageEnv, image, err)
 	}
@@ -49,6 +50,7 @@ func copyBaseImage(t *testing.T, src string) string {
 		t.Fatalf("read base image: %v", err)
 	}
 	dst := filepath.Join(t.TempDir(), "work.qcow2")
+	//nolint:gosec // G703: dst is inside this test's own temporary directory.
 	if err := os.WriteFile(dst, body, 0o600); err != nil {
 		t.Fatalf("copy base image: %v", err)
 	}
