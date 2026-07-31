@@ -14,6 +14,24 @@ It is designed to provide the core behavior of a `colima --runtime incus` setup 
 - Rotating structured logs with stage-level observability and live progress indicators for long-running tasks.
 - No OpenID setup by default.
 
+## What it looks like
+
+`br up` starts the VM and shows how to reach it. The boot is staged, and the
+guest console is shown live.
+
+![br up](contrib/assets/03-vm-ready.png)
+
+`br shell` opens a shell in the guest. Incus is already in operation there.
+
+![br shell](contrib/assets/05-shell.png)
+
+`br ls` lists the Incus instances in the VM.
+
+![br ls](contrib/assets/06-instances.png)
+
+More screenshots are in [contrib/assets](contrib/assets), with the tooling that
+makes them.
+
 ## Requirements
 
 - **Apple Silicon Mac** (M1/M2/M3/M4) - Intel Macs not supported

@@ -36,3 +36,7 @@ vendor/
 
 # Cache directories
 .cache/
+
+# Screenshot build intermediates (SVGs, staged frames, the walkthrough video).
+# The committed PNGs live in contrib/assets; these are regenerated on demand.
+contrib/screenshots/build/
