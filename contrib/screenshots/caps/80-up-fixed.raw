@@ -1,0 +1,438 @@
+^D]10;?\[6n]11;?\[6n[38;5;243m›[0m Starting VM under holder pid 43652
+[?25l[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;243m·[0m  [38;5;252mVM running                  [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mIncus API ready             [0m  [38;5;243m   …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;243m·[0m  [38;5;252mVM running                  [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mIncus API ready             [0m  [38;5;243m   …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠸[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠼[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠴[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠦[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠧[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠇[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[6A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠏[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.219785] virtio_blk virtio2: [vda] 134217728 512-byte logical blocks (68.…[0m
+[38;5;243m[    0.223536]  vda: vda1 vda15[0m
+[38;5;243m[    0.223832] virtio_blk virtio3: 1/0/0 default/read/poll queues[0m
+[38;5;243m[    0.224165] virtio_blk virtio3: [vdb] 1800 512-byte logical blocks (922 kB/9…[0m
+[38;5;243m[    0.231358] virtio_net virtio0 enp0s1: renamed from eth0[0m
+[38;5;243m[    0.281633] EXT4-fs (vda1): orphan cleanup on readonly fs[0m
+[38;5;243m[    0.281804] EXT4-fs (vda1): mounted filesystem 33d330c8-7dbd-45f9-a882-83b08…[0m
+[38;5;243m[    0.328295] Not activating Mandatory Access Control as /sbin/tomoyo-init doe…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠋[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.219785] virtio_blk virtio2: [vda] 134217728 512-byte logical blocks (68.…[0m
+[38;5;243m[    0.223536]  vda: vda1 vda15[0m
+[38;5;243m[    0.223832] virtio_blk virtio3: 1/0/0 default/read/poll queues[0m
+[38;5;243m[    0.224165] virtio_blk virtio3: [vdb] 1800 512-byte logical blocks (922 kB/9…[0m
+[38;5;243m[    0.231358] virtio_net virtio0 enp0s1: renamed from eth0[0m
+[38;5;243m[    0.281633] EXT4-fs (vda1): orphan cleanup on readonly fs[0m
+[38;5;243m[    0.281804] EXT4-fs (vda1): mounted filesystem 33d330c8-7dbd-45f9-a882-83b08…[0m
+[38;5;243m[    0.328295] Not activating Mandatory Access Control as /sbin/tomoyo-init doe…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m   …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠙[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.328295] Not activating Mandatory Access Control as /sbin/tomoyo-init doe…[0m
+[38;5;243m[    0.395628] systemd[1]: Inserted module 'autofs4'[0m
+[38;5;243m[    0.413034] NET: Registered PF_VSOCK protocol family[0m
+[38;5;243m[    0.433342] systemd[1]: systemd 257.13-1~deb13u1 running in system mode (+PA…[0m
+[38;5;243m[    0.433517] systemd[1]: Detected virtualization apple.[0m
+[38;5;243m[    0.433552] systemd[1]: Detected architecture arm64.[0m
+[38;5;243m[    0.435425] systemd[1]: Hostname set to <bladerunner>.[0m
+[38;5;243m[    0.522953] systemd[1]: bpf-restrict-fs: LSM BPF program attached[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠹[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠹[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.694874] systemd[1]: modprobe@efi_pstore.service: Deactivated successfull…[0m
+[38;5;243m[    0.695036] systemd[1]: Finished modprobe@efi_pstore.service - Load Kernel M…[0m
+[38;5;243m[    0.696073] systemd-journald[296]: Collecting audit messages is disabled.[0m
+[38;5;243m[    0.696912] systemd[1]: Finished systemd-udev-load-credentials.service - Loa…[0m
+[38;5;243m[    0.703578] systemd[1]: Started systemd-journald.service - Journal Service.[0m
+[38;5;243m[    0.707704] EXT4-fs (vda1): re-mounted 33d330c8-7dbd-45f9-a882-83b080f19fbd …[0m
+[38;5;243m[    0.720066] systemd-journald[296]: Received client request to flush runtime …[0m
+[38;5;243m[    0.731865] EXT4-fs (vda1): resizing filesystem from 16744443 to 16744443 bl…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠸[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠸[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.694874] systemd[1]: modprobe@efi_pstore.service: Deactivated successfull…[0m
+[38;5;243m[    0.695036] systemd[1]: Finished modprobe@efi_pstore.service - Load Kernel M…[0m
+[38;5;243m[    0.696073] systemd-journald[296]: Collecting audit messages is disabled.[0m
+[38;5;243m[    0.696912] systemd[1]: Finished systemd-udev-load-credentials.service - Loa…[0m
+[38;5;243m[    0.703578] systemd[1]: Started systemd-journald.service - Journal Service.[0m
+[38;5;243m[    0.707704] EXT4-fs (vda1): re-mounted 33d330c8-7dbd-45f9-a882-83b080f19fbd …[0m
+[38;5;243m[    0.720066] systemd-journald[296]: Received client request to flush runtime …[0m
+[38;5;243m[    0.731865] EXT4-fs (vda1): resizing filesystem from 16744443 to 16744443 bl…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠼[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠼[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.694874] systemd[1]: modprobe@efi_pstore.service: Deactivated successfull…[0m
+[38;5;243m[    0.695036] systemd[1]: Finished modprobe@efi_pstore.service - Load Kernel M…[0m
+[38;5;243m[    0.696073] systemd-journald[296]: Collecting audit messages is disabled.[0m
+[38;5;243m[    0.696912] systemd[1]: Finished systemd-udev-load-credentials.service - Loa…[0m
+[38;5;243m[    0.703578] systemd[1]: Started systemd-journald.service - Journal Service.[0m
+[38;5;243m[    0.707704] EXT4-fs (vda1): re-mounted 33d330c8-7dbd-45f9-a882-83b080f19fbd …[0m
+[38;5;243m[    0.720066] systemd-journald[296]: Received client request to flush runtime …[0m
+[38;5;243m[    0.731865] EXT4-fs (vda1): resizing filesystem from 16744443 to 16744443 bl…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠴[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠴[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.694874] systemd[1]: modprobe@efi_pstore.service: Deactivated successfull…[0m
+[38;5;243m[    0.695036] systemd[1]: Finished modprobe@efi_pstore.service - Load Kernel M…[0m
+[38;5;243m[    0.696073] systemd-journald[296]: Collecting audit messages is disabled.[0m
+[38;5;243m[    0.696912] systemd[1]: Finished systemd-udev-load-credentials.service - Loa…[0m
+[38;5;243m[    0.703578] systemd[1]: Started systemd-journald.service - Journal Service.[0m
+[38;5;243m[    0.707704] EXT4-fs (vda1): re-mounted 33d330c8-7dbd-45f9-a882-83b080f19fbd …[0m
+[38;5;243m[    0.720066] systemd-journald[296]: Received client request to flush runtime …[0m
+[38;5;243m[    0.731865] EXT4-fs (vda1): resizing filesystem from 16744443 to 16744443 bl…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠦[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠦[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    0.694874] systemd[1]: modprobe@efi_pstore.service: Deactivated successfull…[0m
+[38;5;243m[    0.695036] systemd[1]: Finished modprobe@efi_pstore.service - Load Kernel M…[0m
+[38;5;243m[    0.696073] systemd-journald[296]: Collecting audit messages is disabled.[0m
+[38;5;243m[    0.696912] systemd[1]: Finished systemd-udev-load-credentials.service - Loa…[0m
+[38;5;243m[    0.703578] systemd[1]: Started systemd-journald.service - Journal Service.[0m
+[38;5;243m[    0.707704] EXT4-fs (vda1): re-mounted 33d330c8-7dbd-45f9-a882-83b080f19fbd …[0m
+[38;5;243m[    0.720066] systemd-journald[296]: Received client request to flush runtime …[0m
+[38;5;243m[    0.731865] EXT4-fs (vda1): resizing filesystem from 16744443 to 16744443 bl…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠧[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠧[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.747252] audit: type=1400 audit(1785428798.100:3): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747290] audit: type=1400 audit(1785428798.100:4): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747307] audit: type=1400 audit(1785428798.100:5): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠇[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠇[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.747252] audit: type=1400 audit(1785428798.100:3): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747290] audit: type=1400 audit(1785428798.100:4): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747307] audit: type=1400 audit(1785428798.100:5): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠏[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠏[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.747252] audit: type=1400 audit(1785428798.100:3): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747290] audit: type=1400 audit(1785428798.100:4): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747307] audit: type=1400 audit(1785428798.100:5): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠋[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠋[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.747252] audit: type=1400 audit(1785428798.100:3): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747290] audit: type=1400 audit(1785428798.100:4): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747307] audit: type=1400 audit(1785428798.100:5): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠙[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠙[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.747252] audit: type=1400 audit(1785428798.100:3): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747290] audit: type=1400 audit(1785428798.100:4): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.747307] audit: type=1400 audit(1785428798.100:5): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠹[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠹[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠸[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠸[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠼[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠼[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠴[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠴[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠦[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠦[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠧[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠧[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠇[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠇[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748800] audit: type=1400 audit(1785428798.104:6): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠏[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠏[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243m[    4.175989] bridge: filtering via arp/ip/ip6tables is no longer available by…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠋[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠋[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243m[    4.175989] bridge: filtering via arp/ip/ip6tables is no longer available by…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠙[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠙[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243m[    4.175989] bridge: filtering via arp/ip/ip6tables is no longer available by…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠹[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;39m⠹[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    1.748846] audit: type=1400 audit(1785428798.104:7): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.748930] audit: type=1400 audit(1785428798.104:8): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749583] audit: type=1400 audit(1785428798.104:9): apparmor="STATUS" oper…[0m
+[38;5;243m[    1.749717] audit: type=1400 audit(1785428798.104:10): apparmor="STATUS" ope…[0m
+[38;5;243m[    2.677300] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Dupl…[0m
+[38;5;243m[    2.677422] device-mapper: uevent: version 1.0.3[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243m[    4.175989] bridge: filtering via arp/ip/ip6tables is no longer available by…[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[15A[J[1;38;5;39m[1;38;5;39mBladerunner boot[0m[0m
+  [38;5;42m✓[0m  [38;5;252mVM running                  [0m  [38;5;243m    …
+  [38;5;39m⠹[0m  [38;5;252mcloud-init complete         [0m  [38;5;243m    …
+  [38;5;243m·[0m  [38;5;252mSSH ready                   [0m  [38;5;243m   …
+  [38;5;42m✓[0m  [38;5;252mIncus API ready             [0m  [38;5;243m    …
+[38;5;243m── console.log (tail) ──────────────────────────────────────────────────────────[0m
+[38;5;243m[    2.677534] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-…[0m
+[38;5;243m[    4.175989] bridge: filtering via arp/ip/ip6tables is no longer available by…[0m
+[38;5;243mbladerunner-bootstrap: stage=start t=2026-07-30T16:26:41Z[0m
+[38;5;243m[    5.120467] incusbr0: port 1(vethf1659261) entered blocking state[0m
+[38;5;243m[    5.120538] incusbr0: port 1(vethf1659261) entered disabled state[0m
+[38;5;243m[    5.120578] vethf1659261: entered allmulticast mode[0m
+[38;5;243m[    5.120638] vethf1659261: entered promiscuous mode[0m
+[38;5;243mbladerunner-bootstrap: stage=apt-update t=2026-07-30T16:26:41Z[0m
+[38;5;243mfull log: /Users/brian/.local/state/bladerunner/console.log — Ctrl+C to abort[0m
+[?25h
+[38;5;42m✓ VM is running[0m
+  [1;38;5;39mSSH:[0m [48;5;236m [0m[38;5;229;48;5;236mbr ssh[0m[48;5;236m [0m
+  [1;38;5;39mShell:[0m [48;5;236m [0m[38;5;229;48;5;236mbr shell[0m[48;5;236m [0m
+  [1;38;5;39mAPI:[0m [38;5;252mhttps://127.0.0.1:18443[0m
+
+  [1;38;5;39mHolder:[0m [38;5;243mpid 43652 — the VM keeps running after this command exits[0m
+  [1;38;5;39mStop:[0m [48;5;236m [0m[38;5;229;48;5;236mbr stop[0m[48;5;236m [0m
+
+[38;5;243m  What now:[0m
+    [48;5;236m [0m[38;5;229;48;5;236mbr shell[0m[48;5;236m [0m  [38;5;243mopen an interactive shell[0m
+    [48;5;236m [0m[38;5;229;48;5;236mbr web[0m[48;5;236m [0m    [38;5;243mopen the Incus web UI[0m
+    [48;5;236m [0m[38;5;229;48;5;236mbr ls[0m[48;5;236m [0m     [38;5;243mlist Incus instances[0m
+
