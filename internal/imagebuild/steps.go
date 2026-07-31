@@ -137,11 +137,16 @@ func (r Recipe) Steps() []Step {
 			Content: linesOf(r.InitramfsModules),
 		},
 		Step{
-			Kind:    StepWriteFile,
-			Desc:    fmt.Sprintf("stamp the image version %s", r.Version),
-			Path:    r.VersionPath,
-			Mode:    versionStampMode,
-			Content: r.Version + "\n",
+			Kind: StepWriteFile,
+			Desc: fmt.Sprintf("stamp the image version %s", r.Version),
+			Path: r.VersionPath,
+			Mode: versionStampMode,
+			// No trailing newline: this matches what the shell build has always
+			// written, so a Go-built image is byte-identical to the published
+			// ones here. Readers trim, so the choice is invisible at runtime —
+			// but the parity check compares bytes, and a difference it cannot
+			// explain is worse than a convention it does not follow.
+			Content: r.Version,
 		},
 		Step{
 			Kind: StepRun,

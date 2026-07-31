@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -499,18 +500,9 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(fmt.Errorf("build-guest-image.sh failed: %w", err))
 	}
 
-	digest := strings.TrimSpace(string(out))
-	if digest == "" {
-		// Fallback: parse the sidecar the script also writes.
-		if sidecar, rerr := os.ReadFile(absOut + ".sha256"); rerr == nil {
-			fields := strings.Fields(string(sidecar))
-			if len(fields) > 0 {
-				digest = fields[0]
-			}
-		}
-	}
-	if !disk.ValidSHA256(digest) {
-		return jsonOrError(fmt.Errorf("build script produced an invalid sha256 %q", digest))
+	digest, err := buildDigest(out)
+	if err != nil {
+		return jsonOrError(err)
 	}
 
 	// Record the result back into the manifest. If the disk uses per-arch
@@ -534,6 +526,31 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Baked %s (%s): %s  %s%s\n",
 		success("✓"), value(name), arch, subtle(absOut), key("sha256="), digest)
 	return nil
+}
+
+// buildDigest reads the image digest the build reported on stdout.
+//
+// Stdout is the only source. An earlier version fell back to reading the
+// <output>.sha256 sidecar when stdout was empty, which could not happen on a
+// successful build — the build runs under `set -euo pipefail` and prints the
+// digest unconditionally once it has computed it, so exit 0 implies a digest on
+// stdout. Had it ever fired it would have read a sidecar with no evidence that
+// this build wrote it, pairing a fresh image with a digest left by an earlier
+// bake at the same path.
+//
+// Nothing is lost by removing it. The build assembles the image in its work
+// directory and renames it into place last, so the output and its sidecar are
+// either both fresh or the output was never written; there is no partial state
+// to recover from. A missing digest now fails loudly instead.
+func buildDigest(stdout []byte) (string, error) {
+	digest := strings.TrimSpace(string(stdout))
+	if digest == "" {
+		return "", errors.New("the build reported no digest on stdout")
+	}
+	if !disk.ValidSHA256(digest) {
+		return "", fmt.Errorf("the build reported %q, which is not a valid sha256", digest)
+	}
+	return digest, nil
 }
 
 // resolveBuildScript locates scripts/build-guest-image.sh relative to the
