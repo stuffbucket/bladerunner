@@ -1,0 +1,19 @@
+# Pinned SHA-512 digests for the Debian cloud images the guest build starts from.
+#
+# This file is the trust anchor. Debian publishes SHA512SUMS for its cloud
+# images but no detached signature for them, so the manifest served beside an
+# image cannot be verified: whoever could serve a malicious qcow2 could serve a
+# matching manifest next to it. A digest that only changes through a reviewed
+# commit can not be substituted that way.
+#
+# The images are fetched from an immutable dated directory rather than the
+# mutable "latest", so a rebuild from an old commit gets the same bytes.
+#
+# Format is `sha512sum -c` compatible: <digest>  <filename>
+#
+# To move to a newer Debian build:
+#   1. Pick a directory from https://cloud.debian.org/images/cloud/trixie/
+#   2. Take the digests from its SHA512SUMS — never from the image itself.
+#   3. Update debianStamp in source.go to match, in the same commit.
+fce97f7642f23709bc6a8a146624a5e30d3f61603571a2d70f974ed5bd2d5d06ba0605a2fc954a8f9b02625ab6a1af182bbaa721f0c21380b8991a1f7f1a8f87  debian-13-genericcloud-arm64-20260722-2547.qcow2
+735d1b2d0ef265a0c2323fdaa7d46e7bd7a1b984f73e8a785e638034bf07876e26374a9d809d713501270c071b3464d2ada0c5589f07742b95ed853cc6d48f45  debian-13-genericcloud-amd64-20260722-2547.qcow2
