@@ -1,0 +1,110 @@
+package imagebuild
+
+import "fmt"
+
+// Guest-side paths and endpoints for the Incus web UI.
+//
+// The UI ships as incus-ui-canonical, which is not in Debian main. It is NOT
+// apt-installed: the Zabbly package declares "Depends: incus", so installing it
+// would pull Zabbly's incus and swap out Debian's. The files are extracted from
+// the .deb instead, and incusd is pointed at them.
+const (
+	// zabblyKeyURL is the signing key for the Zabbly archive.
+	zabblyKeyURL = "https://pkgs.zabbly.com/key.asc"
+	// zabblyKeyPath is where that key is written while the UI is fetched.
+	zabblyKeyPath = "/etc/apt/keyrings/zabbly.asc"
+	// zabblySourcePath is the apt source added for the same window.
+	zabblySourcePath = "/etc/apt/sources.list.d/zabbly-incus-stable.sources"
+	// zabblySuite is the Zabbly suite matching the Debian release baked here.
+	zabblySuite = "trixie"
+	// uiPackage is the package whose payload is extracted.
+	uiPackage = "incus-ui-canonical"
+	// uiRoot is where the extracted UI lands, matching the package's own layout.
+	uiRoot = "/opt/incus/ui"
+	// uiDropInPath points incusd at uiRoot.
+	uiDropInPath = "/etc/systemd/system/incus.service.d/10-bladerunner-ui.conf"
+)
+
+// webUISteps bake the Incus web UI into the image.
+//
+// Every step that reaches Zabbly is optional. Zabbly is a third party outside
+// Debian main, and a mirror outage there must not block a guest image release
+// for a component the guest can live without: cloud-init re-attempts the same
+// install on first boot, so a skipped bake costs a little first-boot network
+// time rather than a broken guest. The workflow makes this sharper still —
+// fail-fast is off and the release needs both architectures, so one arch
+// failing on a third-party outage would block the other.
+//
+// The cleanup steps are NOT optional, and they run whether or not the bake
+// happened. Leaving the apt source behind is the serious failure: a guest's
+// routine `apt upgrade` would then pull Zabbly's incus to satisfy its
+// "Depends: incus" and replace Debian's under a running host, days later. The
+// signing key is removed for the same reason the source is — the shell build
+// removes only the source, so every image published so far carries an
+// unadvertised third-party trust anchor, and that is not reproduced here.
+func webUISteps() []Step {
+	source := fmt.Sprintf(`Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: %s
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: %s
+`, zabblySuite, zabblyKeyPath)
+
+	return []Step{
+		{
+			Kind:     StepRun,
+			Desc:     "fetch the Zabbly signing key for the web UI",
+			Optional: true,
+			Argv: []string{"/bin/sh", "-c",
+				fmt.Sprintf("mkdir -p %s && curl -fsSL %s -o %s",
+					"/etc/apt/keyrings", zabblyKeyURL, zabblyKeyPath)},
+		},
+		{
+			Kind:     StepRun,
+			Desc:     "add the Zabbly archive for the web UI",
+			Optional: true,
+			// A heredoc rather than a write-file step: the Architectures line
+			// is resolved by dpkg inside the guest, so the guest's own view of
+			// its architecture decides, not the builder's.
+			Argv: []string{"/bin/sh", "-c",
+				fmt.Sprintf("cat > %s <<'ZABBLY'\n%sZABBLY", zabblySourcePath, source)},
+		},
+		{
+			Kind:     StepRun,
+			Desc:     "refresh the package index for the web UI",
+			Optional: true,
+			Argv:     []string{"apt-get", "update"},
+		},
+		{
+			Kind:     StepRun,
+			Desc:     fmt.Sprintf("extract %s to %s", uiPackage, uiRoot),
+			Optional: true,
+			// Downloaded and unpacked, never installed — see the note above on
+			// why apt-installing it would swap out Debian's incus. dpkg-deb -x
+			// writes the package's own paths, which is what puts the files at
+			// uiRoot.
+			Argv: []string{"/bin/sh", "-c",
+				fmt.Sprintf("cd /tmp && apt-get download %s && "+
+					"deb=$(ls -1 %s_*.deb | head -1) && dpkg-deb -x \"$deb\" / && rm -f \"$deb\" && "+
+					"test -d %s", uiPackage, uiPackage, uiRoot)},
+		},
+		{
+			Kind:     StepWriteFile,
+			Desc:     "point incusd at the baked web UI",
+			Optional: true,
+			Path:     uiDropInPath,
+			Mode:     aptConfMode,
+			Content:  "[Service]\nEnvironment=INCUS_UI=" + uiRoot + "\n",
+		},
+		{
+			Kind: StepRun,
+			Desc: "remove the Zabbly archive and signing key",
+			// Unconditional. If either survives, the image carries a
+			// third-party archive that apt will act on later, or a trust
+			// anchor for one.
+			Argv: []string{"rm", "-f", zabblySourcePath, zabblyKeyPath},
+		},
+	}
+}

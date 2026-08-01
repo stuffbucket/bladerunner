@@ -32,7 +32,7 @@ func applyToTempRoot(t *testing.T, steps []Step) (string, *recordingRunner) {
 	t.Helper()
 	root := t.TempDir()
 	runner := &recordingRunner{}
-	if err := Apply(t.Context(), root, steps, runner); err != nil {
+	if _, err := Apply(t.Context(), root, steps, runner); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	return root, runner
@@ -79,7 +79,7 @@ func TestApplyAppendsWithoutTruncating(t *testing.T) {
 		t.Fatalf("seed file: %v", err)
 	}
 
-	err := Apply(t.Context(), root, []Step{{
+	_, err := Apply(t.Context(), root, []Step{{
 		Kind:    StepAppendFile,
 		Desc:    "append modules",
 		Path:    initramfsModulesPath,
@@ -149,7 +149,7 @@ func TestApplyRefusesAMalformedGuestPath(t *testing.T) {
 			root := t.TempDir()
 			outside := filepath.Join(filepath.Dir(root), "escaped")
 
-			err := Apply(t.Context(), root, []Step{{
+			_, err := Apply(t.Context(), root, []Step{{
 				Kind:    StepWriteFile,
 				Desc:    "malformed destination",
 				Path:    tc.path,
@@ -188,7 +188,7 @@ func TestDefaultRecipePathsAreWellFormed(t *testing.T) {
 // missing something, yet reports success and gets published.
 func TestApplyStopsAtTheFirstFailedStep(t *testing.T) {
 	runner := &recordingRunner{failOn: "boom"}
-	err := Apply(t.Context(), t.TempDir(), []Step{
+	_, err := Apply(t.Context(), t.TempDir(), []Step{
 		{Kind: StepRun, Desc: "fine", Argv: []string{"ok"}},
 		{Kind: StepRun, Desc: "the failing one", Argv: []string{"boom"}},
 		{Kind: StepRun, Desc: "never reached", Argv: []string{"after"}},
@@ -208,7 +208,7 @@ func TestApplyStopsAtTheFirstFailedStep(t *testing.T) {
 // An unknown kind means a step was constructed by code this function does not
 // understand. Skipping it would silently drop part of the recipe.
 func TestApplyRejectsAnUnknownStepKind(t *testing.T) {
-	err := Apply(t.Context(), t.TempDir(), []Step{
+	_, err := Apply(t.Context(), t.TempDir(), []Step{
 		{Kind: StepKind("teleport"), Desc: "not a real kind"},
 	}, &recordingRunner{})
 	if err == nil {

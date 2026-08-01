@@ -78,8 +78,14 @@ func Customize(ctx context.Context, opts Options) (err error) {
 
 	logf(fmt.Sprintf("applying %d build steps to %s", len(opts.Steps), mount.Root))
 	runner := chrootRunner{root: mount.Root, log: func(line string) { logf("  " + line) }}
-	if err := Apply(ctx, mount.Root, opts.Steps, runner); err != nil {
+	skipped, err := Apply(ctx, mount.Root, opts.Steps, runner)
+	if err != nil {
 		return fmt.Errorf("apply the build steps: %w", err)
+	}
+	// Optional steps that failed are reported, not swallowed. An image quietly
+	// missing a component is the failure this build exists to surface.
+	for _, s := range skipped {
+		logf(fmt.Sprintf("skipped (non-fatal): %s: %v", s.Step.Desc, s.Err))
 	}
 
 	// The image must be flushed before the device is detached, or the compress
