@@ -24,19 +24,40 @@ type Runner interface {
 	Run(ctx context.Context, argv []string) error
 }
 
+// Skipped records an optional step that failed and was passed over.
+type Skipped struct {
+	// Step is the step that did not run to completion.
+	Step Step
+	// Err is why it failed.
+	Err error
+}
+
 // Apply performs steps against the guest root mounted at rootDir, running any
-// commands through run.
+// commands through run. It returns the optional steps that were skipped.
 //
-// It stops at the first failure. A partially applied image that reports success
-// is worse than a failed build: it gets published, boots, and is missing
-// something that only shows up in production.
-func Apply(ctx context.Context, rootDir string, steps []Step, run Runner) error {
+// A required step stops the build at the first failure. A partially applied
+// image that reports success is worse than a failed build: it gets published,
+// boots, and is missing something that only shows up in production.
+//
+// An optional step is different in kind. It covers work that depends on
+// something outside the distribution's archive, where an outage should not
+// block a release. Those failures are returned rather than logged and dropped,
+// so the caller can say which parts of the image are absent — an image quietly
+// missing a component is the failure this whole package exists to surface.
+func Apply(ctx context.Context, rootDir string, steps []Step, run Runner) ([]Skipped, error) {
+	var skipped []Skipped
 	for i, s := range steps {
-		if err := applyStep(ctx, rootDir, s, run); err != nil {
-			return fmt.Errorf("step %d of %d (%s): %w", i+1, len(steps), s.Desc, err)
+		err := applyStep(ctx, rootDir, s, run)
+		if err == nil {
+			continue
 		}
+		if s.Optional {
+			skipped = append(skipped, Skipped{Step: s, Err: err})
+			continue
+		}
+		return skipped, fmt.Errorf("step %d of %d (%s): %w", i+1, len(steps), s.Desc, err)
 	}
-	return nil
+	return skipped, nil
 }
 
 // applyStep performs a single step.
