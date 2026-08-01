@@ -117,7 +117,7 @@ func TestCustomizeAppliesStepsToARealImage(t *testing.T) {
 
 	assertGuestFiles(t, image, map[string]string{
 		"/etc/bladerunner-test-asset":    "asset\n",
-		"/etc/bladerunner-image-version": testVersion + "\n",
+		"/etc/bladerunner-image-version": testVersion,
 	})
 }
 
