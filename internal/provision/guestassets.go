@@ -41,13 +41,18 @@ type GuestAsset struct {
 
 // ImageBuildAssets returns the provisioning files that the pre-baked image build
 // installs into the guest root, so the time-heal stack (chrony + wake-heal
-// watchdog) is present before first boot rather than being installed by
-// cloud-init on every boot.
+// watchdog) is present before first boot rather than waiting for cloud-init.
 //
-// The vsock relays are deliberately absent. After #160 every boot provisions via
-// full cloud-init, which installs the templated bladerunner-vsock-relay@ unit
-// and its per-channel arg files fresh each time; baking them would only create a
-// stale duplicate that the cloud-init run has to supersede.
+// The vsock relays are deliberately absent. The bootstrap installs the
+// templated bladerunner-vsock-relay@ unit and its per-channel arg files, and
+// baking them too would only create a stale duplicate the bootstrap supersedes.
+//
+// That bootstrap runs from runcmd, which cloud-init performs ONCE per
+// instance-id, not on every boot. An earlier version of this comment said "every
+// boot", copied from scripts/build-guest-image.sh, where it is also wrong. The
+// distinction matters: anything the bootstrap sets up is applied once and is
+// never re-applied or repaired on a later boot of the same instance, which is
+// why the assets here are baked instead of left to it.
 func ImageBuildAssets() []GuestAsset {
 	return []GuestAsset{
 		{GuestPath: GuestChronyConfPath, Mode: chronyConfMode, Content: chronyConf},
