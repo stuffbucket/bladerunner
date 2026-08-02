@@ -323,7 +323,7 @@ type Host struct {
 
 	// stepsFn and waitReady are TEST SEAMS. Neither is ever set outside a test
 	// — New leaves both nil and every production path resolves to h.steps and
-	// h.waitForGuestReady — so do not delete them as unused (CLAUDE.md section
+	// h.waitForGuestReady — so do not delete them as unused (AGENTS.md section
 	// 9 point 4: a name only a test needs).
 	//
 	// They exist because Run and block are the two functions in this package

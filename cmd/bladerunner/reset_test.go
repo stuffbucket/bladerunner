@@ -152,7 +152,7 @@ func cartridgeResetFixture(t *testing.T) (mount string, files []string) {
 // not at baseline at all.
 //
 // Guessing at the cartridge layout here would delete files inside a user's
-// cartridge image (CLAUDE.md section 8), so the kind is refused outright, with
+// cartridge image (AGENTS.md section 8), so the kind is refused outright, with
 // the way to a fresh cartridge in the message.
 func TestResetRefusesACartridge(t *testing.T) {
 	withResetFlags(t)

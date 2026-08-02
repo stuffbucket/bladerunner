@@ -23,7 +23,7 @@ const reportFilePerm = 0o644
 // The presence of the file is not evidence the VM came up; an empty Incus
 // section, or Incus.Auth that is not "trusted", says it did not.
 //
-// This struct is an on-disk format that a later version reads (CLAUDE.md
+// This struct is an on-disk format that a later version reads (AGENTS.md
 // section 9, point 3). Add fields and give each new one `omitempty`; do not
 // rename a field, retag one, or reuse a name for a different meaning.
 type StartupReport struct {
