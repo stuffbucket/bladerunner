@@ -116,6 +116,9 @@ require_tool() {
 require_tool qemu-img    "qemu-utils"
 require_tool curl        "curl"
 require_tool sha256sum   "coreutils"
+# The base image is verified against the reviewed digests before anything reads
+# it, so a missing sha512sum must stop the build here rather than at the check.
+require_tool sha512sum   "coreutils"
 
 case "${METHOD}" in
     auto|guestfish|nbd) ;;
@@ -153,11 +156,46 @@ esac
 
 # ----- download base image ------------------------------------------------
 
-UPSTREAM_URL="https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/latest/debian-13-genericcloud-${ARCH}.qcow2"
+# internal/imagebuild/basepins.sha512 is the single source of truth for which
+# Debian build every published guest image starts from. Its filenames carry the
+# dated stamp, so deriving both the URL and the expected digest from that one
+# file is what keeps this path and internal/imagebuild on the same bytes. A
+# second copy of the stamp here could disagree while both copies looked right.
+BASE_PINS="${SCRIPT_DIR}/../internal/imagebuild/basepins.sha512"
+[ -r "${BASE_PINS}" ] || fatal "missing the reviewed digest file: ${BASE_PINS}"
+
+PINNED_IMAGE="$(awk -v suffix="-${ARCH}-" '$2 ~ suffix { print $2 }' "${BASE_PINS}")"
+[ -n "${PINNED_IMAGE}" ] || fatal "no reviewed digest for ${ARCH} in ${BASE_PINS}"
+[ "$(printf '%s' "${PINNED_IMAGE}" | grep -c '')" -eq 1 ] \
+    || fatal "more than one reviewed image matches ${ARCH} in ${BASE_PINS}"
+
+EXPECTED_SHA512="$(awk -v want="${PINNED_IMAGE}" '$2 == want { print $1 }' "${BASE_PINS}")"
+
+# debian-<release>-<variant>-<arch>-<stamp>.qcow2 -> <stamp>
+PINNED_STAMP="${PINNED_IMAGE##*-${ARCH}-}"
+PINNED_STAMP="${PINNED_STAMP%.qcow2}"
+
+# The dated directory is immutable. "latest" is not: two builds of the same
+# commit could start from different bytes, and nothing would record which.
+UPSTREAM_URL="https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/${PINNED_STAMP}/${PINNED_IMAGE}"
 BASE_IMAGE="${WORK_DIR}/base.qcow2"
 
 log "downloading ${UPSTREAM_URL}"
 curl --fail --location --silent --show-error --output "${BASE_IMAGE}" "${UPSTREAM_URL}"
+
+# Verify before any other step reads the file. HTTPS authenticates the mirror,
+# not the bytes: whoever could serve a malicious qcow2 could serve a matching
+# SHA512SUMS beside it, which is why the digest comes from the repository and
+# never from the download.
+ACTUAL_SHA512="$(sha512sum -- "${BASE_IMAGE}" | awk '{ print $1 }')"
+if [ "${ACTUAL_SHA512}" != "${EXPECTED_SHA512}" ]; then
+    rm -f -- "${BASE_IMAGE}"
+    fatal "base image digest mismatch for ${PINNED_IMAGE}
+  expected ${EXPECTED_SHA512}
+  actual   ${ACTUAL_SHA512}
+refusing to build a guest image from bytes that are not the reviewed ones"
+fi
+log "verified ${PINNED_IMAGE} against ${BASE_PINS##*/}"
 
 # ----- resize working image ----------------------------------------------
 

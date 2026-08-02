@@ -45,6 +45,12 @@ const (
 	manifestScanMax     = 1024 * 1024
 )
 
+// basePinsFileName is the reviewed-digest file, named once so the shell build
+// and the tests that hold the two paths together refer to the same thing. The
+// //go:embed directive below needs a literal, so this constant cannot feed it;
+// TestBasePinsFileNameMatchesTheEmbed keeps the two honest.
+const basePinsFileName = "basepins.sha512"
+
 //go:embed basepins.sha512
 var basePinsRaw string
 
