@@ -52,7 +52,7 @@ jobs:
   # DiskArbitration suite, vmhost's unmount veto and most of cmd/bladerunner —
   # ran only on a developer's Mac. A GitHub macOS runner cannot start a VM (no
   # Virtualization.framework entitlement, no nested virt), so this runs with
-  # -short, which is the switch CLAUDE.md section 6.4 puts hardware tests
+  # -short, which is the switch AGENTS.md section 6.4 puts hardware tests
   # behind. That still covers every darwin unit test that does not need a VM.
   macos:
     name: Build & Test (macOS)
