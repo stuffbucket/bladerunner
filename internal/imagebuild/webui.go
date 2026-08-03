@@ -1,6 +1,9 @@
 package imagebuild
 
-import "fmt"
+import (
+	"fmt"
+	"path/filepath"
+)
 
 // Guest-side paths and endpoints for the Incus web UI.
 //
@@ -23,6 +26,8 @@ const (
 	uiRoot = "/opt/incus/ui"
 	// uiDropInPath points incusd at uiRoot.
 	uiDropInPath = "/etc/systemd/system/incus.service.d/10-bladerunner-ui.conf"
+	// uiDropInContent is that drop-in's body.
+	uiDropInContent = "[Service]\nEnvironment=INCUS_UI=" + uiRoot + "\n"
 )
 
 // webUISteps bake the Incus web UI into the image.
@@ -79,24 +84,25 @@ Signed-By: %s
 		},
 		{
 			Kind:     StepRun,
-			Desc:     fmt.Sprintf("extract %s to %s", uiPackage, uiRoot),
+			Desc:     fmt.Sprintf("extract %s to %s and point incusd at it", uiPackage, uiRoot),
 			Optional: true,
 			// Downloaded and unpacked, never installed — see the note above on
 			// why apt-installing it would swap out Debian's incus. dpkg-deb -x
 			// writes the package's own paths, which is what puts the files at
 			// uiRoot.
+			//
+			// The drop-in is written HERE, chained behind the extract, rather
+			// than as its own step. Apply continues past an optional failure,
+			// so a separate step would still run after a Zabbly outage skipped
+			// the extract, and the image would ship incusd configured to serve
+			// a directory that does not exist.
 			Argv: []string{"/bin/sh", "-c",
 				fmt.Sprintf("cd /tmp && apt-get download %s && "+
 					"deb=$(ls -1 %s_*.deb | head -1) && dpkg-deb -x \"$deb\" / && rm -f \"$deb\" && "+
-					"test -d %s", uiPackage, uiPackage, uiRoot)},
-		},
-		{
-			Kind:     StepWriteFile,
-			Desc:     "point incusd at the baked web UI",
-			Optional: true,
-			Path:     uiDropInPath,
-			Mode:     aptConfMode,
-			Content:  "[Service]\nEnvironment=INCUS_UI=" + uiRoot + "\n",
+					"test -d %s && "+
+					"mkdir -p %s && printf '%s' > %s",
+					uiPackage, uiPackage, uiRoot,
+					filepath.Dir(uiDropInPath), uiDropInContent, uiDropInPath)},
 		},
 		{
 			Kind: StepRun,

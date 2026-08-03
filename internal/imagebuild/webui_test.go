@@ -1,8 +1,11 @@
 package imagebuild
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 // uiSteps returns the steps that bake the Incus web UI.
@@ -126,6 +129,32 @@ func TestZabblyCleanupRunsAfterTheUIBake(t *testing.T) {
 	if lastOptional >= 0 && firstCleanup < lastOptional {
 		t.Errorf("Zabbly cleanup at step %d runs before the last optional UI step at %d",
 			firstCleanup, lastOptional)
+	}
+}
+
+// The drop-in must not outlive the files it points at.
+//
+// Apply continues past an optional failure, so a Zabbly outage skips the
+// extract and every later optional step still runs. If the drop-in is one of
+// them, the image ships incusd configured to serve a UI directory that does
+// not exist. The shell build could not reach that state — it wrote the drop-in
+// inside the branch that ran only when the .deb was fetched.
+func TestNoWebUIDropInWithoutTheWebUI(t *testing.T) {
+	root := t.TempDir()
+	// dpkg-deb appears only in the step that unpacks the UI payload.
+	runner := &recordingRunner{failOn: "dpkg-deb"}
+
+	if _, err := Apply(t.Context(), root, uiSteps(t), runner); err != nil {
+		t.Fatalf("an optional failure aborted the build: %v", err)
+	}
+
+	dropIn, err := util.SafeJoin(root, uiDropInPath)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", uiDropInPath, err)
+	}
+	if _, err := os.Stat(dropIn); err == nil {
+		t.Errorf("the extract failed but %s was written; incusd would point at a missing %s",
+			uiDropInPath, uiRoot)
 	}
 }
 
