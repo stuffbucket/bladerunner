@@ -1278,8 +1278,30 @@ func (h *Host) startBootStage() error {
 	return nil
 }
 
-// stopBootStage clears the published boot phase on the way out.
+// stopBootStage clears the published boot phase on the way out — unless what is
+// published is a TERMINAL SHUTDOWN stage, which teardown must leave alone.
+//
+// A shutdown terminal is the record of how this instance went down, and its
+// only readers are separate processes (the menubar, the splash) polling the
+// file after this one has exited. Forced carries DetailForced — the warning
+// that a power cut may have left the guest filesystem dirty, which AGENTS.md
+// section 8 governs — so clearing it here deletes the warning before anyone can
+// act on it. The stage is published by drainForUnmount moments before teardown
+// runs, so this is the ordinary path for a vetoed eject, not a rare one.
+//
+// Leaving it is safe on all three counts that matter. The file is per-instance
+// (bootstage.Path joins cfg.VMDir), so it cannot leak onto another instance.
+// Both consumers ignore it once it ages out, so it cannot become a permanent
+// wrong answer. And the next boot's publisher writes Boot immediately, so it
+// cannot outlive the next start.
+//
+// A boot-phase stage is still cleared, terminal or not: Ready or Failed
+// describes a VM that no longer exists once teardown has run, and leaving it
+// would show a stale "Ready" for an instance that is gone.
 func (h *Host) stopBootStage() error {
+	if s, ok := bootstage.Read(h.cfg.VMDir); ok && s.Stage.IsShutdown() && s.Stage.IsTerminal() {
+		return nil
+	}
 	bootstage.Clear(h.cfg.VMDir)
 	return nil
 }
