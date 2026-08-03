@@ -506,10 +506,13 @@ func vmHealthAt(stateDir string) vmState {
 	}
 }
 
-// bootingPhase returns the live, human-friendly boot phase published by the
-// running `br start` (e.g. "Starting Incus…") while a boot is in progress. ok
-// is false when there is no recent boot-stage file — meaning either no boot is
-// underway or it finished, so callers fall back to the steady-state label.
+// bootingPhase returns the live, human-friendly boot phase (e.g. "Starting
+// Incus…") while a boot is in progress. The phase is published by whichever
+// process owns the booting VM — internal/vmhost's boot-stage publisher, which
+// normally runs in the holder rather than in any `br start` this menubar
+// launched — and reaches here only through the state file. ok is false when
+// there is no recent boot-stage file, meaning either no boot is underway or it
+// finished, so callers fall back to the steady-state label.
 func bootingPhase(stateDir string) (string, bool) {
 	s, ok := bootstage.Read(stateDir)
 	if !ok || time.Since(s.UpdatedAt) > 90*time.Second {

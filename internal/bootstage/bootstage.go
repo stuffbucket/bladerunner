@@ -3,12 +3,23 @@
 // the VM doing" status on the splash without the rich in-process progress
 // board.
 //
-// The file covers both halves of the lifecycle: the boot phase (produced by
-// `br start`, which has the console log + runner events) and the shutdown phase
-// (produced by the drain path in the holder — see drain.go, whose Reporter is
-// safe to call from the background goroutine a DiskArbitration unmount-approval
-// callback kicks off). The consumer is the menubar, which polls Read while the
-// splash or the spin-down notice is up.
+// The file covers both halves of the lifecycle. The boot phase is published by
+// internal/vmhost's boot-stage publisher, driven by the RUNNER's stage events —
+// not by the console log, which this half never reads. That publisher lives
+// wherever the Host runs: normally the holder process, or the `br start`
+// process itself on a GUI foreground boot. The shutdown phase is published by
+// the drain path in the same Host — see drain.go, whose Reporter is safe to
+// call from the background goroutine a DiskArbitration unmount-approval
+// callback kicks off.
+//
+// There are two consumers, and they are in a different process from the
+// publisher. The menubar polls Read while the splash or the spin-down notice is
+// up; the CLI's holder attachment replays the boot phase onto its own progress
+// board, which is how a terminal shows a boot it is not itself running.
+//
+// The board's cloud-init and SSH stages have a different source — the CLI tails
+// the holder's console.log directly (see cmd/bladerunner tailConsoleIntoBoard)
+// — so no stage here needs to carry them.
 package bootstage
 
 import (
@@ -36,6 +47,16 @@ type Stage string
 // These strings are the on-disk wire format of State.Stage, read by a menubar
 // that may be an older build than the producer. Add a stage rather than
 // renaming or reusing one.
+//
+// Connect is DECLARED BUT NEVER PUBLISHED, on purpose. Nothing can publish it:
+// the only SSH-readiness sensor in the tree is the console-log parser in
+// internal/boot, and the publisher (internal/vmhost) is driven by runner stage
+// events, which do not change when sshd comes up. The board consumer does not
+// need it — the CLI tails the console itself and advances its own SSH stage —
+// so the only thing missing it costs is one intermediate label on the menubar
+// and splash, which have no tailer. It is kept rather than deleted because
+// removing it renumbers the ranks of every stage after it, and because
+// publishing it later needs no wire-format change. Do not "clean it up".
 const (
 	Boot    Stage = "boot"    // VM/kernel coming up
 	Setup   Stage = "setup"   // cloud-init configuring the guest
