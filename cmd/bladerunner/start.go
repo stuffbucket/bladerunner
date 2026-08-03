@@ -587,6 +587,18 @@ const (
 	boardStageIncusWait = "incus-wait"
 )
 
+// bootBoardStages is the boot board's stage list. It is a function rather than
+// an inline literal so a test can drive the REAL board — a copy of the list in
+// a test could drift from this one and then be asserting against a fiction.
+func bootBoardStages() []board.Stage {
+	return []board.Stage{
+		{ID: boardStageVMBoot, Label: "VM running"},
+		{ID: boardStageCloudInit, Label: "cloud-init complete"},
+		{ID: boardStageSSH, Label: "SSH ready"},
+		{ID: boardStageIncusWait, Label: "Incus API ready"},
+	}
+}
+
 // startBootBoard constructs the split-view boot board, wires it into the
 // runner as the progress reporter, and starts a console.log tailer that
 // feeds raw lines into the tail panel and advances stage state from parsed
@@ -596,13 +608,7 @@ func startBootBoard(ctx context.Context, cfg *config.Config) (*board.Board, vm.P
 	if !term.IsTerminal(int(os.Stderr.Fd())) {
 		return nil, nil, func() {}
 	}
-	stages := []board.Stage{
-		{ID: boardStageVMBoot, Label: "VM running"},
-		{ID: boardStageCloudInit, Label: "cloud-init complete"},
-		{ID: boardStageSSH, Label: "SSH ready"},
-		{ID: boardStageIncusWait, Label: "Incus API ready"},
-	}
-	brd := board.New(stages, board.Options{
+	brd := board.New(bootBoardStages(), board.Options{
 		Out:            os.Stderr,
 		Title:          ui.Title("Bladerunner boot"),
 		ConsoleLogPath: cfg.ConsoleLogPath,
