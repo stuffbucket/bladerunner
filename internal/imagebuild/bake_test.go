@@ -138,3 +138,40 @@ func TestBakePublishesTheCompletedPartial(t *testing.T) {
 		t.Errorf("published %q -> %q, want %q -> %q", from, to, p.PartialPath, p.OutputPath)
 	}
 }
+
+// The platform constructor must hand Bake a complete dependency set on every
+// platform, or Bake refuses before running a phase and the failure reads as a
+// programming mistake rather than as this platform lacking the mechanic.
+//
+// On Linux this is the real wiring. Elsewhere every operation is real except
+// Customize, which refuses — so the error names the one thing that genuinely
+// cannot run rather than an incomplete set.
+func TestLinuxBakeDepsIsComplete(t *testing.T) {
+	deps := LinuxBakeDeps(t.TempDir(), nil)
+
+	if err := deps.validate(); err != nil {
+		t.Fatalf("the platform constructor returned an incomplete set: %v", err)
+	}
+	if deps.Fetch == nil || deps.Run == nil || deps.Customize == nil || deps.Publish == nil {
+		t.Error("a dependency is nil despite validate passing")
+	}
+}
+
+// runHostCommand must fold the command's own output into the error. A qemu-img
+// failure reported as "exit status 1" tells a user nothing they can act on.
+func TestRunHostCommandReportsWhatTheToolSaid(t *testing.T) {
+	err := runHostCommand(t.Context(), []string{"sh", "-c", "echo the-tool-said-this >&2; exit 3"})
+	if err == nil {
+		t.Fatal("a failing command reported no error")
+	}
+	if !strings.Contains(err.Error(), "the-tool-said-this") {
+		t.Errorf("error %q does not carry the command's own output", err)
+	}
+}
+
+// An empty argv is a caller bug, not something to hand to exec.
+func TestRunHostCommandRefusesAnEmptyArgv(t *testing.T) {
+	if err := runHostCommand(t.Context(), nil); err == nil {
+		t.Error("an empty command was accepted")
+	}
+}

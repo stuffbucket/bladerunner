@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 )
 
 // BakeDeps are the operations a bake performs. They are injected so the
@@ -85,6 +86,19 @@ func (d BakeDeps) validate() error {
 func PublishRename(from, to string) error {
 	if err := os.Rename(from, to); err != nil {
 		return fmt.Errorf("move the finished image into place: %w", err)
+	}
+	return nil
+}
+
+// runHostCommand executes argv and folds its output into the error, so a
+// qemu-img failure says what qemu-img said rather than only its exit status.
+func runHostCommand(ctx context.Context, argv []string) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("no command to run")
+	}
+	out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", argv[0], err, out)
 	}
 	return nil
 }
