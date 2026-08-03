@@ -117,6 +117,11 @@ Two more rules:
 10. Read `.golangci.yml` before you disable a lint rule.
 11. Correct the code first. If you must add a `//nolint` comment, write the
     reason on the same line. The `nolintlint` rule needs a reason.
+12. Write American spellings. The `misspell` linter rejects "behaviour",
+    "recognised" and their relatives.
+
+New rules go at the END of this list. `.golangci.yml` cites these by number,
+so inserting one silently repoints every citation below it.
 
 ---
 
