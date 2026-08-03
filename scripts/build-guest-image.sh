@@ -283,6 +283,25 @@ else
     log "partition layout of ${NBD_DEV}:"
     lsblk -o NAME,SIZE,FSTYPE,PARTLABEL "${NBD_DEV}" >&2 || true
 
+    # Without udev the kernel surfaces the partitions in sysfs but nothing
+    # creates their /dev nodes — a container is the usual case. Make them from
+    # the major:minor sysfs already reports, so the loop below has something to
+    # test. This mirrors what the Go mechanic does; the alternative is a build
+    # that fails on a host where the partitions are perfectly readable.
+    NBD_NAME="$(basename -- "${NBD_DEV}")"
+    for syspart in "/sys/block/${NBD_NAME}/${NBD_NAME}"p*; do
+        [[ -d "${syspart}" ]] || continue
+        partname="$(basename -- "${syspart}")"
+        if [[ -b "/dev/${partname}" ]]; then
+            continue
+        fi
+        if ! IFS=: read -r partmajor partminor < "${syspart}/dev"; then
+            log "could not read ${syspart}/dev; leaving /dev/${partname} to udev"
+            continue
+        fi
+        mknod "/dev/${partname}" b "${partmajor}" "${partminor}" 2>/dev/null || true
+    done
+
     # Pick the root partition by filesystem rather than hardcoding p1: Debian
     # genericcloud carries a small FAT ESP and a BIOS-boot partition alongside
     # the ext4 root, and their ordering is not guaranteed across releases.
