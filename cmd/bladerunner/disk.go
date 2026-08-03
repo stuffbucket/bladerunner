@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -281,12 +281,7 @@ func narrowToArch(m *disk.Manifest, arch, from string) error {
 	}
 	img, ok := m.Image.Arches[arch]
 	if !ok {
-		have := make([]string, 0, len(m.Image.Arches))
-		for a := range m.Image.Arches {
-			have = append(have, a)
-		}
-		sort.Strings(have)
-		return fmt.Errorf("--arch %s is not published by %q (it has %s)", arch, from, strings.Join(have, ", "))
+		return fmt.Errorf("--arch %s is not published by %q (it has %s)", arch, from, strings.Join(sortedArches(m), ", "))
 	}
 	m.Image.Arches = map[string]disk.ArchImage{arch: img}
 	return nil
@@ -535,33 +530,28 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// bakePreflight reports whether a bake of this disk for this architecture could
-// ever record its result, using only what the manifest already says.
-//
-// It exists to run before the build rather than after it. Everything it checks
-// is knowable at load time, and a build takes minutes, several hundred
-// megabytes, and — because the script renames its output into place — replaces
-// whatever was at --output. Refusing afterwards spends all three on an answer
-// that was available at the start.
+// bakePreflight reports whether a bake could record its result into this disk,
+// using only what the manifest already says. The caller runs it before the
+// build; see the call site for why that ordering matters.
 func bakePreflight(m *disk.Manifest, name, arch string) error {
 	if m.Image.Arches == nil {
 		return fmt.Errorf("disk %q is not a per-arch image disk; bake only supports image.arches disks", name)
 	}
 	if _, ok := m.Image.Arches[arch]; !ok {
-		return fmt.Errorf("disk %q has no image.arches entry for %s; add one before baking (it has %s)",
+		return fmt.Errorf("disk %q has no image.arches entry for %s (it has %s)",
 			name, arch, strings.Join(sortedArches(m), ", "))
 	}
 	return nil
 }
 
-// sortedArches lists the architectures a manifest carries, in a stable order so
-// the error above reads the same way twice.
+// sortedArches lists the architectures a manifest carries an image for, in a
+// stable order so an error naming them reads the same way twice.
 func sortedArches(m *disk.Manifest) []string {
 	out := make([]string, 0, len(m.Image.Arches))
 	for a := range m.Image.Arches {
 		out = append(out, a)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
