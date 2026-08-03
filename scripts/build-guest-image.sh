@@ -257,8 +257,15 @@ else
     MNT="${WORK_DIR}/mnt"
     mkdir -p "${MNT}"
 
-    log "loading nbd module"
-    modprobe nbd max_part=8
+    # The module may already be loaded, or built in, or the host may expose the
+    # device without a loadable module at all — a container sees /dev/nbd0 from
+    # the host kernel and has no /lib/modules to modprobe from. What matters is
+    # whether the DEVICE exists afterwards, not whether modprobe succeeded, so
+    # the failure is decided on that. Deciding on modprobe's exit status instead
+    # refuses hosts the build then works perfectly well on.
+    log "ensuring the nbd device"
+    modprobe nbd max_part=8 2>/dev/null || true
+    [ -b "${NBD_DEV}" ] || fatal "no ${NBD_DEV} and the nbd module could not be loaded"
 
     log "attaching ${BASE_IMAGE} to ${NBD_DEV}"
     qemu-nbd --connect="${NBD_DEV}" "${BASE_IMAGE}"
