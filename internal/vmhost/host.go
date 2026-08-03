@@ -345,6 +345,7 @@ type Host struct {
 	stepsFn   func() []step
 	waitReady func(context.Context) error
 	stopVM    func(context.Context, time.Duration) error
+	waitVM    func(context.Context) error
 }
 
 // lifecycleSteps resolves the ordered lifecycle Run drives: the real one from
@@ -925,11 +926,49 @@ func (h *Host) block(ctx context.Context) error {
 		h.publishBootOutcome(bootErr)
 		h.obs.Ready(h.cfg, h.endpoint, bootErr)
 		h.obs.Waiting(false)
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case err := <-h.guestGone(ctx):
+			if err != nil {
+				h.obs.Stopping()
+				return fmt.Errorf("the guest left the running state: %w", err)
+			}
+			logging.L().Info("the guest powered itself off; releasing the holder")
+		}
 	}
 
 	h.obs.Stopping()
 	return nil
+}
+
+// guestGone delivers when the guest leaves the running state: nil if it powered
+// itself off (an ordinary end, including a shutdown from inside the guest), or
+// the reason it stopped being usable.
+//
+// It returns a NIL CHANNEL when there is no runner to watch. A receive on a nil
+// channel blocks forever, so the arm removes itself from block's select instead
+// of firing at once — which is what returning a value would do, and is exactly
+// the trap in Runner.Wait, whose first line answers nil immediately for a
+// Runner whose VM was never started. That is on darwin, not only in the stub.
+//
+// Why this exists: without it the headless branch parks on ctx.Done() alone, so
+// a guest that panicked left the holder up and serving its control socket. The
+// liveness ladder in internal/instance then reported the instance as RUNNING —
+// the socket answered, because the holder was alive — while the guest inside it
+// was dead. Nothing else had to change to fix that: once the holder exits, the
+// socket goes with it and the existing ladder falls through to Dead on its own.
+func (h *Host) guestGone(ctx context.Context) <-chan error {
+	wait := h.waitVM
+	if wait == nil {
+		r := h.activeRunner()
+		if r == nil {
+			return nil
+		}
+		wait = r.Wait
+	}
+	ch := make(chan error, 1)
+	go func() { ch <- wait(ctx) }()
+	return ch
 }
 
 // publishBootOutcome records how the readiness wait ended in the boot-stage
