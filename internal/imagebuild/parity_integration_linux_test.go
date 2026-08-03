@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The parity gate: bake the same recipe through the shell build and through
@@ -18,9 +19,11 @@ import (
 // on any difference — including one nobody predicted, which is the whole reason
 // the two paths drifted in the first place.
 //
-// It is expected to be RED until the two recipes agree. A green run here on the
-// first attempt would mean the gate is not looking at anything, which is
-// cheaper to discover now than after deleting 375 lines.
+// It went red on its first three runs and each time named something real: the
+// shell build refusing a host over an unloadable nbd module, then over missing
+// partition nodes, then a version stamp this test itself had made differ. It is
+// green now, on two real bakes of the same recipe, which is what clears the
+// shell build for deletion.
 func TestScriptAndGoProduceTheSameImage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a parity bake needs root, an nbd device and a network")
@@ -33,7 +36,11 @@ func TestScriptAndGoProduceTheSameImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BaseRelease: %v", err)
 	}
-	recipe := DefaultRecipe(testVersion)
+	// Both builds must be stamped the same, or the version file differs and the
+	// gate reports a divergence it created itself. The script derives its stamp
+	// from `date -u +%Y.%m.%d`; BuildVersion is the same value from the same
+	// clock, which is the point of it existing.
+	recipe := DefaultRecipe(BuildVersion(time.Now()))
 
 	goImage := bakeWithGo(t, release, recipe)
 	shellImage := bakeWithScript(t, script, arch)
@@ -93,10 +100,13 @@ func bakeWithScript(t *testing.T, script, arch string) string {
 	return out
 }
 
-// describeImage attaches a built image, reads what it contains, and detaches.
+// describeImage attaches a built image, reads what it contains, and detaches
+// BEFORE returning.
 //
-// It goes through the same mechanic the build uses, so the description is of
-// the published artifact rather than of a working copy.
+// The detach cannot be deferred to t.Cleanup. There is one nbd device, so the
+// second image cannot be attached until the first is off it — deferring means
+// the second attach fails with "Failed to set NBD socket" while the first image
+// is still connected, which reads like a broken build and is not.
 func describeImage(t *testing.T, image string, recipe Recipe) Description {
 	t.Helper()
 	work := t.TempDir()
@@ -105,11 +115,11 @@ func describeImage(t *testing.T, image string, recipe Recipe) Description {
 	if err != nil {
 		t.Fatalf("attach %s: %v", image, err)
 	}
-	t.Cleanup(func() {
+	defer func() {
 		if err := mount.Close(); err != nil {
 			t.Errorf("detach %s: %v", image, err)
 		}
-	})
+	}()
 
 	desc, err := Describe(mount.Root, recipe)
 	if err != nil {
