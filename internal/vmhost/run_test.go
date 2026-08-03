@@ -363,6 +363,17 @@ func TestNewLeavesTheTestSeamsUnset(t *testing.T) {
 	if h.waitReady != nil {
 		t.Error("New installed a waitReady; production must resolve to waitForGuestReady")
 	}
+	if h.stopVM != nil {
+		t.Error("New installed a stopVM; production must resolve to the live runner")
+	}
+
+	// With the seam unset, stopGuest must take the production branch: a Host
+	// that never constructed a runner has nothing to stop and says so quietly,
+	// because a boot can fail long before the VM exists and teardown still has
+	// to reach the cartridge detach.
+	if err := h.stopGuest(context.Background(), DefaultDrainTimeout); err != nil {
+		t.Errorf("stopGuest with no runner = %v, want nil", err)
+	}
 
 	names := func(steps []step) string {
 		out := make([]string, 0, len(steps))

@@ -321,10 +321,10 @@ type Host struct {
 	runner *vm.Runner
 	cancel context.CancelFunc
 
-	// stepsFn and waitReady are TEST SEAMS. Neither is ever set outside a test
-	// — New leaves both nil and every production path resolves to h.steps and
-	// h.waitForGuestReady — so do not delete them as unused (AGENTS.md section
-	// 9 point 4: a name only a test needs).
+	// stepsFn, waitReady and stopVM are TEST SEAMS. None is ever set outside a
+	// test — New leaves all three nil and every production path resolves to
+	// h.steps, h.waitForGuestReady and the live runner — so do not delete them
+	// as unused (AGENTS.md section 9 point 4: a name only a test needs).
 	//
 	// They exist because Run and block are the two functions in this package
 	// that no unit test could reach: every one of the fourteen real steps
@@ -336,8 +336,15 @@ type Host struct {
 	// running a VM by hand. Substituting the step list and the readiness wait
 	// makes those guarantees testable without booting anything; nothing else
 	// about Run is faked.
+	//
+	// stopVM is the same idea for the teardown side: the drain budget stopRunner
+	// hands the guest is only observable through a live *vm.Runner, so without
+	// this seam "the Spec's DrainTimeout is the budget the guest actually gets"
+	// could not be asserted without booting a VM. It substitutes the stop call
+	// alone; the budget it receives is resolved by production code.
 	stepsFn   func() []step
 	waitReady func(context.Context) error
+	stopVM    func(context.Context, time.Duration) error
 }
 
 // lifecycleSteps resolves the ordered lifecycle Run drives: the real one from
@@ -356,6 +363,23 @@ func (h *Host) guestReady(ctx context.Context) error {
 		return h.waitReady(ctx)
 	}
 	return h.waitForGuestReady(ctx)
+}
+
+// stopGuest resolves the guest teardown stopRunner performs: the live runner,
+// unless a test installed a substitute. A Host with no runner has nothing to
+// stop, which is not an error — a boot can fail before the VM is constructed.
+//
+// The runner's own stop error is deliberately dropped rather than returned:
+// teardown must continue to the cartridge detach whatever the VMM did, and the
+// runner has already logged the outcome.
+func (h *Host) stopGuest(ctx context.Context, budget time.Duration) error {
+	if h.stopVM != nil {
+		return h.stopVM(ctx, budget)
+	}
+	if r := h.activeRunner(); r != nil {
+		_ = r.StopWithTimeout(ctx, budget)
+	}
+	return nil
 }
 
 // New validates spec and returns a Host ready to Run. It performs no I/O and
@@ -1235,12 +1259,12 @@ func (h *Host) startRunner() error {
 	return nil
 }
 
-// stopRunner tears the VMM down, draining the guest first.
+// stopRunner tears the VMM down, draining the guest first. The budget is the
+// one the caller asked for — drainTimeout resolves the Spec's DrainTimeout,
+// falling back to DefaultDrainTimeout — so a guest given a longer drain on the
+// command line actually gets it here, not only on the unmount-eject path.
 func (h *Host) stopRunner() error {
-	if r := h.activeRunner(); r != nil {
-		_ = r.Stop()
-	}
-	return nil
+	return h.stopGuest(context.Background(), h.drainTimeout())
 }
 
 // startBootStage publishes coarse, human-friendly boot phase to the bootstage

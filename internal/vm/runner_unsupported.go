@@ -66,6 +66,13 @@ func (r *Runner) Wait(context.Context) error { return errors.New("unsupported pl
 // Stop stay harmless.
 func (r *Runner) Stop() error { return nil }
 
+// StopWithTimeout is the non-darwin stub; on darwin it drains the guest under
+// the given budget before escalating to a forced stop. It matches Stop rather
+// than reporting the unsupported error, for Stop's reason: it runs on a cleanup
+// path, nothing was started here, and an error would be noise. The budget is
+// discarded because there is no guest to give it to.
+func (r *Runner) StopWithTimeout(context.Context, time.Duration) error { return nil }
+
 // SetProgress is the non-darwin stub; on darwin it attaches the boot-progress
 // reporter. There is no boot to report on, so it discards p.
 func (r *Runner) SetProgress(Progress) {}
