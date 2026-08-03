@@ -2,6 +2,7 @@ package vmhost
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -108,4 +109,72 @@ func TestStopBootStageClearsTheBootPhaseAndKeepsAShutdownTerminal(t *testing.T) 
 			}
 		})
 	}
+}
+
+// cartridgeStep is a stand-in for StepCartridge, whose stop is the detach. It
+// is the last step to unwind, so its outcome decides whether the cartridge is
+// really released by the time teardown returns.
+func cartridgeStep(stopErr error) step {
+	return step{
+		name:  StepCartridge,
+		start: noCtx(func() error { return nil }),
+		stop:  func() error { return stopErr },
+	}
+}
+
+// teardownAfterDrain runs a teardown whose stack is [cartridge, boot-stage] —
+// the production order, so the boot-stage step unwinds first and the detach
+// last — with seed already published by the drain.
+func teardownAfterDrain(t *testing.T, seed func(*bootstage.Reporter) error, detachErr error) (bootstage.State, bool) {
+	t.Helper()
+	h, dir := bootStageHost(t)
+	h.obs = NopObserver{}
+
+	steps := []step{
+		cartridgeStep(detachErr),
+		{name: StepBootStage, start: noCtx(h.startBootStage), stop: h.stopBootStage},
+	}
+	if err := h.stack.run(context.Background(), steps, nil); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := seed(bootstage.NewReporter(dir)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	h.teardown()
+
+	st, ok := bootstage.Read(dir)
+	return st, ok
+}
+
+// The triple. A spin-down has three outcomes and each publishes something
+// different, so they are asserted together: the clean terminal is only honest
+// AFTER the detach, and the two failure paths must not produce it.
+func TestTeardownPublishesTheCleanTerminalOnlyAfterTheDetach(t *testing.T) {
+	t.Run("clean eject publishes the terminal once the cartridge is released", func(t *testing.T) {
+		st, ok := teardownAfterDrain(t, func(r *bootstage.Reporter) error { return r.Ejecting("") }, nil)
+		if !ok || st.Stage != bootstage.Stopped {
+			t.Fatalf("stage = %q (present=%v), want %q once the detach succeeded", st.Stage, ok, bootstage.Stopped)
+		}
+	})
+
+	t.Run("failed drain still publishes forced", func(t *testing.T) {
+		st, ok := teardownAfterDrain(t, func(r *bootstage.Reporter) error {
+			return r.Forced(bootstage.DetailForced)
+		}, nil)
+		if !ok || st.Stage != bootstage.Forced {
+			t.Fatalf("stage = %q (present=%v), want %q; a forced stop must not be overwritten", st.Stage, ok, bootstage.Forced)
+		}
+		if st.Detail != bootstage.DetailForced {
+			t.Errorf("detail = %q, want the dirty-filesystem warning", st.Detail)
+		}
+	})
+
+	t.Run("failed detach publishes neither", func(t *testing.T) {
+		st, ok := teardownAfterDrain(t, func(r *bootstage.Reporter) error { return r.Ejecting("") },
+			errors.New("resource busy"))
+		if ok && st.Stage == bootstage.Stopped {
+			t.Fatal("teardown said Stopped after the detach FAILED; the cartridge is still attached and this reads as safe to pull")
+		}
+	})
 }

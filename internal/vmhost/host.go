@@ -519,9 +519,65 @@ func (h *Host) Run(ctx context.Context) error {
 // teardown unwinds every started step. It marks the guest stopped first, so an
 // unmount-approval callback that fires while the steps are unwinding approves
 // (there is nothing left to protect) instead of vetoing our own detach.
+//
+// It also publishes the clean end of a spin-down, but only once the steps have
+// finished — see publishShutdownTerminal for why that cannot happen earlier,
+// and why this lives here rather than as a step of its own.
 func (h *Host) teardown() {
 	h.guestStopped.Store(true)
-	h.stack.teardown(h.onStopErr)
+
+	// Read the published stage BEFORE unwinding: stopBootStage clears a
+	// non-terminal shutdown stage on its way out, so by the time the stack has
+	// drained there is nothing left to tell us a spin-down was in progress.
+	spinningDown := h.shutdownInProgress()
+
+	detachFailed := false
+	h.stack.teardown(func(name string, err error) {
+		if name == StepCartridge {
+			detachFailed = true
+		}
+		h.onStopErr(name, err)
+	})
+
+	h.publishShutdownTerminal(spinningDown, detachFailed)
+}
+
+// shutdownInProgress reports whether a drain had published a non-terminal
+// shutdown stage when teardown began. A terminal one (Forced) is excluded: it
+// is already the final answer and must not be moved off.
+func (h *Host) shutdownInProgress() bool {
+	if h.cfg == nil || h.cfg.VMDir == "" {
+		return false
+	}
+	s, ok := bootstage.Read(h.cfg.VMDir)
+	return ok && s.Stage.IsShutdown() && !s.Stage.IsTerminal()
+}
+
+// publishShutdownTerminal records that the spin-down finished cleanly.
+//
+// It runs here rather than on the drain's success branch because the drain
+// returns while the cartridge is STILL ATTACHED — stopCartridge is the first
+// step and so unwinds last. Stopped is terminal and transitions are monotonic,
+// so publishing it early is not merely premature, it is unrecoverable: the
+// Ejecting stage can never be shown again. For a cartridge, which is a physical
+// object the user is about to pull out of a slot, a "safe now" signal that
+// fires before the volume is released is worse than no signal at all.
+//
+// It is deliberately NOT a lifecycle step. The step list owns resources — each
+// entry acquires something and gives it back — and a step whose only purpose is
+// to report would be the one thing that list has stayed free of.
+//
+// A failed detach publishes nothing. The cartridge is still attached, so the
+// honest state is the failure, and claiming Stopped there is the same defect
+// this function exists to prevent.
+func (h *Host) publishShutdownTerminal(spinningDown, detachFailed bool) {
+	if !spinningDown || detachFailed {
+		return
+	}
+	// The empty outcome means "not a forced power cut": a forced stop is
+	// decided by the drain and has already published its own terminal, which
+	// shutdownInProgress excluded above.
+	_ = h.shutdownReporter().Finish("")
 }
 
 // Drain performs the orderly spin-down: an ACPI power request, a genuine wait
