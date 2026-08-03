@@ -262,9 +262,14 @@ func bootTimeout(t *testing.T) time.Duration {
 	return defaultBootTimeout
 }
 
-// waitForRunning polls `br status --json` until it reports status "running"
-// (guest up + Incus reachable), the deadline passes, or the `br start` process
-// dies early. Returns nil once running.
+// waitForIncus polls `br ls --json` until it SUCCEEDS with valid JSON, the
+// deadline passes, or the `br start` process dies early. It returns that output.
+//
+// A successful `br ls` is the gate rather than `br status` reporting "running",
+// because "running" is guest liveness and goes true while provisioning is still
+// under way. Incus answering is the thing the caller actually needs. A failing
+// `br ls` — connection refused, not up yet, non-JSON — means keep waiting, which
+// is the normal state during first boot.
 func waitForIncus(t *testing.T, bin string, env []string, within time.Duration, startCmd *exec.Cmd, startOut *startLog) (string, error) {
 	t.Helper()
 	deadline := time.Now().Add(within)
