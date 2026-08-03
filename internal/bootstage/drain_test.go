@@ -108,12 +108,24 @@ func TestShutdownRankMonotonic(t *testing.T) {
 }
 
 func TestShutdownMessagesNonEmpty(t *testing.T) {
-	for _, s := range []Stage{Draining, Stopping, Flushing, Ejecting, Stopped, Forced} {
+	// Derived from shutdownOrder rather than listed by hand, so a stage added
+	// later is covered the moment it is declared. The hand-written list this
+	// replaces would have passed for a new stage that had no Message case at
+	// all — the test enumerated the stages it already knew about, which is no
+	// test of the next one.
+	//
+	// Forced is appended explicitly because it is deliberately unranked and so
+	// is absent from shutdownOrder; it is the only such stage.
+	stages := append(append([]Stage{}, shutdownOrder...), Forced)
+	for _, s := range stages {
 		if Message(s) == "" {
 			t.Errorf("Message(%q) is empty", s)
 		}
 		if Message(s) == startingMessage {
 			t.Errorf("Message(%q) = boot fallback %q", s, startingMessage)
+		}
+		if Message(s) == shuttingDownMessage {
+			t.Errorf("Message(%q) = generic fallback %q; it needs its own line", s, shuttingDownMessage)
 		}
 	}
 }

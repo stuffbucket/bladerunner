@@ -567,11 +567,16 @@ func (h *Host) shutdownInProgress() bool {
 // entry acquires something and gives it back — and a step whose only purpose is
 // to report would be the one thing that list has stayed free of.
 //
-// A failed detach publishes nothing. The cartridge is still attached, so the
-// honest state is the failure, and claiming Stopped there is the same defect
-// this function exists to prevent.
+// A failed detach publishes Stuck instead. The cartridge is still attached, so
+// claiming Stopped there is the same defect this function exists to prevent —
+// but staying silent is not neutral either: an eject that goes quiet reads as
+// finished, which invites exactly the pull that must not happen.
 func (h *Host) publishShutdownTerminal(spinningDown, detachFailed bool) {
-	if !spinningDown || detachFailed {
+	if !spinningDown {
+		return
+	}
+	if detachFailed {
+		_ = h.shutdownReporter().Stuck("")
 		return
 	}
 	// The empty outcome means "not a forced power cut": a forced stop is

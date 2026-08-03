@@ -97,7 +97,9 @@ const startingMessage = "Starting…"
 var stageOrder = []Stage{Boot, Setup, Connect, Incus, Ready}
 
 // terminalStages are the stages no further transition follows, per phase.
-var terminalStages = map[Stage]bool{Ready: true, Failed: true, Stopped: true, Forced: true}
+var terminalStages = map[Stage]bool{
+	Ready: true, Failed: true, Stopped: true, Forced: true, Stuck: true,
+}
 
 // rank orders the non-terminal stages of each phase so a producer can refuse to
 // move backwards. Ranks are per-phase: comparing a boot stage's rank with a

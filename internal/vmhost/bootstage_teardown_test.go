@@ -170,11 +170,28 @@ func TestTeardownPublishesTheCleanTerminalOnlyAfterTheDetach(t *testing.T) {
 		}
 	})
 
-	t.Run("failed detach publishes neither", func(t *testing.T) {
+	t.Run("failed detach publishes the stuck warning", func(t *testing.T) {
 		st, ok := teardownAfterDrain(t, func(r *bootstage.Reporter) error { return r.Ejecting("") },
 			errors.New("resource busy"))
 		if ok && st.Stage == bootstage.Stopped {
 			t.Fatal("teardown said Stopped after the detach FAILED; the cartridge is still attached and this reads as safe to pull")
+		}
+		if !ok || st.Stage != bootstage.Stuck {
+			t.Fatalf("stage = %q (present=%v), want %q; silence after a failed eject reads as finished", st.Stage, ok, bootstage.Stuck)
+		}
+		// Message is the whole user-visible text — neither consumer renders
+		// Detail — so it has to survive teardown AND tell the user what to do.
+		if msg := bootstage.Message(st.Stage); !strings.Contains(msg, "Do not remove") {
+			t.Errorf("Message = %q, want it to tell the user not to pull the cartridge", msg)
+		}
+	})
+
+	// The regressor: a detach that SUCCEEDS must never raise the warning, or it
+	// cries wolf on every clean eject and users learn to ignore it.
+	t.Run("successful detach never publishes the stuck warning", func(t *testing.T) {
+		st, ok := teardownAfterDrain(t, func(r *bootstage.Reporter) error { return r.Ejecting("") }, nil)
+		if ok && st.Stage == bootstage.Stuck {
+			t.Fatal("a clean eject published the stuck warning; the signal is worthless if it fires when nothing is wrong")
 		}
 	})
 }
