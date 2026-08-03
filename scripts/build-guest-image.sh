@@ -15,9 +15,11 @@
 #   qemu-utils         (qemu-img)
 #   libguestfs-tools   (guestfish, virt-customize, virt-sparsify)
 #
-# The script falls back to a qemu-nbd + chroot path only when libguestfs is
-# unavailable; the libguestfs path is preferred because it is unprivileged
-# inside a VM image and works on most GitHub-hosted runners without /dev/kvm.
+# The nbd + chroot path is what CI runs and what every published image is built
+# by: the release workflow passes --method nbd explicitly. libguestfs remains
+# selectable, but it is not the default in practice and it is not exercised —
+# its appliance failed on GitHub-hosted runners (#45), and on identical hardware
+# it measured 141s against the chroot path's 13s.
 
 set -euo pipefail
 

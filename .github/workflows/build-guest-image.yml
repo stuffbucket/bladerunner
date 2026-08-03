@@ -19,6 +19,11 @@ on:
     paths:
       - scripts/build-guest-image.sh
       - internal/provision/scripts/**
+      # The reviewed Debian digests the build starts from. Bumping the pin is
+      # the change that most needs to produce a new image, so it has to appear
+      # here; internal/imagebuild/workflow_inputs_test.go holds this list
+      # against the files the script actually reads.
+      - internal/imagebuild/basepins.sha512
       - .github/workflows/build-guest-image.yml
   workflow_dispatch:
 
