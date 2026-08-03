@@ -132,6 +132,31 @@ func TestZabblyCleanupRunsAfterTheUIBake(t *testing.T) {
 	}
 }
 
+// Nothing in the Zabbly apt source may depend on shell expansion.
+//
+// The source is written through a heredoc with a QUOTED delimiter, which is
+// what stops the recipe's own content being mangled — and equally stops any
+// $(...) inside it from ever running. An unexpanded `Architectures:
+// $(dpkg --print-architecture)` reaches apt verbatim, matches no architecture,
+// and every package in that source becomes unfindable. The build still passes,
+// because these steps are optional, so the image just quietly lacks the UI.
+//
+// Found by baking a real image and looking inside it, not by reading the code.
+func TestTheZabblySourceNeedsNoShellExpansion(t *testing.T) {
+	for _, s := range uiSteps(t) {
+		body := strings.Join(s.Argv, " ") + s.Content
+		if !strings.Contains(body, "zabbly") || !strings.Contains(body, "URIs:") {
+			continue
+		}
+		if strings.Contains(body, "$(") {
+			t.Errorf("the Zabbly source carries a command substitution that the quoted "+
+				"heredoc will never run, so apt reads it literally:\n%s", body)
+		}
+		return
+	}
+	t.Fatal("no step writes the Zabbly apt source")
+}
+
 // The drop-in must not outlive the files it points at.
 //
 // Apply continues past an optional failure, so a Zabbly outage skips the

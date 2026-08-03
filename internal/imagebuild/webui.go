@@ -48,12 +48,17 @@ const (
 // removes only the source, so every image published so far carries an
 // unadvertised third-party trust anchor, and that is not reproduced here.
 func webUISteps() []Step {
+	// Architectures is deliberately omitted. apt defaults it to the guest's own
+	// dpkg architecture, which is exactly what is wanted, and stating it needed
+	// a $(dpkg --print-architecture) that the quoted heredoc below never runs —
+	// apt then read the substitution literally, matched no architecture, and
+	// found no package. The build still passed, because these steps are
+	// optional, so the image simply had no web UI in it.
 	source := fmt.Sprintf(`Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
 Suites: %s
 Components: main
-Architectures: $(dpkg --print-architecture)
 Signed-By: %s
 `, zabblySuite, zabblyKeyPath)
 
@@ -67,14 +72,15 @@ Signed-By: %s
 					"/etc/apt/keyrings", zabblyKeyURL, zabblyKeyPath)},
 		},
 		{
-			Kind:     StepRun,
+			Kind:     StepWriteFile,
 			Desc:     "add the Zabbly archive for the web UI",
 			Optional: true,
-			// A heredoc rather than a write-file step: the Architectures line
-			// is resolved by dpkg inside the guest, so the guest's own view of
-			// its architecture decides, not the builder's.
-			Argv: []string{"/bin/sh", "-c",
-				fmt.Sprintf("cat > %s <<'ZABBLY'\n%sZABBLY", zabblySourcePath, source)},
+			// Written directly rather than through a shell heredoc. Nothing in
+			// the content needs expanding now, and the heredoc form is what let
+			// an unrunnable $(...) sit in the file looking like it worked.
+			Path:    zabblySourcePath,
+			Mode:    aptConfMode,
+			Content: source,
 		},
 		{
 			Kind:     StepRun,
