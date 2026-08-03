@@ -3,6 +3,8 @@ package imagebuild
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -173,5 +175,24 @@ func TestRunHostCommandReportsWhatTheToolSaid(t *testing.T) {
 func TestRunHostCommandRefusesAnEmptyArgv(t *testing.T) {
 	if err := runHostCommand(t.Context(), nil); err == nil {
 		t.Error("an empty command was accepted")
+	}
+}
+
+// The output's directory must exist before the compress phase writes the
+// partial into it. qemu-img does not create parents, so a bake into a path
+// whose directory is absent fails AFTER fetching and customizing — several
+// minutes and several hundred megabytes in, on a mistake knowable at the start.
+//
+// The shell build created it; the Go path did not, and this was found by
+// running the command a user would run rather than by reading either.
+func TestBakeCreatesTheOutputDirectory(t *testing.T) {
+	nested := filepath.Join(t.TempDir(), "does", "not", "exist", "guest.qcow2")
+	p := planFor(t, t.TempDir(), nested, 8)
+
+	if err := Bake(t.Context(), p, (&recordingBake{}).deps()); err != nil {
+		t.Fatalf("Bake: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(nested)); err != nil {
+		t.Errorf("the bake did not create the output directory: %v", err)
 	}
 }

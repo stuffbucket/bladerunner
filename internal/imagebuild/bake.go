@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // BakeDeps are the operations a bake performs. They are injected so the
@@ -35,6 +36,12 @@ type BakeDeps struct {
 func Bake(ctx context.Context, p BakePlan, deps BakeDeps) error {
 	if err := deps.validate(); err != nil {
 		return err
+	}
+	// qemu-img does not create parent directories, so the compress phase would
+	// fail writing the partial — several minutes and several hundred megabytes
+	// after a mistake that was knowable before any of it started.
+	if err := os.MkdirAll(filepath.Dir(p.OutputPath), guestDirMode); err != nil {
+		return fmt.Errorf("create the output directory for %s: %w", p.OutputPath, err)
 	}
 	for _, phase := range p.Phases() {
 		if deps.Log != nil {

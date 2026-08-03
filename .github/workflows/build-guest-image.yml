@@ -17,13 +17,12 @@ on:
   push:
     branches: [main]
     paths:
-      - scripts/build-guest-image.sh
+      # The bake is Go now, so its inputs are the package that defines it and
+      # the assets it installs. Bumping the Debian pin lives in basepins.sha512
+      # inside that package, and is the change that most needs to rebuild.
+      - internal/imagebuild/**
       - internal/provision/scripts/**
-      # The reviewed Debian digests the build starts from. Bumping the pin is
-      # the change that most needs to produce a new image, so it has to appear
-      # here; internal/imagebuild/workflow_inputs_test.go holds this list
-      # against the files the script actually reads.
-      - internal/imagebuild/basepins.sha512
+      - cmd/bladerunner/disk.go
       - .github/workflows/build-guest-image.yml
   workflow_dispatch:
 
@@ -47,6 +46,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
       - name: Install host tooling
         run: |
           sudo apt-get update
@@ -65,16 +70,26 @@ jobs:
         run: |
           mkdir -p out
           OUT="out/bladerunner-guest-${{ matrix.arch }}.qcow2"
-          # Force the qemu-nbd + chroot customize path: libguestfs 1.52 on the
+          go build -o bin/br ./cmd/bladerunner
+
+          # bake writes its result into a user disk manifest, so it needs one.
+          # Forking the builtin gives a per-arch disk with nothing else in it.
+          sudo ./bin/br disk new ci-guest --from debian-trixie-gui
+
+          # Force the qemu-nbd + chroot mechanic: libguestfs 1.52 on the
           # GitHub-hosted runners fails its appliance network with
           # "passt exited with status 1", which broke every prior build (#45).
           # The chroot path runs apt over the host network and avoids it.
-          sudo bash scripts/build-guest-image.sh \
+          sudo ./bin/br disk bake ci-guest \
             --arch ${{ matrix.arch }} \
-            --method nbd \
+            --method native \
             --output "${OUT}"
+
+          # The sidecar the release publishes. bake reports the same digest on
+          # stdout; recomputing it here keeps the file's format in one place.
+          sudo chown "$(id -u):$(id -g)" "${OUT}"
+          ( cd out && sha256sum "$(basename "${OUT}")" > "$(basename "${OUT}").sha256" )
           echo "out=${OUT}" >> "${GITHUB_OUTPUT}"
-          sudo chown "$(id -u):$(id -g)" "${OUT}" "${OUT}.sha256"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
