@@ -438,6 +438,16 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(err)
 	}
 
+	// Refuse a disk bake cannot record into BEFORE anything is built. The
+	// manifest shape is known the moment it is loaded, and this check used to
+	// sit after the build had already downloaded, customized, compressed and
+	// renamed a qcow2 into --output — so the user paid a full build for a
+	// guaranteed refusal, and any file already at that path was replaced by an
+	// image the command then declined to reference.
+	if err := bakePreflight(m, name, arch); err != nil {
+		return jsonOrError(err)
+	}
+
 	// Decide HOW to build before checking any one mechanic's tools. The probe
 	// establishes what this host can actually do — root, a loop device, a
 	// matching architecture, a libguestfs that really launches — so an
@@ -505,12 +515,9 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(err)
 	}
 
-	// Record the result back into the manifest. If the disk uses per-arch
-	// images, point this arch at the freshly built file + digest. If it is a
-	// hosted/path disk, only stamp the digest is not meaningful, so refuse.
-	if m.Image.Arches == nil {
-		return jsonOrError(fmt.Errorf("disk %q is not a per-arch image disk; bake only supports image.arches disks", name))
-	}
+	// Record the result back into the manifest. bakePreflight has already
+	// established that this disk has a slot for this architecture, so the only
+	// failures left here are ones the build itself produced.
 	m.Image.Arches[arch] = disk.ArchImage{URL: "file://" + absOut, SHA256: digest}
 	m.Version = time.Now().Format("2006.01.02")
 	if err := m.Validate(); err != nil {
@@ -528,20 +535,36 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// buildDigest reads the image digest the build reported on stdout.
+// bakePreflight reports whether a bake of this disk for this architecture could
+// ever record its result, using only what the manifest already says.
 //
-// Stdout is the only source. An earlier version fell back to reading the
-// <output>.sha256 sidecar when stdout was empty, which could not happen on a
-// successful build — the build runs under `set -euo pipefail` and prints the
-// digest unconditionally once it has computed it, so exit 0 implies a digest on
-// stdout. Had it ever fired it would have read a sidecar with no evidence that
-// this build wrote it, pairing a fresh image with a digest left by an earlier
-// bake at the same path.
-//
-// Nothing is lost by removing it. The build assembles the image in its work
-// directory and renames it into place last, so the output and its sidecar are
-// either both fresh or the output was never written; there is no partial state
-// to recover from. A missing digest now fails loudly instead.
+// It exists to run before the build rather than after it. Everything it checks
+// is knowable at load time, and a build takes minutes, several hundred
+// megabytes, and — because the script renames its output into place — replaces
+// whatever was at --output. Refusing afterwards spends all three on an answer
+// that was available at the start.
+func bakePreflight(m *disk.Manifest, name, arch string) error {
+	if m.Image.Arches == nil {
+		return fmt.Errorf("disk %q is not a per-arch image disk; bake only supports image.arches disks", name)
+	}
+	if _, ok := m.Image.Arches[arch]; !ok {
+		return fmt.Errorf("disk %q has no image.arches entry for %s; add one before baking (it has %s)",
+			name, arch, strings.Join(sortedArches(m), ", "))
+	}
+	return nil
+}
+
+// sortedArches lists the architectures a manifest carries, in a stable order so
+// the error above reads the same way twice.
+func sortedArches(m *disk.Manifest) []string {
+	out := make([]string, 0, len(m.Image.Arches))
+	for a := range m.Image.Arches {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // buildDigest extracts the built image's SHA-256 from the build's stdout.
 //
 // The digest is the LAST line the script prints, not the whole stream. The nbd
@@ -552,6 +575,15 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 // It is deliberately the last line rather than "the first line that looks like
 // a digest": the script emits it as its final act, and searching would let some
 // future mid-build digest win over the real one.
+//
+// Stdout is also the only source. An earlier version fell back to the
+// <output>.sha256 sidecar when stdout was empty, which could not happen on a
+// successful build — the script runs under `set -euo pipefail` and prints the
+// digest unconditionally once computed, so exit 0 implies a digest. Had it ever
+// fired it would have read a sidecar with no evidence that this build wrote it,
+// pairing a fresh image with a digest left by an earlier bake at the same path.
+// Nothing is lost by removing it: the image is assembled in the work directory
+// and renamed into place last, so there is no partial state to recover from.
 func buildDigest(stdout []byte) (string, error) {
 	lines := strings.Split(strings.TrimRight(string(stdout), "\n"), "\n")
 	digest := strings.TrimSpace(lines[len(lines)-1])
