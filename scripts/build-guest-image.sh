@@ -206,6 +206,12 @@ qemu-img resize "${BASE_IMAGE}" "${TARGET_SIZE_GIB}G"
 
 # ----- customize ----------------------------------------------------------
 
+# The guest package set, declared ONCE. Both mechanics consume this: the two
+# used to restate it in their own syntax, which is a set that can drift while
+# both copies look correct. The comma form is derived rather than written out.
+GUEST_PACKAGES="incus incus-client socat jq openssh-server chrony"
+GUEST_PACKAGES_CSV="${GUEST_PACKAGES// /,}"
+
 INITRAMFS_MODULES='vmw_vsock_virtio_transport
 vhost_vsock'
 
@@ -219,7 +225,7 @@ if [[ ${USE_GUESTFISH} -eq 1 ]]; then
         # and apt-installing the Zabbly build would swap Debian's incus. The nbd
         # path bakes the UI as extracted static files; the libguestfs path keeps
         # the daemon only (dev convenience; CI uses --method nbd).
-        --install "incus,incus-client,socat,jq,openssh-server,chrony"
+        --install "${GUEST_PACKAGES_CSV}"
         --run-command "systemctl enable incus incus.socket ssh"
         # chrony swap (suspend-tuned makestep) + guest-local wake-heal watchdog.
         # Single source of truth: internal/provision/scripts/{chrony.conf,bladerunner-watchdog.{sh,service}}.
@@ -318,7 +324,7 @@ apt-get update
 # Core packages from Debian trixie main. Do NOT apt-install incus-ui-canonical:
 # it is not in main, and pulling it from Zabbly would swap Debian's incus to
 # satisfy its "Depends: incus". The UI is baked below as static files instead.
-apt-get install -y incus incus-client socat jq openssh-server chrony
+apt-get install -y ${GUEST_PACKAGES}
 systemctl enable incus incus.socket ssh
 # Incus web UI (best-effort, matches the cloud-init path): download the Zabbly
 # .deb and extract its static files to /opt/incus/ui WITHOUT installing the

@@ -21,17 +21,19 @@ func buildScriptPath(t *testing.T) string {
 	return path
 }
 
-// virtCustomizeInstall matches the libguestfs path's comma-separated list.
-var virtCustomizeInstall = regexp.MustCompile(`--install\s+"([^"]+)"`)
+// guestPackages matches the script's single declaration of the guest package
+// set. There used to be two lists — one per mechanic — and this test needed a
+// regex for each shape plus a counter to prove neither had silently stopped
+// matching. One declaration removes the drift it was policing and most of the
+// machinery that policed it.
+var guestPackages = regexp.MustCompile(`GUEST_PACKAGES="([^"]+)"`)
 
-// aptInstall matches the chroot path's space-separated apt-get invocation.
-var aptInstall = regexp.MustCompile(`apt-get install(?:\s+-[a-zA-Z-]+)*\s+([a-z0-9][a-z0-9 .+-]*)`)
-
-// The recipe now declares the package set, but the shell script still declares
-// its own — twice, once per mechanic. Until the script is deleted, all three
-// must agree, or a package added in one place silently produces images that
-// differ depending on which mechanic ran. That is precisely the drift this
-// package exists to end, so it is asserted rather than assumed.
+// The recipe declares the package set; until the script is deleted it restates
+// it, and the two must agree or the image depends on which mechanic ran.
+//
+// The script must also declare it ONCE. Two copies drifted in exactly the way
+// this package exists to end: the two mechanics could install different sets
+// while both looked correct.
 func TestRecipePackagesMatchTheBuildScript(t *testing.T) {
 	body, err := os.ReadFile(buildScriptPath(t))
 	if err != nil {
@@ -39,40 +41,26 @@ func TestRecipePackagesMatchTheBuildScript(t *testing.T) {
 	}
 	script := string(body)
 
-	want := slices.Clone(DefaultRecipe("2026.07.29").Packages)
+	declarations := guestPackages.FindAllStringSubmatch(script, -1)
+	if len(declarations) != 1 {
+		t.Fatalf("the script declares GUEST_PACKAGES %d times, want exactly 1; "+
+			"a second copy is a set the other mechanic can drift from", len(declarations))
+	}
+
+	want := slices.Clone(DefaultRecipe(testVersion).Packages)
 	slices.Sort(want)
-
-	found := 0
-	for _, m := range virtCustomizeInstall.FindAllStringSubmatch(script, -1) {
-		got := splitSorted(m[1], ",")
-		if !slices.Contains(got, "incus") {
-			continue // Some other --install; only the guest stack is in scope.
-		}
-		found++
-		if !slices.Equal(got, want) {
-			t.Errorf("virt-customize --install packages = %v, recipe = %v", got, want)
-		}
+	if got := splitSorted(declarations[0][1], " "); !slices.Equal(got, want) {
+		t.Errorf("script packages = %v, recipe = %v", got, want)
 	}
 
-	for _, m := range aptInstall.FindAllStringSubmatch(script, -1) {
-		got := splitSorted(m[1], " ")
-		// The script also apt-installs unrelated things (the Zabbly UI download,
-		// for one). Only the line carrying the guest stack is comparable.
-		if !slices.Contains(got, "incus") || slices.Contains(got, "incus-ui-canonical") {
-			continue
+	// Both mechanics must consume that declaration rather than restate it.
+	for _, use := range []string{
+		`--install "${GUEST_PACKAGES_CSV}"`,
+		`apt-get install -y ${GUEST_PACKAGES}`,
+	} {
+		if !strings.Contains(script, use) {
+			t.Errorf("no mechanic uses %s; a restated list can drift from the declaration", use)
 		}
-		found++
-		if !slices.Equal(got, want) {
-			t.Errorf("chroot apt-get install packages = %v, recipe = %v", got, want)
-		}
-	}
-
-	// A regex that silently stops matching would turn this test into a
-	// no-op that still passes, so require both mechanics to have been seen.
-	const mechanics = 2
-	if found < mechanics {
-		t.Errorf("found %d package list(s) in the build script, want %d (one per mechanic); "+
-			"the extraction pattern has probably drifted from the script", found, mechanics)
 	}
 }
 
