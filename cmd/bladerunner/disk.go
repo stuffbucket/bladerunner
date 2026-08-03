@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +20,8 @@ import (
 )
 
 const (
-	// defaultBakeSizeGiB is the working image size passed to build-guest-image.sh.
+	// defaultBakeSizeGiB is the size the working image is grown to before the
+	// recipe is applied.
 	defaultBakeSizeGiB = 8
 	// defaultBakeTimeoutMin caps how long a bake build may run.
 	defaultBakeTimeoutMin = 60
@@ -175,12 +173,14 @@ alone. Use --from <disk> to fork an existing catalog disk's image and sizing;
 var diskBakeCmd = &cobra.Command{
 	Use:   "bake <name>",
 	Short: "Build a disk's qcow2 and record its SHA-256",
-	Long: `Build a disk's guest qcow2 via scripts/build-guest-image.sh, then record the
-resulting SHA-256 and image path back into the user manifest.
+	Long: `Build a disk's guest qcow2, then record the resulting SHA-256 and image
+path back into the user manifest.
 
-This is a host-side developer action: it requires bash, qemu-img, and the build
-script's dependencies (libguestfs-tools, likely sudo). Builtin disks are
-read-only; fork one first with 'br disk new <name> --from <builtin>'.`,
+This is a host-side developer action. It needs qemu-img, and the mechanic it
+selects decides the rest: the native path wants Linux, root and an nbd device;
+the libguestfs path wants neither root nor a device but does want a working
+appliance. Builtin disks are read-only; fork one first with
+'br disk new <name> --from <builtin>'.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDiskBake,
 }
@@ -360,57 +360,7 @@ func runDiskNew(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// Script method names, as understood by scripts/build-guest-image.sh.
-//
-// The names differ from the Go ones because the script names each path after
-// the tool it reaches for, while internal/imagebuild names it after what it
-// does. Mapping here keeps that vocabulary mismatch in one place until the
-// mechanics move into Go and the script goes away.
-const (
-	// scriptMethodNative is the script's qemu-nbd + chroot path.
-	scriptMethodNative = "nbd"
-	// scriptMethodAppliance is the script's libguestfs path.
-	scriptMethodAppliance = "guestfish"
-)
-
-// scriptMethodFor translates a selected mechanic into the build script's own
-// --method vocabulary.
-//
-// It is deliberately total and returns an error for anything unmapped: passing
-// an empty --method through would let the script silently apply its own default,
-// which is how a deliberate selection could turn into a different build than the
-// one the probe chose.
-func scriptMethodFor(m imagebuild.Method) (string, error) {
-	switch m {
-	case imagebuild.MethodNative:
-		return scriptMethodNative, nil
-	case imagebuild.MethodAppliance:
-		return scriptMethodAppliance, nil
-	case imagebuild.MethodVM:
-		return "", fmt.Errorf("building inside a bladerunner VM is not implemented yet, so %q cannot be baked on macOS; "+
-			"build on a Linux host (or in WSL2), or use the published guest image from the guest-image-latest release", imagebuild.MethodVM)
-	default:
-		return "", fmt.Errorf("no build script equivalent for method %q", m)
-	}
-}
-
-// buildEnv returns the environment for the build subprocess.
-//
-// The appliance mechanic needs the same libguestfs settings the capability
-// probe used. Without them the two disagree: the probe boots an appliance
-// successfully, then the build fails on the aarch64 defect those settings
-// exist to work around. The native path boots no appliance, so it is left
-// alone rather than being loaded with settings that would mislead anyone
-// reading a build log.
-func buildEnv(base []string, m imagebuild.Method) []string {
-	if m == imagebuild.MethodAppliance {
-		return imagebuild.ApplianceEnv(base)
-	}
-	return base
-}
-
-// runDiskBake builds the disk's qcow2 and records its SHA-256. The branches are
-// sequential preflight + shell-out + manifest rewrite, not nested logic.
+// runDiskBake builds the disk's qcow2 and records its SHA-256.
 func runDiskBake(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	if !disk.ValidName(name) {
@@ -457,21 +407,9 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	for _, w := range sel.Warnings {
 		logging.L().Warn("guest image build: falling back", "reason", w)
 	}
-	scriptMethod, err := scriptMethodFor(sel.Method)
-	if err != nil {
-		return jsonOrError(err)
-	}
-
-	// Preflight tools.
-	if _, err := exec.LookPath("bash"); err != nil {
-		return jsonOrError(fmt.Errorf("bash not found in PATH (required to run the build script): %w", err))
-	}
+	// Preflight the host tool the bake shells out to. Everything else it needs
+	// is inside the mechanic, which the probe above has already vetted.
 	if err := vm.RequireQemuImg(); err != nil {
-		return jsonOrError(err)
-	}
-
-	scriptPath, err := resolveBuildScript()
-	if err != nil {
 		return jsonOrError(err)
 	}
 
@@ -489,23 +427,34 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 
 	if !jsonOutput {
 		fmt.Printf("Baking %s (%s) -> %s\n", value(name), arch, subtle(absOut))
-		fmt.Println(subtle("This is a host-side dev build; it needs libguestfs-tools and likely sudo."))
 	}
 
-	build := exec.CommandContext(ctx, "bash", scriptPath,
-		"--arch", arch,
-		"--output", absOut,
-		"--method", scriptMethod,
-		"--size", strconv.Itoa(diskBakeFlags.size),
-		"--debian-release", diskBakeFlags.release)
-	build.Stderr = os.Stderr // the script's own log() goes to stderr; the digest is stdout's last line
-	build.Env = buildEnv(os.Environ(), sel.Method)
-	out, err := build.Output()
+	work, err := os.MkdirTemp("", "bladerunner-bake-")
 	if err != nil {
-		return jsonOrError(fmt.Errorf("build-guest-image.sh failed: %w", err))
+		return jsonOrError(fmt.Errorf("create a work directory for the bake: %w", err))
+	}
+	defer func() { _ = os.RemoveAll(work) }()
+
+	release, err := imagebuild.BaseRelease(arch)
+	if err != nil {
+		return jsonOrError(err)
+	}
+	recipe := imagebuild.DefaultRecipe(imagebuild.BuildVersion(time.Now()))
+	plan, err := imagebuild.NewBakePlan(release, recipe, work, absOut, diskBakeFlags.size)
+	if err != nil {
+		return jsonOrError(err)
 	}
 
-	digest, err := buildDigest(out)
+	deps := imagebuild.LinuxBakeDeps(work, func(line string) {
+		if !jsonOutput {
+			fmt.Println(subtle("  " + line))
+		}
+	})
+	if err := imagebuild.Bake(ctx, plan, deps); err != nil {
+		return jsonOrError(fmt.Errorf("bake %s: %w", name, err))
+	}
+
+	digest, err := util.FileSHA256(absOut)
 	if err != nil {
 		return jsonOrError(err)
 	}
@@ -553,60 +502,4 @@ func sortedArches(m *disk.Manifest) []string {
 	}
 	slices.Sort(out)
 	return out
-}
-
-// buildDigest extracts the built image's SHA-256 from the build's stdout.
-//
-// The digest is the LAST line the script prints, not the whole stream. The nbd
-// mechanic runs apt inside a chroot and does not redirect it, so package output
-// shares this stream; only the script's own log() goes to stderr. Taking the
-// whole stream rejected builds that had already succeeded.
-//
-// It is deliberately the last line rather than "the first line that looks like
-// a digest": the script emits it as its final act, and searching would let some
-// future mid-build digest win over the real one.
-//
-// Stdout is also the only source. An earlier version fell back to the
-// <output>.sha256 sidecar when stdout was empty, which could not happen on a
-// successful build — the script runs under `set -euo pipefail` and prints the
-// digest unconditionally once computed, so exit 0 implies a digest. Had it ever
-// fired it would have read a sidecar with no evidence that this build wrote it,
-// pairing a fresh image with a digest left by an earlier bake at the same path.
-// Nothing is lost by removing it: the image is assembled in the work directory
-// and renamed into place last, so there is no partial state to recover from.
-func buildDigest(stdout []byte) (string, error) {
-	lines := strings.Split(strings.TrimRight(string(stdout), "\n"), "\n")
-	digest := strings.TrimSpace(lines[len(lines)-1])
-	if digest == "" {
-		return "", errors.New("the build reported no digest on stdout")
-	}
-	if !disk.ValidSHA256(digest) {
-		return "", fmt.Errorf("the build reported %q, which is not a valid sha256", digest)
-	}
-	return digest, nil
-}
-
-// resolveBuildScript locates scripts/build-guest-image.sh relative to the
-// executable or the current working directory (it is a dev-time host script).
-func resolveBuildScript() (string, error) {
-	const rel = "scripts/build-guest-image.sh"
-	candidates := []string{}
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(dir, rel),
-			filepath.Join(dir, "..", rel),
-			filepath.Join(dir, "..", "..", rel),
-		)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(wd, rel))
-	}
-	candidates = append(candidates, rel)
-	for _, c := range candidates {
-		if util.FileExists(c) {
-			return c, nil
-		}
-	}
-	return "", fmt.Errorf("could not find %s near the executable or cwd; run 'br disk bake' from the bladerunner repo (it needs the build script and libguestfs-tools)", rel)
 }
