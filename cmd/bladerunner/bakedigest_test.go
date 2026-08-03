@@ -60,3 +60,50 @@ func TestBuildDigestComesOnlyFromStdout(t *testing.T) {
 		})
 	}
 }
+
+// The build's stdout is NOT just the digest, whatever disk.go's comment used to
+// say. The nbd mechanic runs apt inside a chroot, and neither apt-get update nor
+// apt-get install has its stdout redirected (scripts/build-guest-image.sh), so
+// every package line lands in the same stream this parses. Only the script's own
+// logging goes to stderr, via log() at :71.
+//
+// Treating the whole stream as the digest therefore fails a build that
+// succeeded: the image is complete and renamed into place, and the bake then
+// reports "not a valid sha256" and stamps nothing. The digest is the last line
+// the script prints, so that is what this reads.
+//
+// CI never hit this because the release workflow invokes the script directly
+// rather than through `br disk bake`. It is reachable only by a user running the
+// documented command, which is the worst place to leave it.
+func TestBuildDigestIgnoresPrecedingBuildOutput(t *testing.T) {
+	const valid = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+
+	noisy := strings.Join([]string{
+		"Get:1 http://deb.debian.org/debian trixie InRelease [138 kB]",
+		"Reading package lists...",
+		"Setting up incus (6.0.4-2+deb13u9) ...",
+		valid,
+		"",
+	}, "\n")
+
+	got, err := buildDigest([]byte(noisy))
+	if err != nil {
+		t.Fatalf("buildDigest rejected a successful build's output: %v", err)
+	}
+	if got != valid {
+		t.Errorf("digest = %q, want %q", got, valid)
+	}
+}
+
+// A build whose last line is not a digest must still fail. Reading the last line
+// rather than the whole stream must not become "find a digest anywhere", or a
+// digest printed mid-build by some future step would be preferred over the real
+// one the script emits last.
+func TestBuildDigestStillRejectsATrailingNonDigest(t *testing.T) {
+	const valid = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+
+	trailing := valid + "\nE: Sub-process returned an error code\n"
+	if got, err := buildDigest([]byte(trailing)); err == nil {
+		t.Errorf("buildDigest returned %q for output ending in an error line, want an error", got)
+	}
+}

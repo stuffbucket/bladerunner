@@ -493,7 +493,7 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		"--method", scriptMethod,
 		"--size", strconv.Itoa(diskBakeFlags.size),
 		"--debian-release", diskBakeFlags.release)
-	build.Stderr = os.Stderr // script logs go to stderr; stdout is the bare digest
+	build.Stderr = os.Stderr // the script's own log() goes to stderr; the digest is stdout's last line
 	build.Env = buildEnv(os.Environ(), sel.Method)
 	out, err := build.Output()
 	if err != nil {
@@ -542,8 +542,19 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 // directory and renames it into place last, so the output and its sidecar are
 // either both fresh or the output was never written; there is no partial state
 // to recover from. A missing digest now fails loudly instead.
+// buildDigest extracts the built image's SHA-256 from the build's stdout.
+//
+// The digest is the LAST line the script prints, not the whole stream. The nbd
+// mechanic runs apt inside a chroot and does not redirect it, so package output
+// shares this stream; only the script's own log() goes to stderr. Taking the
+// whole stream rejected builds that had already succeeded.
+//
+// It is deliberately the last line rather than "the first line that looks like
+// a digest": the script emits it as its final act, and searching would let some
+// future mid-build digest win over the real one.
 func buildDigest(stdout []byte) (string, error) {
-	digest := strings.TrimSpace(string(stdout))
+	lines := strings.Split(strings.TrimRight(string(stdout), "\n"), "\n")
+	digest := strings.TrimSpace(lines[len(lines)-1])
 	if digest == "" {
 		return "", errors.New("the build reported no digest on stdout")
 	}
