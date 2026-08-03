@@ -1,6 +1,7 @@
 package imagebuild
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -93,23 +94,33 @@ func TestBasePinsFileNameMatchesTheEmbed(t *testing.T) {
 	}
 }
 
-// Both architectures the build supports must be pinned. A missing pin makes
-// FetchBase fail closed, which is correct, but it fails at build time on one
-// architecture only — and the release workflow builds them independently, so
-// the other would publish and the set would be half-updated.
-func TestBothArchesArePinned(t *testing.T) {
-	for _, arch := range []string{"arm64", "amd64"} {
-		release, err := BaseRelease(arch)
-		if err != nil {
-			t.Fatalf("BaseRelease(%q): %v", arch, err)
-		}
-		digest, err := release.PinnedDigest()
-		if err != nil {
-			t.Errorf("%s has no reviewed digest: %v", arch, err)
-			continue
-		}
-		if len(digest) != sha512HexLength {
-			t.Errorf("%s digest is %d hex characters, want %d", arch, len(digest), sha512HexLength)
-		}
+// The set of architectures the build supports must be DERIVED from the pins,
+// not listed beside them.
+//
+// A hand-written list is a check that can only ever cover what existed when it
+// was written: adding an architecture means editing the pin file and every
+// enumeration of it, and nothing fails when one is missed. That is the same
+// defect as a lint job that analyses one build, or a test that iterates the
+// stages it already knows — the failure is always an addition, and an
+// enumeration cannot see additions.
+//
+// So BaseRelease answers "is this architecture supported" by asking whether it
+// is pinned. Adding one becomes a single edit to basepins.sha512, and an
+// architecture that is not pinned cannot be built by construction rather than
+// by remembering.
+func TestBaseReleaseSupportsExactlyThePinnedArches(t *testing.T) {
+	saved := basePins
+	t.Cleanup(func() { basePins = saved })
+
+	// A pin set naming one architecture that no hardcoded list ever mentioned.
+	basePins = map[string]string{
+		fmt.Sprintf("debian-%s-%s-riscv64-%s.qcow2", debianRelease, debianVariant, debianStamp): strings.Repeat("a", sha512HexLength),
+	}
+
+	if _, err := BaseRelease("riscv64"); err != nil {
+		t.Errorf("BaseRelease rejected riscv64 although it is pinned: %v", err)
+	}
+	if _, err := BaseRelease("arm64"); err == nil {
+		t.Error("BaseRelease accepted arm64 although nothing pins it; the supported set is not derived from the pins")
 	}
 }
