@@ -9,6 +9,17 @@ import (
 	"path/filepath"
 )
 
+// Mechanic applies steps to an image in place. It is the ONE part of a bake
+// that needs a platform, and the one part there is currently only one of.
+//
+// It is a named type so a bake takes its mechanic as an argument rather than
+// finding one for itself. Today the only implementation mounts the image and
+// chroots into it, so there is nothing to choose between — but the alternative
+// shape, where the mechanic is selected by build tag inside the package, is how
+// this code came to advertise two mechanics that were never written. A
+// dependency that is passed in cannot be claimed without being supplied.
+type Mechanic func(ctx context.Context, basePath string, steps []Step) error
+
 // BakeDeps are the operations a bake performs. They are injected so the
 // ORCHESTRATION — which phases run, in what order, and what happens when one
 // fails — is testable without root, an nbd device, or a network. Those three
@@ -18,13 +29,32 @@ type BakeDeps struct {
 	Fetch func(ctx context.Context, r Release, dest string) error
 	// Run executes a host command, normally qemu-img.
 	Run func(ctx context.Context, argv []string) error
-	// Customize applies steps to the image in place. It is the mechanic, and
-	// the only part that needs a platform.
-	Customize func(ctx context.Context, basePath string, steps []Step) error
+	// Customize applies steps to the image in place.
+	Customize Mechanic
 	// Publish moves the finished image to its final name.
 	Publish func(from, to string) error
 	// Log receives one line per phase. Nil discards them.
 	Log func(string)
+}
+
+// NewBakeDeps assembles the operations of a bake around a mechanic.
+//
+// Everything except the mechanic works on any platform — fetching, running
+// qemu-img and renaming a file are not Linux-specific — so they are supplied
+// here once rather than duplicated per platform. HostMechanic provides the
+// remaining piece, or explains why this host has none.
+func NewBakeDeps(customize Mechanic, log func(string)) BakeDeps {
+	return BakeDeps{
+		Fetch: func(ctx context.Context, r Release, dest string) error {
+			// The empty baseURL means the real Debian mirror; only tests pass
+			// anything else, and a bake must not be able to.
+			return FetchBase(ctx, r, dest, "")
+		},
+		Run:       runHostCommand,
+		Customize: customize,
+		Publish:   PublishRename,
+		Log:       log,
+	}
 }
 
 // Bake performs a plan.

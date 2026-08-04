@@ -41,7 +41,12 @@ func TestBakeProducesAnImage(t *testing.T) {
 		t.Fatalf("NewBakePlan: %v", err)
 	}
 
-	if err := Bake(t.Context(), plan, LinuxBakeDeps(work, func(line string) { t.Log(line) })); err != nil {
+	logf := func(line string) { t.Log(line) }
+	mechanic, err := HostMechanic(work, logf)
+	if err != nil {
+		t.Fatalf("HostMechanic: %v", err)
+	}
+	if err := Bake(t.Context(), plan, NewBakeDeps(mechanic, logf)); err != nil {
 		t.Fatalf("Bake: %v", err)
 	}
 

@@ -42,7 +42,6 @@ func withBakeFlags(t *testing.T, out string) {
 	t.Cleanup(func() { diskBakeFlags = saved })
 	diskBakeFlags.arch = "arm64"
 	diskBakeFlags.output = out
-	diskBakeFlags.method = "auto"
 	diskBakeFlags.size = 8
 	diskBakeFlags.release = "trixie"
 	diskBakeFlags.timeoutMin = 1

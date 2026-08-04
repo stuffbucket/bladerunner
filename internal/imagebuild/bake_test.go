@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -141,21 +142,49 @@ func TestBakePublishesTheCompletedPartial(t *testing.T) {
 	}
 }
 
-// The platform constructor must hand Bake a complete dependency set on every
-// platform, or Bake refuses before running a phase and the failure reads as a
-// programming mistake rather than as this platform lacking the mechanic.
+// NewBakeDeps must hand Bake a complete dependency set, or Bake refuses before
+// running a phase and the failure reads as a programming mistake rather than as
+// a missing piece of wiring.
 //
-// On Linux this is the real wiring. Elsewhere every operation is real except
-// Customize, which refuses — so the error names the one thing that genuinely
-// cannot run rather than an incomplete set.
-func TestLinuxBakeDepsIsComplete(t *testing.T) {
-	deps := LinuxBakeDeps(t.TempDir(), nil)
+// The mechanic is the only part that varies by platform, and it arrives as an
+// argument, so this holds everywhere without a build tag.
+func TestNewBakeDepsIsComplete(t *testing.T) {
+	deps := NewBakeDeps(func(context.Context, string, []Step) error { return nil }, nil)
 
 	if err := deps.validate(); err != nil {
-		t.Fatalf("the platform constructor returned an incomplete set: %v", err)
+		t.Fatalf("NewBakeDeps returned an incomplete set: %v", err)
 	}
 	if deps.Fetch == nil || deps.Run == nil || deps.Customize == nil || deps.Publish == nil {
 		t.Error("a dependency is nil despite validate passing")
+	}
+}
+
+// A host with no mechanic must fail before a bake starts, not inside one.
+//
+// HostMechanic returning an error rather than a mechanic that refuses when
+// called is what buys this: the caller cannot reach Bake, so it cannot fetch
+// 321 MB and resize it before finding out there was nothing to run.
+func TestHostMechanicRefusesBeforeAnyWork(t *testing.T) {
+	mechanic, err := HostMechanic(t.TempDir(), nil)
+
+	if runtime.GOOS == "linux" {
+		if err != nil {
+			t.Fatalf("Linux has the mechanic but HostMechanic refused: %v", err)
+		}
+		if mechanic == nil {
+			t.Error("HostMechanic returned no mechanic and no error")
+		}
+		return
+	}
+
+	if err == nil {
+		t.Fatalf("%s has no mechanic but HostMechanic returned one", runtime.GOOS)
+	}
+	if mechanic != nil {
+		t.Error("HostMechanic returned both a mechanic and an error")
+	}
+	if !errors.Is(err, ErrUnsupportedHost) {
+		t.Errorf("error %q does not wrap ErrUnsupportedHost, so callers cannot tell it apart", err)
 	}
 }
 

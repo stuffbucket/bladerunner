@@ -26,13 +26,13 @@ type Options struct {
 	Log func(string)
 }
 
-// Customize reports that the native mechanic cannot run on this platform.
+// Customize reports that the mechanic cannot run on this platform.
 //
 // Mounting a Linux root filesystem and chrooting into it are both Linux
-// operations. On macOS the VM mechanic is the supported path, and policy in
-// Select already refuses to choose native here — this exists so the refusal is
-// also a compile-time guarantee rather than only a runtime one.
+// operations. CheckHost already refuses this host before a bake starts — this
+// exists so the refusal is a compile-time guarantee too, rather than only a
+// runtime one.
 func Customize(_ context.Context, _ Options) error {
-	return fmt.Errorf("%w: the native mechanic needs Linux to mount a guest root and chroot into it, but this host is %s",
-		ErrUnsupportedPlatform, runtime.GOOS)
+	return fmt.Errorf("%w: the mechanic needs Linux to mount a guest root and chroot into it, but this host is %s",
+		ErrUnsupportedHost, runtime.GOOS)
 }

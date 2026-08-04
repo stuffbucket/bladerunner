@@ -3,32 +3,19 @@
 package imagebuild
 
 import (
-	"context"
-	"errors"
+	"fmt"
+	"runtime"
 )
 
-// ErrBakeUnsupported reports that this platform has no native bake mechanic.
-var ErrBakeUnsupported = errors.New("the native bake mechanic needs Linux")
-
-// LinuxBakeDeps is the non-Linux counterpart. It returns a set whose Customize
-// refuses, rather than an incomplete set: Bake validates its dependencies
-// before running any phase, so a nil Customize would report "bake needs a
-// Customize" — true, but it would read as a programming mistake rather than as
-// this platform not having the mechanic.
+// HostMechanic reports that this host has none.
 //
-// The other three operations are real. Fetching and compressing work anywhere,
-// and keeping them means the refusal comes from the one thing that genuinely
-// cannot run here.
-func LinuxBakeDeps(_ string, log func(string)) BakeDeps {
-	return BakeDeps{
-		Fetch: func(ctx context.Context, r Release, dest string) error {
-			return FetchBase(ctx, r, dest, "")
-		},
-		Run: runHostCommand,
-		Customize: func(context.Context, string, []Step) error {
-			return ErrBakeUnsupported
-		},
-		Publish: PublishRename,
-		Log:     log,
-	}
+// It returns an error rather than a mechanic that refuses when called. The
+// difference matters: a bake cannot begin, so it cannot fetch 321 MB and resize
+// it before discovering there was never anything to run. The message names the
+// way out, because the usual reader is on a Mac and the answer is a Linux VM
+// they most likely already have.
+func HostMechanic(_ string, _ func(string)) (Mechanic, error) {
+	return nil, fmt.Errorf("%w: mounting a guest root and chrooting into it needs Linux, but this host is %s; "+
+		"build in a Linux VM (colima, lima, UTM) or WSL2, or use the published image from the guest-image-latest release",
+		ErrUnsupportedHost, runtime.GOOS)
 }

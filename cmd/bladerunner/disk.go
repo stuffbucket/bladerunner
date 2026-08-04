@@ -14,7 +14,6 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/imagebuild"
-	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/util"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
@@ -198,7 +197,6 @@ var diskBakeFlags struct {
 	arch       string
 	size       int
 	release    string
-	method     string
 	timeoutMin int
 }
 
@@ -211,11 +209,8 @@ func init() {
 
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.output, "output", "", "Output qcow2 path (default: <disks-dir>/<name>-<arch>.qcow2)")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.arch, "arch", runtime.GOARCH, "Target architecture to build")
-	diskBakeCmd.Flags().IntVar(&diskBakeFlags.size, "size", defaultBakeSizeGiB, "Working image size in GiB passed to the build script")
+	diskBakeCmd.Flags().IntVar(&diskBakeFlags.size, "size", defaultBakeSizeGiB, "Working image size the base is grown to before customizing")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.release, "debian-release", "trixie", "Debian release to build from")
-	diskBakeCmd.Flags().StringVar(&diskBakeFlags.method, "method", string(imagebuild.MethodAuto),
-		fmt.Sprintf("Customize method: %s|%s|%s|%s (%s prefers the fastest mechanic that will actually work here)",
-			imagebuild.MethodAuto, imagebuild.MethodNative, imagebuild.MethodAppliance, imagebuild.MethodVM, imagebuild.MethodAuto))
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.timeoutMin, "timeout", defaultBakeTimeoutMin, "Build timeout in minutes")
 
 	diskCmd.AddCommand(diskNewCmd, diskBakeCmd)
@@ -393,19 +388,12 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(err)
 	}
 
-	// Decide HOW to build before checking any one mechanic's tools. The probe
-	// establishes what this host can actually do — root, a loop device, a
-	// matching architecture, a libguestfs that really launches — so an
-	// unusable fast path is reported up front with the specific blocking
-	// condition, instead of failing halfway through a build.
-	want := imagebuild.Method(diskBakeFlags.method)
-	caps := imagebuild.Probe(cmd.Context(), want, arch)
-	sel, err := imagebuild.Select(want, arch, caps)
-	if err != nil {
+	// Establish that this host can build before doing any of the work. The
+	// probe reports what it can actually do — root, an nbd device, a matching
+	// architecture — so a host that cannot is refused up front with the
+	// specific blocking conditions, instead of failing part-way through.
+	if err := imagebuild.CheckHost(arch, imagebuild.Probe(arch)); err != nil {
 		return jsonOrError(err)
-	}
-	for _, w := range sel.Warnings {
-		logging.L().Warn("guest image build: falling back", "reason", w)
 	}
 	// Preflight the host tool the bake shells out to. Everything else it needs
 	// is inside the mechanic, which the probe above has already vetted.
@@ -445,12 +433,16 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(err)
 	}
 
-	deps := imagebuild.LinuxBakeDeps(work, func(line string) {
+	logf := func(line string) {
 		if !jsonOutput {
 			fmt.Println(subtle("  " + line))
 		}
-	})
-	if err := imagebuild.Bake(ctx, plan, deps); err != nil {
+	}
+	mechanic, err := imagebuild.HostMechanic(work, logf)
+	if err != nil {
+		return jsonOrError(err)
+	}
+	if err := imagebuild.Bake(ctx, plan, imagebuild.NewBakeDeps(mechanic, logf)); err != nil {
 		return jsonOrError(fmt.Errorf("bake %s: %w", name, err))
 	}
 
