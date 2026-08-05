@@ -22,7 +22,13 @@ GO_VERSION ?= $(shell awk '/^go [0-9]/ {print $$2; exit}' go.mod)
 LINUX_CACHE_VOL ?= bladerunner-linux-gocache
 LINUX_MOD_VOL ?= bladerunner-linux-gomodcache
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# --match 'v[0-9]*' restricts this to PRODUCT tags. The repo also publishes
+# guest-image-vYYYY.MM.DD releases, and those are almost always more recent
+# than the last product tag, so a bare `git describe --tags` stamps the binary
+# with an image build date -- `br --version` then reports a qcow2 release.
+# Release builds go through goreleaser, which uses the tag it is building, so
+# only local and CI builds were affected.
+VERSION ?= $(shell git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
