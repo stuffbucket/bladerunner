@@ -5,7 +5,15 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
+
+// saveGenerationMode is the mode of the files in a saved-state generation: the
+// sidecar, and any staged copy of the state file a transfer has to make. Both
+// carry the private state of a guest — its host paths, and its RAM — so both
+// stay owner-only.
+const saveGenerationMode = 0o600
 
 // SaveMetadata is the sidecar written next to a VZ saved-state file. It records
 // the hardware configuration the snapshot requires — so a restore rebuilds a
@@ -64,7 +72,62 @@ func writeSaveMetadata(savePath string, cpus uint, memGiB uint64, diskGiB int, g
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(SaveMetadataPath(savePath), b, 0o600)
+	// Through internal/util, the owner of atomic file writes: a reader of the
+	// sidecar sees either the whole previous generation's file or the whole new
+	// one, never the half-written file a plain os.WriteFile can leave when the
+	// host dies or the disk fills mid-write. A half-written sidecar parses as
+	// nothing and would take a restore down the "no usable metadata" path.
+	return util.WriteFileAtomic(SaveMetadataPath(savePath), b, saveGenerationMode)
+}
+
+// publishSaveGeneration writes one saved-state generation — the VZ
+// machine-state file and the sidecar that describes it — as a single unit.
+// writeState writes the state file at statePath; writeSidecar writes the
+// sidecar beside it.
+//
+// A state file paired with a sidecar that does not describe it is worse than no
+// snapshot at all: the sidecar carries the disk-identity stamp that stops a
+// restore from pushing saved RAM into a disk image that has moved on since. So
+// the previous generation is removed FIRST — a new state can never inherit the
+// previous save's sidecar — and a failure at any step removes both files again,
+// leaving nothing that looks restorable and nothing to roll forward from.
+//
+// The state is written BEFORE the sidecar, not after. The stamp in the sidecar
+// must describe the disk as it stands once the RAM freeze is complete; stamping
+// first would assume nothing touches the image while VZ writes the state, which
+// is a claim about another component that no test here can hold (AGENTS.md
+// section 5.7), and a stamp taken too early makes every later restore refuse.
+// The window this ordering opens — a state file whose sidecar was never written
+// because the host died between the two — is closed at the other end instead: a
+// restore refuses a state file that has no sidecar rather than skipping the
+// disk check (see prepareRestore).
+func publishSaveGeneration(statePath string, writeState, writeSidecar func() error) error {
+	if err := removeSaveGeneration(statePath); err != nil {
+		return err
+	}
+	if err := writeState(); err != nil {
+		// VZ may have left a partial state file; it must not survive as an
+		// apparently restorable snapshot.
+		_ = removeSaveGeneration(statePath)
+		return err
+	}
+	if err := writeSidecar(); err != nil {
+		_ = removeSaveGeneration(statePath)
+		return fmt.Errorf("write saved-state metadata: %w", err)
+	}
+	return nil
+}
+
+// removeSaveGeneration removes a saved-state file and its sidecar together. A
+// file that is not there is not an error: the point is that neither half of the
+// generation remains, not that both were present.
+func removeSaveGeneration(statePath string) error {
+	for _, p := range []string{statePath, SaveMetadataPath(statePath)} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove saved state %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // diskStamp returns a SaveMetadata populated with the disk's identity fields
@@ -85,7 +148,10 @@ func diskStamp(diskPath string) (SaveMetadata, error) {
 }
 
 // LoadSaveMetadata reads the sidecar next to savePath. The returned error wraps
-// os.ErrNotExist when there is no sidecar (a save from before this feature).
+// os.ErrNotExist when there is no sidecar, which callers must treat as "this
+// saved state cannot be verified" rather than as "no checks needed": the
+// sidecar and the state file are published and moved as one generation, so a
+// state file without one is a generation that came apart.
 func LoadSaveMetadata(savePath string) (*SaveMetadata, error) {
 	b, err := os.ReadFile(SaveMetadataPath(savePath))
 	if err != nil {
