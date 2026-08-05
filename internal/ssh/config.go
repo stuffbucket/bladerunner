@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
+
+	"github.com/stuffbucket/bladerunner/internal/util"
 )
 
 // DefaultInstanceName is the instance that owns the legacy "Host bladerunner"
@@ -26,8 +29,22 @@ const instanceDirName = "config.d"
 // configFileName is the aggregator file inside Dir().
 const configFileName = "config"
 
-// dirPerm/filePerm are the permissions for the generated config tree. ssh
-// refuses to use a config file that is group/world writable.
+// configLockFileName is the flock claim serializing every read-modify-write of
+// the aggregator. It sits in Dir(), NOT in config.d, so the "config.d/*" Include
+// glob can never pick it up; the leading dot is a second guard, since glob(3)
+// does not match a leading dot with "*".
+const configLockFileName = ".config.lock"
+
+// aggregatorLockPath returns the claim guarding the aggregator file.
+func aggregatorLockPath() string {
+	return filepath.Join(Dir(), configLockFileName)
+}
+
+// dirPerm/filePerm are the permissions for the whole generated ssh tree: the
+// directory, the config files, the private key and the lock files. ssh refuses
+// to use a config file or a key that is group/world readable or writable, so one
+// pair of values covers every private file this package writes. The public key
+// is the single exception; see pubKeyPerm.
 const (
 	dirPerm  os.FileMode = 0o700
 	filePerm os.FileMode = 0o600
@@ -213,13 +230,22 @@ func validInstanceName(instance string) error {
 // fragments. Returns the path to the generated config file.
 //
 // Named instances must use WriteInstanceSSHConfig — writing this file is what
-// two instances used to clobber, since it is opened O_TRUNC and holds exactly
+// two instances used to clobber, since it is rewritten whole and holds exactly
 // one Host block.
+//
+// The aggregator claim is taken even though this function only ever writes the
+// whole file: a named instance is appending an Include to the SAME file under
+// the same claim, and a rewrite that races that append destroys it.
 func WriteSSHConfig(port int, user string, identityFile string) (string, error) {
 	configPath := ConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), dirPerm); err != nil {
 		return "", fmt.Errorf("create ssh config directory: %w", err)
 	}
+	lock, err := acquireLock(aggregatorLockPath())
+	if err != nil {
+		return "", err
+	}
+	defer lock.release()
 
 	params := ConfigParams{
 		Instance:       DefaultInstanceName,
@@ -240,9 +266,27 @@ func WriteSSHConfig(port int, user string, identityFile string) (string, error) 
 // WriteInstanceSSHConfig writes the ssh config fragment for a named instance to
 // config.d/<name> and makes sure the aggregator includes that directory.
 //
-// Each instance owns exactly one file, so the O_TRUNC write can no longer
+// Each instance owns exactly one file, so a whole-file rewrite can no longer
 // clobber another instance's settings the way a single shared config did.
 // Returns the path to the fragment.
+//
+// The fragment is published by rename, which means util.WriteFileAtomic briefly
+// creates "config.d/<name>.tmp-<random>" beside it — and "Include config.d/*"
+// matches that name. This is deliberate and safe, and
+// TestLeftoverStagingFileDoesNotBreakInclude holds the claim against the real
+// ssh client rather than asserting it here: WriteFileAtomic issues the whole
+// fragment in ONE write, so a temp file is either zero bytes (a valid empty
+// ssh_config) or a complete copy of the fragment (a duplicate Host block, which
+// ssh ignores because it takes the first value it obtains for a keyword). Neither
+// is a parse error, so even debris left by a killed process is inert.
+//
+// The alternative — writing the fragment in place — was strictly worse: it left
+// "config.d/<name>" ITSELF truncated inside the same window, and a killed
+// process left the instance's real config half written.
+//
+// The aggregator claim is NOT held across the fragment render. The fragment is a
+// file no other instance touches, and taking the claim here would nest with the
+// one ensureAggregatorInclude takes, which flock resolves by deadlocking.
 func WriteInstanceSSHConfig(instance string, port int, user string, identityFile string) (string, error) {
 	if err := validInstanceName(instance); err != nil {
 		return "", err
@@ -286,7 +330,28 @@ func WriteConfigFor(instance string, port int, user string, identityFile string)
 // did), a stub containing only the Include is written; if it exists but predates
 // per-instance configs, the Include is appended — appended, not rewritten, so
 // the existing default-instance block stays first and keeps winning.
+//
+// Read, decide and write are one critical section under the aggregator claim.
+// Unlocked, several named instances upgrading at once each read a file with no
+// Include and each append one, and a default-instance rewrite landing in the
+// middle of an append leaves a file the ssh client refuses outright.
+//
+// The claim MUST NOT be held by the caller: flock is per open file description,
+// so taking it twice from one goroutine deadlocks. WriteInstanceSSHConfig
+// therefore renders its own fragment (a file no other instance touches) before
+// calling this, not inside it.
 func ensureAggregatorInclude(params ConfigParams) error {
+	lock, err := acquireLock(aggregatorLockPath())
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+	return publishAggregatorInclude(params)
+}
+
+// publishAggregatorInclude is the body of ensureAggregatorInclude. The caller
+// must hold the aggregator claim.
+func publishAggregatorInclude(params ConfigParams) error {
 	path := params.AggregatorPath
 	existing, err := os.ReadFile(path)
 	switch {
@@ -298,33 +363,42 @@ func ensureAggregatorInclude(params ConfigParams) error {
 	if strings.Contains(string(existing), params.IncludeLine) {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, filePerm)
-	if err != nil {
-		return fmt.Errorf("open ssh config: %w", err)
-	}
-	defer func() { _ = f.Close() }()
+	// The append is built in memory and published in one rename, so the file a
+	// reader sees is either the old aggregator or the extended one, never a
+	// concatenation caught halfway.
+	var buf bytes.Buffer
+	buf.Write(existing)
 	// "Match all" first: the legacy file ends inside its Host block, and an
 	// Include there would only be processed for that host (see
 	// aggregatorTemplate).
-	if _, err := fmt.Fprintf(f, "\nMatch all\n%s\n", params.IncludeLine); err != nil {
+	fmt.Fprintf(&buf, "\nMatch all\n%s\n", params.IncludeLine)
+	if err := util.WriteFileAtomic(path, buf.Bytes(), filePerm); err != nil {
 		return fmt.Errorf("append ssh config include: %w", err)
 	}
 	return nil
 }
 
-// renderConfig executes tmplText into path, truncating any previous content.
+// renderConfig publishes tmplText, executed with params, as the whole contents
+// of path.
+//
+// The template is executed into MEMORY and the result published with one
+// rename. Executing straight into the destination (which is what this did, with
+// O_CREATE|O_WRONLY|O_TRUNC) leaves a window in which the visible file is empty
+// or holds half a Host block: a concurrent `br shell`, or the user's own ssh,
+// reads that, and a crash inside the window leaves it behind for good. A render
+// that fails now leaves the previous config byte-for-byte intact instead of
+// having already truncated it.
 func renderConfig(path, tmplText string, params ConfigParams) error {
 	tmpl, err := template.New("ssh_config").Parse(tmplText)
 	if err != nil {
 		return fmt.Errorf("parse ssh config template: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, filePerm)
-	if err != nil {
-		return fmt.Errorf("create ssh config file: %w", err)
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, params); err != nil {
+		return fmt.Errorf("render ssh config: %w", err)
 	}
-	defer func() { _ = f.Close() }()
-	if err := tmpl.Execute(f, params); err != nil {
-		return fmt.Errorf("write ssh config: %w", err)
+	if err := util.WriteFileAtomic(path, buf.Bytes(), filePerm); err != nil {
+		return fmt.Errorf("write ssh config %s: %w", path, err)
 	}
 	return nil
 }
