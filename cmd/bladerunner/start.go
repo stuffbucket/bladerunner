@@ -163,6 +163,15 @@ func runStartUnderHolder(spec vmhost.Spec) error {
 	ctx, stop := signalContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Refuse a binary VZ will not start a VM for, BEFORE spawning anything.
+	// Discovered later, this same fact costs the user the whole start budget
+	// staring at a cursor: the holder asks VZ for a machine, VZ refuses, and
+	// the explanation goes to a log file in the state directory while the
+	// terminal waits for a boot stage nothing will ever publish.
+	if err := vm.CheckSelfEntitlement(ctx); err != nil {
+		return err
+	}
+
 	if spec.StateDir == "" {
 		spec.StateDir = config.DefaultStateDir()
 	}
