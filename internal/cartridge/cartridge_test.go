@@ -21,6 +21,10 @@ type fakeRunner struct {
 	calls   [][]string
 	results []fakeResult
 	idx     int
+	// onCall, when set, runs before each result is returned. It lets a test
+	// give a faked hdiutil call its real side effect on the filesystem -- a
+	// convert that actually leaves a working copy behind, for instance.
+	onCall func(argv []string)
 }
 
 type fakeResult struct {
@@ -33,7 +37,11 @@ type fakeResult struct {
 const forceFlag = "-force"
 
 func (f *fakeRunner) run(_ context.Context, name string, args ...string) (string, string, error) {
-	f.calls = append(f.calls, append([]string{name}, args...))
+	argv := append([]string{name}, args...)
+	f.calls = append(f.calls, argv)
+	if f.onCall != nil {
+		f.onCall(argv)
+	}
 	if len(f.results) == 0 {
 		return "", "", nil
 	}

@@ -897,3 +897,52 @@ func TestOpenIsUnsupportedOffDarwin(t *testing.T) {
 		t.Fatalf("Close off darwin = %v, want ErrUnsupported", err)
 	}
 }
+
+// An attach whose unwind could not be confirmed must NOT have its working copy
+// unlinked, and must NOT have its claim released.
+//
+// This is the one unlink path the first pass of this change left ungated, and
+// it matters more than "a fresh conversion was wasted". clearStaleWorkingCopy
+// is the guard that refuses the NEXT boot when a working copy is attached but
+// unclaimed, and it keys on the file existing. Deleting the file here destroys
+// the evidence that guard needs, so the next boot would convert a fresh image
+// over the same path with no refusal while the old inode is still served to the
+// kernel. Releasing the claim as well turns both protections off at once.
+//
+// A .dmg source is required: that is the shape that produces a working copy at
+// all. A .sparseimage runs in place, so removeWorkingCopy is a no-op there and
+// the test would pass without proving anything.
+func TestOpenKeepsAWorkingCopyWhoseAttachMayStillBeLive(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "demo"+DMGExt)
+	if err := os.WriteFile(src, []byte("cartridge"), 0o600); err != nil {
+		t.Fatalf("write source image: %v", err)
+	}
+	work := WorkingCopyPath(src)
+
+	// convert succeeds and the fake leaves the working copy behind; attach then
+	// reports success with an unparseable plist, so no device can be read from
+	// it, and the recovery probe fails so the unwind cannot be confirmed either.
+	// That is "unknown", not "detached".
+	f := &fakeRunner{results: []fakeResult{
+		{},
+		{stdout: "not a plist at all"},
+		{err: errors.New("hdiutil info failed")},
+	}}
+	f.onCall = func(argv []string) {
+		if len(argv) > 1 && argv[1] == cmdConvert {
+			_ = os.WriteFile(work, []byte("working copy"), 0o600)
+		}
+	}
+
+	_, err := open(context.Background(), f, src, OpenOptions{})
+	if err == nil {
+		t.Fatal("open succeeded although the attach could not be unwound")
+	}
+	if !errors.Is(err, ErrMayStillBeAttached) {
+		t.Errorf("error does not report unknown attachment state: %v", err)
+	}
+	if _, statErr := os.Stat(work); statErr != nil {
+		t.Errorf("the working copy of a possibly-live attachment was unlinked: %v", statErr)
+	}
+}

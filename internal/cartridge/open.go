@@ -155,11 +155,27 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 		policy:     opts.Policy,
 	})
 	if err != nil {
-		// Nothing attached, so the working copy backs no volume and the
-		// conversion's output is pure waste — but a removal that FAILED is still
-		// reported rather than swallowed, or the caller is told a gigabyte was
-		// cleaned up that is still on the disk.
 		attachErr := fmt.Errorf("attach cartridge: %w", err)
+		// An attach that failed CLEANLY left nothing behind, so the conversion's
+		// output is pure waste and removing it is right. An attach whose unwind
+		// could not be confirmed is a different animal: a volume may be live on
+		// this very image.
+		//
+		// Unlinking there would be the data loss this package refuses at every
+		// other door — and worse than the obvious way. clearStaleWorkingCopy is
+		// the guard that refuses the NEXT boot when a working copy is attached
+		// but unclaimed, and it keys on the file existing. Deleting it destroys
+		// the evidence that guard needs, so the next boot converts a fresh image
+		// over the same path with no refusal while the old inode is still served
+		// to the kernel. Releasing the claim as well would turn both protections
+		// off at once.
+		//
+		// So on unknown state: keep the working copy, keep the claim, and say so.
+		if errors.Is(err, ErrMayStillBeAttached) {
+			return nil, attachErr
+		}
+		// A removal that FAILED is still reported rather than swallowed, or the
+		// caller is told a gigabyte was cleaned up that is still on the disk.
 		removeErr := o.removeWorkingCopy()
 		o.releaseClaim()
 		return nil, errors.Join(attachErr, removeErr)

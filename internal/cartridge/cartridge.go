@@ -841,3 +841,16 @@ func DevNodeAt(mountpoint string) (string, error) {
 	}
 	return info.DevNode, nil
 }
+
+// ErrMayStillBeAttached marks an error whose attachment state could not be
+// established: an attach that succeeded and whose unwind could not be
+// confirmed. It is not "attached" and not "detached" — it is "unknown", and
+// every destructive step keys on it because unknown must be treated as
+// attached.
+//
+// It exists so a caller can tell the two failure shapes apart. `attach`
+// returning a plain error means nothing was left behind and the working copy is
+// pure waste; returning one that wraps this means a volume may be live on that
+// image, so unlinking it would be the data loss this package refuses at every
+// other door.
+var ErrMayStillBeAttached = errors.New("attachment state could not be established")

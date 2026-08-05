@@ -254,7 +254,7 @@ func selectMountedEntity(entities []systemEntity) (systemEntity, bool) {
 // attached that nothing in this process owns, which only they can now clear.
 func unwindUnlocatableAttach(ctx context.Context, r commandRunner, req attachRequest, entities []systemEntity, cause error) error {
 	if err := unwindAttach(ctx, r, req.path, entities); err != nil {
-		return errors.Join(cause, fmt.Errorf("the attach of %s could not be unwound and may still be attached; release it with 'hdiutil detach' before booting again: %w", req.path, err))
+		return errors.Join(cause, ErrMayStillBeAttached, fmt.Errorf("the attach of %s could not be unwound and may still be attached; release it with 'hdiutil detach' before booting again: %w", req.path, err))
 	}
 	return cause
 }
