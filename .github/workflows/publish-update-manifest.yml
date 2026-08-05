@@ -1,20 +1,36 @@
 name: Publish update manifest
 
-# After a GitHub Release is published, publish site/public/latest.json — the
-# update manifest that `br self-update` (internal/update) fetches from the Pages
-# site (https://stuffbucket.github.io/bladerunner/latest.json).
+# Bridge the delay between a release and its signed updater assets, then make
+# the site publish the update manifest that `br self-update` reads from
+# https://stuffbucket.github.io/bladerunner/latest.json.
 #
-# WHY A SEPARATE WORKFLOW (not chained into release-please.yml): the signed
-# Bladerunner.app updater tarball is built OFF-REPO by stuffbucket/macos-builder,
-# which uploads Bladerunner.app.tar.gz{,.sig,.sha256} onto the release
-# ASYNCHRONOUSLY (minutes after the tag). release-please.yml only fires the
-# builder and returns, so the assets are not present when it finishes. This job
-# polls the release until the tarball + .sig appear, then builds and commits the
-# manifest.
+# WHY THIS IS SEPARATE FROM THE RELEASE: the signed Bladerunner.app updater
+# tarball is built OFF-REPO by stuffbucket/macos-builder, which uploads
+# Bladerunner.app.tar.gz{,.sig} onto the release minutes to half an hour after
+# the tag. release-please.yml only fires the builder and returns, so the assets
+# are not there when it finishes. This job waits for them.
+#
+# WHY IT DOES NOT WRITE THE MANIFEST ITSELF: the manifest is derived state.
+# pages.yml generates site/public/latest.json from the release list on every
+# site build (cmd/update-manifest), so publishing the manifest IS deploying the
+# site, and this job only has to ask for a deploy once the assets exist.
+# Nothing commits latest.json: `main` requires the `check` status, and a commit
+# made by github-actions[bot] inside a job carries no such status, so a push
+# would be rejected however the workflow retried it.
+#
+# WHY release-please.yml DISPATCHES THIS: a `release: published` event cannot
+# start it. Every release here is created with GITHUB_TOKEN, and GitHub does not
+# start workflow runs from events generated with that token — see
+# https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow
+# ("events triggered by the GITHUB_TOKEN will not create a new workflow run"),
+# whose stated exceptions include workflow_dispatch, which is what
+# release-please.yml uses. The release trigger below is kept for a release
+# published by a human or an app token, and is restricted to product tags.
 #
 # GRACEFUL NO-OP: if the updater assets never appear (repo not onboarded to
-# macos-builder, or the builder did not emit an updater artifact) this exits 0
-# with a ::notice::, mirroring macos-build.yml — nothing else depends on it.
+# macos-builder, or the builder emitted no updater artifact) this exits 0 with a
+# ::notice::, mirroring macos-build.yml. The site then publishes no latest.json
+# and `br self-update` reports that there is no published update channel.
 
 on:
   release:
@@ -22,12 +38,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to (re)publish the manifest for, e.g. v0.4.8"
+        description: "Existing release tag to publish the manifest for, e.g. v0.4.8"
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
+  # gh workflow run (dispatching pages.yml) needs this.
+  actions: write
 
 concurrency:
   group: publish-update-manifest
@@ -35,146 +53,124 @@ concurrency:
 
 jobs:
   publish:
-    name: Build + commit latest.json
+    name: Wait for the signed assets, then deploy
+    # Product tags only. A guest-image-* release can never carry an updater
+    # artifact, so a run for one could only ever wait and then no-op.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      # The updater tarball name comes from macos-builder's
-      # .macos-builder/config `updater_name`; tauri appends `.sig`.
-      TARBALL: Bladerunner.app.tar.gz
+      MANIFEST_URL: https://stuffbucket.github.io/bladerunner/latest.json
     steps:
-      - name: Checkout main
+      - name: Checkout
         uses: actions/checkout@v7
-        with:
-          ref: main
 
-      - name: Resolve tag
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Build the manifest tool
+        run: go build -o "${RUNNER_TEMP}/update-manifest" ./cmd/update-manifest
+
+      - name: Resolve the tag
         id: tag
         env:
           EVENT_TAG: ${{ github.event.release.tag_name }}
-          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${EVENT_TAG:-$INPUT_TAG}"
-          if [ -z "${TAG}" ]; then
-            echo "::error::No release tag resolved from event or dispatch input." >&2
+          TAG="${EVENT_TAG:-${INPUT_TAG:-}}"
+          # Shape check only; cmd/update-manifest holds the authoritative rule
+          # for what counts as a product release tag.
+          case "${TAG}" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::'${TAG}' is not a product release tag (expected vMAJOR.MINOR.PATCH)." >&2
+              exit 1
+              ;;
+          esac
+          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName > /dev/null; then
+            echo "::error::No release is tagged ${TAG}." >&2
             exit 1
           fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Publishing update manifest for ${TAG}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "Publishing the update manifest for ${TAG}"
 
-      - name: Poll release for updater assets
+      - name: Wait for the signed updater assets
         id: poll
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          POLL_MINUTES: "30"
+          POLL_SECONDS: "30"
         run: |
           set -euo pipefail
-          SIG="${TARBALL}.sig"
-          # Poll every 30s up to ~30 min for the async macos-builder upload.
-          deadline=$(( $(date +%s) + 30 * 60 ))
+          bin="${RUNNER_TEMP}/update-manifest"
+          releases="${RUNNER_TEMP}/releases.json"
+          deadline=$(( $(date +%s) + POLL_MINUTES * 60 ))
+          ready=false
           while :; do
-            assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
-            if echo "$assets" | grep -qx "$TARBALL" && echo "$assets" | grep -qx "$SIG"; then
-              echo "Found $TARBALL and $SIG on release $TAG."
-              echo "found=true" >> "$GITHUB_OUTPUT"
+            gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate > "${releases}"
+            # Prints the tag only when that one release can serve an update, so
+            # an older publishable release cannot satisfy the wait for this one.
+            if [ "$("${bin}" select -tag "${TAG}" < "${releases}")" = "${TAG}" ]; then
+              echo "${TAG} carries its signed updater assets."
+              ready=true
               break
             fi
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::notice::Updater assets ($TARBALL, $SIG) did not appear on $TAG within 30 min — repo may not be onboarded to macos-builder, or no updater artifact was emitted. Skipping manifest publish."
-              echo "found=false" >> "$GITHUB_OUTPUT"
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::notice::The updater assets for ${TAG} did not appear within ${POLL_MINUTES} min — the repo may not be onboarded to macos-builder, or no updater artifact was emitted. Publishing no manifest."
               break
             fi
-            echo "Waiting for updater assets on $TAG (have: ${assets:-none})…"
-            sleep 30
+            echo "Waiting for the updater assets on ${TAG}…"
+            sleep "${POLL_SECONDS}"
           done
 
-      - name: Build manifest
-        id: build
-        if: steps.poll.outputs.found == 'true'
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          SIG="${TARBALL}.sig"
-          VERSION="${TAG#v}"
-
-          # Fetch the release metadata: the tarball's browser_download_url (an
-          # https:// github.com/.../releases/download/<tag>/... link), the
-          # publish timestamp, and the release name (for notes).
-          meta="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --json assets,publishedAt,name)"
-          url="$(echo "$meta" | jq -r --arg n "$TARBALL" '.assets[] | select(.name == $n) | .url')"
-          pub_date="$(echo "$meta" | jq -r '.publishedAt // empty')"
-
-          if [ -z "$url" ]; then
-            echo "::error::Missing browser_download_url for $TARBALL on $TAG." >&2
-            exit 1
-          fi
-
-          # Download the minisign .sig file (multi-line text) and base64-encode
-          # the WHOLE file. internal/update/verify.go parseSignature() does
-          # base64.StdEncoding.DecodeString on the manifest `signature` field and
-          # then treats the decoded bytes as the minisign .sig file text (four
-          # lines: untrusted comment, sig record, trusted comment, global sig).
-          # So the manifest signature MUST be base64 of the entire .sig file —
-          # NOT the raw multi-line text. This matches tauri's updater convention.
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern "$SIG" --dir "$RUNNER_TEMP" --clobber
-          signature="$(base64 -w0 "$RUNNER_TEMP/$SIG")"
-
-          if [ -z "$signature" ]; then
-            echo "::error::Empty signature after base64 of $SIG." >&2
-            exit 1
-          fi
-
-          # Pretty-printed manifest. `notes` uses the release name (kept short);
-          # jq --arg keeps every value a safely-escaped string.
-          name="$(echo "$meta" | jq -r '.name // empty')"
-          mkdir -p site/public
-          jq -n \
-            --arg version "$VERSION" \
-            --arg url "$url" \
-            --arg signature "$signature" \
-            --arg notes "${name:-Bladerunner $TAG}" \
-            --arg pub_date "$pub_date" \
-            '{version: $version, url: $url, signature: $signature, notes: $notes, pub_date: $pub_date}' \
-            > site/public/latest.json
-
-          echo "Wrote site/public/latest.json:"
-          # Print everything except the (long) signature for the log.
-          jq 'del(.signature)' site/public/latest.json
-
-      - name: Validate manifest
-        if: steps.poll.outputs.found == 'true'
-        run: |
-          set -euo pipefail
-          f=site/public/latest.json
-          # Assert version, url, signature are non-empty and url is https.
-          jq -e '
-            (.version | type == "string" and (. | length > 0)) and
-            (.url | type == "string" and (startswith("https://"))) and
-            (.signature | type == "string" and (. | length > 0))
-          ' "$f" > /dev/null || {
-            echo "::error::latest.json failed shape validation." >&2
-            jq 'del(.signature)' "$f" >&2 || cat "$f" >&2
-            exit 1
-          }
-          echo "latest.json validated (version/url(https)/signature present)."
-
-      - name: Commit and push
-        if: steps.poll.outputs.found == 'true'
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add site/public/latest.json
-          if git diff --cached --quiet; then
-            echo "::notice::latest.json unchanged for $TAG — nothing to commit."
+          echo "ready=${ready}" >> "${GITHUB_OUTPUT}"
+          if [ "${ready}" != "true" ]; then
             exit 0
           fi
-          # Subject kept <=50 chars (commit-msg hook style). $TAG is ~7 chars.
-          git commit -m "chore: publish update manifest for $TAG"
-          git push origin HEAD:main
-          echo "Pushed latest.json for $TAG; pages.yml will redeploy the site."
+
+          # The manifest advertises the highest publishable release, which is
+          # this one unless a newer one shipped while we waited. An empty answer
+          # here would make the verification below compare nothing with nothing.
+          expected="$("${bin}" select < "${releases}")"
+          if [ -z "${expected}" ]; then
+            echo "::error::No release can serve an update, although ${TAG} qualified a moment ago." >&2
+            exit 1
+          fi
+          echo "expected_version=${expected#v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Deploy the site, which publishes the manifest
+        if: steps.poll.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          gh workflow run pages.yml --repo "${GITHUB_REPOSITORY}" --ref main
+          echo "Dispatched pages.yml; it regenerates latest.json from the releases."
+
+      - name: Verify the manifest is live
+        if: steps.poll.outputs.ready == 'true'
+        env:
+          EXPECTED_VERSION: ${{ steps.poll.outputs.expected_version }}
+          POLL_MINUTES: "20"
+          POLL_SECONDS: "20"
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + POLL_MINUTES * 60 ))
+          while :; do
+            # Bust the CDN cache: a stale copy would read as a failed deploy.
+            got="$(curl -fsS --max-time 30 -H 'Cache-Control: no-cache' \
+              "${MANIFEST_URL}?t=$(date +%s)" | jq -r '.version // empty' || true)"
+            if [ "${got}" = "${EXPECTED_VERSION}" ]; then
+              echo "${MANIFEST_URL} advertises ${got}."
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::${MANIFEST_URL} advertises '${got}' after ${POLL_MINUTES} min; expected ${EXPECTED_VERSION}. Read the pages.yml run: it also refuses to replace a published manifest with an older one." >&2
+              exit 1
+            fi
+            echo "Manifest still reads '${got}'; waiting for the deploy…"
+            sleep "${POLL_SECONDS}"
+          done

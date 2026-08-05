@@ -1,5 +1,10 @@
 # build output
 dist/
+# The update manifest is DERIVED state: pages.yml generates it from the release
+# list on every build (cmd/update-manifest) and Astro copies it into dist/.
+# Committing it would put a stale copy on a protected branch and reintroduce the
+# publish race it was moved out of.
+public/latest.json
 # astro
 .astro/
 # deps
