@@ -85,6 +85,18 @@ Two more rules:
    the main thread.
 6. Call `(*Host).Run` from the main thread only. Call `(*Host).Drain` from any
    goroutine.
+7. Do not add a GitHub-hosted macOS runner (`macos-latest`, `macos-14`) to any
+   workflow. They are ad-hoc, cost about ten times a Linux minute, and this
+   project has watched one fail to allocate twice in a day — failing a required
+   check for reasons that had nothing to do with the code.
+8. Send macOS work to `stuffbucket/macos-builder` instead. It is a private repo
+   that owns the only self-hosted macOS runner and every Apple signing secret;
+   this repo holds neither and dispatches to it (`.github/workflows/macos-build.yml`).
+   Baking a macOS guest image belongs there, because it needs
+   Virtualization.framework on real hardware.
+9. Do not move darwin build, test or lint work to a Linux runner. The VM and
+   DiskArbitration bridges are cgo and need the macOS SDK to compile or
+   analyse, so `GOOS=darwin` from Linux cannot cover them.
 
 ---
 
