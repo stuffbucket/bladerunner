@@ -52,7 +52,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 		fmt.Println(title("Bladerunner Status"))
 		fmt.Println(renderPanels(left, right))
-		fmt.Println(subtle("  Start the VM with:"), command("br start"))
+		fmt.Println(subtle("  Start the VM with:"), command("br up"))
 		fmt.Println()
 		return nil
 	}

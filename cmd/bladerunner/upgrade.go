@@ -32,7 +32,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	}
 	client := control.NewClient(stateDir)
 	if !client.IsRunning() {
-		return jsonOrError(fmt.Errorf("no running server to upgrade (use 'br start')"))
+		return jsonOrError(fmt.Errorf("no running server to upgrade (use 'br up')"))
 	}
 
 	serverVer, err := client.ServerVersion()
