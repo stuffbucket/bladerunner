@@ -176,6 +176,14 @@ func decideDetected(a watchAction, detect detectFunc, held heldFunc) watchAction
 		if errors.Is(det.Err, fs.ErrPermission) {
 			return a.warn(reasonUnreadable)
 		}
+		// Any other probe that could not be COMPLETED is equally not a
+		// negative: it establishes nothing about the volume, so filing it under
+		// "not one of ours" is a guess dressed as an answer. The single
+		// exception is a volume that went away between the callback and the
+		// read — there is nothing left to tell the user about.
+		if det.Err != nil && !errors.Is(det.Err, fs.ErrNotExist) {
+			return a.warn(det.Reason)
+		}
 		a.Reason = det.Reason
 		return a
 	case cartridge.StatusUnbootable:
@@ -185,14 +193,17 @@ func decideDetected(a watchAction, detect detectFunc, held heldFunc) watchAction
 	}
 
 	// Bootable. Two things still have to hold: the name must be usable as an
-	// instance name, and we must know the FILE behind the mount.
+	// instance name, and we must know the FILE behind the mount. BootSource is
+	// asked for the second, rather than BackingImage being re-tested here: one
+	// API decides what a holder can be started with, so the watcher cannot drift
+	// from what the holder will accept.
 	if err := instance.ValidName(a.Name); err != nil {
 		return a.warn(fmt.Sprintf("cannot be booted: %v", err))
 	}
-	if det.BackingImage == "" {
+	a.SourcePath = det.BootSource()
+	if a.SourcePath == "" {
 		return a.warn(reasonNoBackingImage)
 	}
-	a.SourcePath = det.BackingImage
 
 	// Ask again now that the image is known. A SECOND mount of a cartridge we
 	// are already running shares neither mountpoint nor device with the

@@ -57,6 +57,11 @@ const (
 	reasonUnreadable    = "cannot be inspected"
 	reasonNotADirectory = "is not a directory"
 	reasonNoManifest    = "has no " + ManifestFile + " at its root"
+	// reasonManifestUnreadable covers a manifest probe that failed for any
+	// reason other than absence. It is deliberately distinct from
+	// reasonNoManifest: one says the volume is not ours, the other says we
+	// could not find out.
+	reasonManifestUnreadable = "could not be checked for " + ManifestFile
 )
 
 // Detected is the verdict on one mounted volume, rich enough for the caller to
@@ -149,7 +154,6 @@ func detect(ctx context.Context, r commandRunner, volumePath string) (*Detected,
 		return d, nil
 	}
 	if !d.hasManifest() {
-		d.Reason = d.describe(reasonNoManifest)
 		return d, nil
 	}
 
@@ -180,10 +184,30 @@ func (d *Detected) isReadableDir() bool {
 }
 
 // hasManifest reports whether the volume carries a packed disk.json at its
-// root — the cheap, authoritative "is this ours" test.
+// root — the cheap, authoritative "is this ours" test — and records the reason
+// when it does not.
+//
+// The three outcomes are kept apart, because two of them are not the same
+// answer. A manifest that is genuinely ABSENT is the ordinary negative: the
+// volume is somebody else's, nothing is recorded but a loggable reason, and Err
+// stays nil so the caller says nothing. A probe that FAILED establishes
+// nothing: a volume root can be stat-able while traversal into it returns
+// EACCES (a directory with no search bit, which is what a TCC-blocked volume
+// looks like), and a dying disk answers EIO. Reducing either to "there is no
+// disk.json" reports a cartridge the user cannot open as a volume that is none
+// of our business, and drops the one error that could have explained it.
 func (d *Detected) hasManifest() bool {
 	_, err := os.Stat(filepath.Join(d.Mountpoint, ManifestFile))
-	return err == nil
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, os.ErrNotExist):
+		d.Reason = d.describe(reasonNoManifest)
+	default:
+		d.Reason = d.describe(reasonManifestUnreadable)
+		d.Err = err
+	}
+	return false
 }
 
 // describe renders a not-a-cartridge reason against the volume it applies to.
@@ -288,19 +312,25 @@ func (d *Detected) Recognized() bool {
 	return d != nil && d.Status != StatusNotCartridge
 }
 
-// BootSource is the path a holder should be started with: the backing image
-// file when one was recovered (so the holder converts and attaches its own
-// writable copy, leaving the shipped artifact pristine), else the mountpoint.
+// BootSource is the path a holder must be started with: the .dmg/.sparseimage
+// FILE behind the mount, so the holder re-opens the shipped source and converts
+// its own writable working copy instead of booting the read-only view in place.
 //
-// It is empty when the volume is not a cartridge.
+// It is empty when the volume is not a cartridge, AND empty when the mount
+// could not be traced back to a file. Adopting an already-mounted volume is not
+// supported: a holder hands this value to cartridge.Open, which runs `hdiutil
+// attach` on it, and a mountpoint is a directory — offering one is not a boot
+// that goes wrong later, it is a boot that cannot start. So the absence of a
+// backing image has no path to give, and says so.
+//
+// Every non-empty result is therefore consumable by the holder, which is what
+// lets callers treat this as the single precondition for offering a boot rather
+// than re-deriving it from BackingImage.
 func (d *Detected) BootSource() string {
 	if !d.Recognized() {
 		return ""
 	}
-	if d.BackingImage != "" {
-		return d.BackingImage
-	}
-	return d.Mountpoint
+	return d.BackingImage
 }
 
 // String renders the verdict for a log line or a notification body.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,6 +284,117 @@ func TestDetectNotACartridge(t *testing.T) {
 	}
 }
 
+// An ordinary volume with no manifest is the quiet negative: no cartridge, and
+// nothing for the caller to report. It is the control for the two probe-failure
+// tests below, which must NOT be quiet.
+func TestDetectRecordsNoErrorForAnAbsentManifest(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), VolumeName("impostor"))
+	if err := os.MkdirAll(dir, layoutDirPerm); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	d := detectNoHdiutil(t, dir)
+	if d.Status != StatusNotCartridge {
+		t.Fatalf("Status = %q, want %q", d.Status, StatusNotCartridge)
+	}
+	if d.Err != nil {
+		t.Errorf("Err = %v, want nil: an absent manifest is an answer, not a failure", d.Err)
+	}
+	if !strings.Contains(d.Reason, ManifestFile) {
+		t.Errorf("Reason = %q, want it to name %s", d.Reason, ManifestFile)
+	}
+}
+
+// TestDetectPreservesAManifestProbePermissionError is the #204 regression.
+//
+// A volume root can be stat-able while traversal INTO it fails: a directory
+// with no search bit answers os.Stat about itself and EACCES about everything
+// under it. Reducing that to "there is no disk.json" reports a cartridge the
+// user cannot open as a volume that is none of our business, and drops the one
+// error that would have told them to grant Files and Folders access.
+func TestDetectPreservesAManifestProbePermissionError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root traverses a directory with no search bit, so the probe cannot fail")
+	}
+	dir := stagedCartridgeVolume(t)
+	// Readable, not searchable: stat of the volume succeeds, stat of anything
+	// inside it does not.
+	if err := os.Chmod(dir, 0o600); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, layoutDirPerm) })
+
+	d := detectNoHdiutil(t, dir)
+	if d.Status != StatusNotCartridge {
+		t.Fatalf("Status = %q, want %q", d.Status, StatusNotCartridge)
+	}
+	if !errors.Is(d.Err, fs.ErrPermission) {
+		t.Fatalf("Err = %v, want a permission error preserved for the caller", d.Err)
+	}
+	if !strings.Contains(d.Reason, ManifestFile) {
+		t.Errorf("Reason = %q, want it to name %s", d.Reason, ManifestFile)
+	}
+}
+
+// The same distinction for a failure that is neither absence nor permission: a
+// disk.json that is a symlink to itself makes os.Stat fail with ELOOP, which
+// establishes nothing about whether the volume holds a cartridge.
+func TestDetectPreservesANonPermissionManifestProbeError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), VolumeName("looped"))
+	if err := os.MkdirAll(dir, layoutDirPerm); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(ManifestFile, filepath.Join(dir, ManifestFile)); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	d := detectNoHdiutil(t, dir)
+	if d.Status != StatusNotCartridge {
+		t.Fatalf("Status = %q, want %q", d.Status, StatusNotCartridge)
+	}
+	if d.Err == nil {
+		t.Fatal("Err = nil: a probe that failed must not read as a probe that found nothing")
+	}
+	if errors.Is(d.Err, os.ErrNotExist) {
+		t.Errorf("Err = %v, want the real failure rather than not-exist", d.Err)
+	}
+}
+
+// TestBootSourceIsAlwaysAnImageFile is the #206 regression.
+//
+// BootSource is documented as the path a holder is started with, and a holder
+// hands it to cartridge.Open, which runs `hdiutil attach` on it. A mountpoint
+// is a directory: attaching one is not a boot that goes wrong later, it is a
+// boot that cannot start. So every non-empty answer must be an image FILE, and
+// "no usable source" must be spelled as empty.
+func TestBootSourceIsAlwaysAnImageFile(t *testing.T) {
+	mp := stagedCartridgeVolume(t)
+
+	// hdiutil could not name the file behind the mount.
+	blind := &fakeRunner{results: []fakeResult{{stderr: "hdiutil: info failed", err: errors.New("exit status 1")}}}
+	d, err := detect(context.Background(), blind, mp)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if d.Status != StatusBootable {
+		t.Fatalf("Status = %q (%s), want %q", d.Status, d.Reason, StatusBootable)
+	}
+	if d.BootSource() != "" {
+		t.Errorf("BootSource = %q, want empty: a mountpoint cannot be attached", d.BootSource())
+	}
+
+	// And with the file recovered, the answer is that file — and it is one the
+	// holder can actually open.
+	withImage, err := detect(context.Background(),
+		infoRunner(infoPlistFor(resolvePath(mp), "/dev/disk9s1", "/Users/me/Downloads/demo.dmg", false)), mp)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if got := withImage.BootSource(); got != withImage.BackingImage || !HasImageExt(got) {
+		t.Errorf("BootSource = %q, want the backing image %q", got, withImage.BackingImage)
+	}
+}
+
 func TestDetectRejectsEmptyPath(t *testing.T) {
 	d, err := detect(context.Background(), nil, "")
 	if !errors.Is(err, ErrNoMountpoint) {
@@ -352,8 +464,10 @@ func TestDetectSurvivesAnUnhelpfulHdiutil(t *testing.T) {
 	if d.BackingImage != "" {
 		t.Errorf("BackingImage = %q, want empty", d.BackingImage)
 	}
-	if d.BootSource() != d.Mountpoint {
-		t.Errorf("BootSource = %q, want the mountpoint %q", d.BootSource(), d.Mountpoint)
+	// And with no file behind the mount there is no boot source at all: the
+	// mountpoint used to be offered here, and no holder can attach a directory.
+	if d.BootSource() != "" {
+		t.Errorf("BootSource = %q, want empty", d.BootSource())
 	}
 }
 
