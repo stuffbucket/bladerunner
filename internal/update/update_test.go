@@ -15,9 +15,25 @@ import (
 	"testing"
 )
 
+// tarEntry describes one archive member. An entry with a non-empty linkname is
+// a symlink; one with dir set is a directory; anything else is a regular file.
 type tarEntry struct {
-	name string
-	body string
+	name     string
+	body     string
+	linkname string
+	dir      bool
+}
+
+// header renders the entry as a tar header.
+func (e tarEntry) header() *tar.Header {
+	switch {
+	case e.linkname != "":
+		return &tar.Header{Name: e.name, Mode: 0o777, Typeflag: tar.TypeSymlink, Linkname: e.linkname}
+	case e.dir:
+		return &tar.Header{Name: e.name, Mode: 0o755, Typeflag: tar.TypeDir}
+	default:
+		return &tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.body)), Typeflag: tar.TypeReg}
+	}
 }
 
 // buildRawTarball writes the given entries verbatim into a gzip tarball.
@@ -27,9 +43,11 @@ func buildRawTarball(t *testing.T, entries []tarEntry) []byte {
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	for _, e := range entries {
-		hdr := &tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.body)), Typeflag: tar.TypeReg}
-		if err := tw.WriteHeader(hdr); err != nil {
+		if err := tw.WriteHeader(e.header()); err != nil {
 			t.Fatal(err)
+		}
+		if e.linkname != "" || e.dir {
+			continue
 		}
 		if _, err := tw.Write([]byte(e.body)); err != nil {
 			t.Fatal(err)
