@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
+	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
 var stopFlags struct {
@@ -64,24 +66,33 @@ func init() {
 }
 
 func runStop(_ *cobra.Command, _ []string) error {
-	stateDir, err := targetStateDir()
+	target, err := resolveInstanceTarget()
 	if err != nil {
-		return err
+		return jsonOrError(err)
 	}
+	stateDir := target.StateDir
+	socketPath := control.SocketPath(stateDir)
 
 	client := control.NewClient(stateDir)
 
+	// IsRunning is a ping round trip, not a liveness check: a holder that is
+	// alive but wedged (a deadlocked handler, a blocked syscall) still has its
+	// socket bound and still accepts, it just never replies. Reporting "not
+	// running" there is a lie that leaves the user with a VM holding its disk,
+	// its ports and its cartridge, and no CLI way out — while `br up` refuses
+	// with "another bladerunner process holds this instance".
 	if !client.IsRunning() {
-		err := fmt.Errorf("VM is not running")
-		if jsonOutput {
-			emitJSONError(err)
-		}
-		return err
+		return stopUnreachable(target, socketPath)
 	}
 
 	// Capture the host PID up front, while the control server still answers —
-	// --force needs it even if the server later wedges.
+	// --force needs it even if the server later wedges. A server too old to
+	// report its own PID still leaves a start lock behind, so fall back to that
+	// rather than reaching the signal ladder with nothing to signal.
 	hostPID := readHostPID(client)
+	if hostPID <= 0 {
+		hostPID = holderPID(target)
+	}
 
 	drain := drainBudget(stopFlags.timeout)
 	if !jsonOutput {
@@ -97,8 +108,6 @@ func runStop(_ *cobra.Command, _ []string) error {
 	// budget (its per-command read timeout is measured in minutes).
 	reqErr := make(chan error, 1)
 	go func() { reqErr <- requestStop(client, drain, stopFlags.force) }()
-
-	socketPath := control.SocketPath(stateDir)
 
 	// The server drains the guest and only then tears the VMM down, so allow the
 	// drain budget plus the teardown margin. With --force this is just the short
@@ -123,16 +132,61 @@ func runStop(_ *cobra.Command, _ []string) error {
 		err = fmt.Errorf("timeout waiting for VM to stop (use 'br stop --force' to terminate a hung/panicked VM)")
 	}
 	if !stopFlags.force {
-		if jsonOutput {
-			emitJSONError(err)
-		}
-		return err
+		return jsonOrError(err)
 	}
 	if !jsonOutput {
 		fmt.Printf("Stop did not complete (%v); force-terminating.\n", err)
 	}
 
 	return forceTerminate(socketPath, hostPID)
+}
+
+// stopUnreachable decides what `br stop` does when the control socket did not
+// answer the ping. There are two states behind that one silence and they need
+// opposite answers:
+//
+//   - Nothing holds the instance any more: the honest report is "not running".
+//   - A holder process is still alive with its socket still bound — the
+//     instance.ProcessOnly rung of the liveness ladder. It still owns the disk
+//     image, the forwarded ports and any attached cartridge, and no amount of
+//     waiting will change that. This is the one state --force exists for, so
+//     --force escalates straight to the signal ladder and a plain stop reports
+//     the state and names --force as the way out.
+//
+// The socket file has to still be there for the process to count: a holder that
+// exited cleanly removed it, so a live PID with no socket is a recycled PID, not
+// a wedged holder. Signaling that would kill an unrelated process.
+func stopUnreachable(target resolvedInstance, socketPath string) error {
+	pid := holderPID(target)
+	if socketGone(socketPath) || !instance.ProcessAlive(pid) {
+		return jsonOrError(fmt.Errorf("VM is not running"))
+	}
+	if !stopFlags.force {
+		return jsonOrError(fmt.Errorf(
+			"VM is unresponsive: holder process %d is alive but its control socket %s is not answering\n"+
+				"  terminate it with 'br stop --force'", pid, socketPath))
+	}
+	if !jsonOutput {
+		fmt.Printf("Control socket is not answering; holder process %d is still alive.\n", pid)
+	}
+	return forceTerminate(socketPath, pid)
+}
+
+// holderPID returns the PID of the process holding target, taken from a source
+// that does not need the control socket to answer.
+//
+// The start lock comes first: it lives next to the socket, is written before the
+// socket is bound and removed after it is cleaned up, so it names the process
+// that owns THIS socket. The registry entry is the fallback for a holder that
+// could not take a lock (see control.LockOwnerPID). Zero means unknown, which
+// forceTerminate already refuses to signal.
+func holderPID(target resolvedInstance) int {
+	pid, err := control.LockOwnerPID(target.StateDir)
+	if err == nil {
+		return pid
+	}
+	logging.L().Debug("no control lock owner", "stateDir", target.StateDir, "error", err)
+	return target.PID
 }
 
 // drainBudget converts a --timeout value in seconds into the budget the guest
@@ -232,11 +286,7 @@ func waitForSocketGone(socketPath string, within time.Duration) bool {
 // the stale control socket. Used only by --force.
 func forceTerminate(socketPath string, pid int) error {
 	if pid <= 0 {
-		err := fmt.Errorf("cannot force-stop: host PID unknown (control server gave no pid)")
-		if jsonOutput {
-			emitJSONError(err)
-		}
-		return err
+		return jsonOrError(fmt.Errorf("cannot force-stop: host PID unknown (control server gave no pid)"))
 	}
 	if !jsonOutput {
 		fmt.Printf("Graceful shutdown stalled; force-terminating host process %d...\n", pid)
@@ -262,11 +312,7 @@ func forceTerminate(socketPath string, pid int) error {
 		return nil
 	}
 
-	err := fmt.Errorf("failed to terminate host process %d", pid)
-	if jsonOutput {
-		emitJSONError(err)
-	}
-	return err
+	return jsonOrError(fmt.Errorf("failed to terminate host process %d", pid))
 }
 
 // waitForProcessGone polls signal 0 against pid until it no longer exists or
