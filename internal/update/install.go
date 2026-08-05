@@ -282,22 +282,37 @@ func writeRegular(r io.Reader, target string, mode os.FileMode) error {
 	return nil
 }
 
-// swapBundle atomically replaces the bundle at dst with newApp. The new bundle
-// is already staged on the same filesystem (its parent is the destination's
-// parent), so the rename is atomic. The previous bundle is moved aside first
-// and restored if the rename fails, so a crash never leaves the app missing.
+// swapBundle replaces the bundle at dst with newApp, which is already staged on
+// the same filesystem so both moves are renames.
+//
+// The swap is two renames — dst to backup, then newApp to dst — and an
+// interruption between them leaves the backup present and dst missing. That
+// state is a recovery instruction, so each attempt reads the pair before it
+// changes anything: a missing dst with a backup present is restored from the
+// backup, and only a backup found beside an intact dst is a leftover safe to
+// drop. dst is only ever created by a rename, so whenever it exists it is a
+// complete generation; one complete generation therefore survives every point at
+// which the process can stop. The parent directory is synced after each rename
+// so the state a crash leaves on disk is the state this function reasons about.
+//
+// TestSwapBundle_RecoversFromInterruptedSwap and its neighbors in swap_test.go
+// hold this contract.
 func swapBundle(dst, newApp string) (err error) {
 	parent := filepath.Dir(dst)
 	backup := filepath.Join(parent, "."+filepath.Base(dst)+".old")
 
-	// Clear any stale backup from a prior interrupted run.
-	_ = os.RemoveAll(backup)
+	if err := recoverInterruptedSwap(dst, backup, parent); err != nil {
+		return err
+	}
 
 	movedAside := false
 	if _, statErr := os.Lstat(dst); statErr == nil {
 		if err := os.Rename(dst, backup); err != nil {
 			return fmt.Errorf("update: move aside existing bundle: %w", err)
 		}
+		// Make the recovery state durable before opening the window in which a
+		// crash leaves dst missing.
+		util.SyncDir(parent)
 		movedAside = true
 	}
 
@@ -306,16 +321,52 @@ func swapBundle(dst, newApp string) (err error) {
 		if err != nil && movedAside {
 			_ = os.RemoveAll(dst)
 			_ = os.Rename(backup, dst)
+			util.SyncDir(parent)
 		}
 	}()
 
 	if err := os.Rename(newApp, dst); err != nil {
 		return fmt.Errorf("update: install new bundle: %w", err)
 	}
+	// Commit: dst is durable before the backup goes away.
+	util.SyncDir(parent)
 
-	// Success: drop the backup. A leftover backup is harmless but we clean up.
 	if movedAside {
 		_ = os.RemoveAll(backup)
+		util.SyncDir(parent)
 	}
 	return nil
+}
+
+// recoverInterruptedSwap reads the (dst, backup) pair and puts it back into a
+// single-generation state before the caller changes anything.
+//
+// Three cases: no backup, nothing to do; a backup beside a missing dst, which is
+// an interrupted swap and must be restored; a backup beside an intact dst, which
+// is a leftover from a committed swap and is dropped.
+func recoverInterruptedSwap(dst, backup, parent string) error {
+	if _, err := os.Lstat(backup); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("update: refusing to swap: cannot inspect backup %q: %w", backup, err)
+	}
+
+	_, dstErr := os.Lstat(dst)
+	switch {
+	case dstErr == nil:
+		// dst is intact, so the backup is a stale earlier generation.
+		_ = os.RemoveAll(backup)
+		util.SyncDir(parent)
+		return nil
+	case errors.Is(dstErr, os.ErrNotExist):
+		if err := os.Rename(backup, dst); err != nil {
+			return fmt.Errorf("update: refusing to swap: a previous swap was interrupted and "+
+				"the backup %q could not be restored to %q: %w", backup, dst, err)
+		}
+		util.SyncDir(parent)
+		return nil
+	default:
+		return fmt.Errorf("update: refusing to swap: cannot inspect %q: %w", dst, dstErr)
+	}
 }
