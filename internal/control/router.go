@@ -36,11 +36,30 @@ func (r *Router) Mount(prefix string, sub *Router) {
 	r.prefix[prefix] = sub
 }
 
-// Dispatch routes a request to the appropriate handler.
+// nilResponseError is the error reported when a registered handler returns no
+// message. The Handler interface permits a nil return, so the router - the
+// registration point for handlers - converts one into a response here. The
+// caller writes the protocol version into the result, and a panic in that
+// caller stops a holder process together with the VM that it owns.
+const nilResponseError = "handler for command %q returned no response"
+
+// Dispatch routes a request to the appropriate handler. It always returns a
+// message: a handler that returns nil gives an error response that names the
+// command.
 func (r *Router) Dispatch(ctx context.Context, req *Request) *Message {
+	return r.dispatch(ctx, req, req.Command)
+}
+
+// dispatch routes req and reports a nil handler response against command, the
+// command name as the client sent it. A mounted sub-router gets a request that
+// holds only the part after the prefix, so the full name travels beside it.
+func (r *Router) dispatch(ctx context.Context, req *Request, command string) *Message {
 	// Check for exact command match
 	if h, ok := r.handlers[req.Command]; ok {
-		return h.Handle(ctx, req)
+		if resp := h.Handle(ctx, req); resp != nil {
+			return resp
+		}
+		return &Message{Error: fmt.Sprintf(nilResponseError, command)}
 	}
 
 	// Check for namespaced command (e.g., "config.get" -> prefix "config", cmd "get")
@@ -52,7 +71,7 @@ func (r *Router) Dispatch(ctx context.Context, req *Request) *Message {
 				Args:    req.Args,
 				Raw:     req.Raw,
 			}
-			return sub.Dispatch(ctx, subReq)
+			return sub.dispatch(ctx, subReq, command)
 		}
 	}
 
