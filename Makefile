@@ -27,7 +27,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: help setup cache deps tidy fmt fmt-check vet test test-linux test-isolation build build-release run sign check clean distclean lint lint-linux lint-docs vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
+.PHONY: help setup cache deps tidy fmt fmt-check vet test test-linux test-isolation test-traps build build-release run sign check clean distclean lint lint-linux lint-docs vulncheck trivy security release snapshot smoke-cartridge smoke-holder clonedetect clonedetect-test
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -131,6 +131,11 @@ check: fmt-check vet lint lint-linux test ## Run fast checks (format, vet, lint,
 
 test-isolation: cache ## Prove the suite writes nothing outside its temp dirs
 	@$(GO_ENV) ./scripts/test-isolation.sh
+
+# No VM, no hardware: this signals a subject script that installs the same traps
+# the smoke scripts install and asserts cleanup ran. Seconds, not minutes.
+test-traps: ## Prove the smoke-test cleanup traps fire on EXIT, INT, TERM and HUP
+	@./scripts/test-cleanup-traps.sh
 
 lint: ## Run golangci-lint
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "Install: brew install golangci-lint"; exit 1; }

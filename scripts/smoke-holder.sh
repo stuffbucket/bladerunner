@@ -43,6 +43,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BIN="$PROJECT_ROOT/bin/br"
 
+# Cleanup traps and interruptible long commands live in one place, shared with
+# smoke-cartridge.sh and exercised by scripts/test-cleanup-traps.sh.
+# shellcheck source=scripts/lib/cleanup-traps.sh
+. "$SCRIPT_DIR/lib/cleanup-traps.sh"
+
 READY_TIMEOUT="${SMOKE_READY_TIMEOUT:-900}"
 SOCKET_TIMEOUT="${SMOKE_SOCKET_TIMEOUT:-180}"
 DRAIN_TIMEOUT="${SMOKE_DRAIN_TIMEOUT:-120}"
@@ -61,6 +66,11 @@ SPAWNER="$WORK/spawner.sh"
 SPAWNER_PID=""
 HOLDER_PID=""
 PASS=0
+RECOVERY=""                           # steps cleanup could not take itself, printed at the end
+
+# HOLDER_POLL_TRIES x HOLDER_POLL seconds bound each wait for the holder to exit.
+HOLDER_POLL_TRIES=30
+HOLDER_POLL=2
 
 note() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -73,29 +83,103 @@ alive() { [[ -n "${1:-}" ]] && kill -0 "$1" 2>/dev/null; }
 # answering", which is exactly the property under test.
 listed() { "$BIN" instances --json 2>/dev/null | grep -qF "\"name\": \"$NAME\""; }
 
+# --- cleanup ---------------------------------------------------------------
+#
+# cleanup runs on EXIT, INT, TERM and HUP (scripts/lib/cleanup-traps.sh). A bare
+# `trap cleanup EXIT` did not: bash skips an EXIT trap when a signal it has no
+# handler for kills the shell, so a CI cancellation or a Ctrl-C left a VM
+# running on a shared machine (#227).
+
+# recover records a step a human has to take on this host.
+recover() { RECOVERY="$RECOVERY    - $1"$'\n'; }
+
+# registry_pid prints the holder pid recorded in a registry entry.
+registry_pid() {
+  sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" | head -1
+}
+
+# discover_holder fills HOLDER_PID from the registry when the script has not
+# read it yet. A signal that arrives while `br start` is booting still leaves a
+# holder behind, and an unknown holder is precisely the one that gets orphaned.
+discover_holder() {
+  if [[ -n "$HOLDER_PID" ]]; then return 0; fi
+  if [[ ! -e "$REGISTRY" ]]; then return 0; fi
+  HOLDER_PID="$(registry_pid "$REGISTRY" 2>/dev/null)"
+  if [[ -n "$HOLDER_PID" ]]; then
+    note "cleanup: found holder pid $HOLDER_PID recorded at $REGISTRY"
+  fi
+  return 0
+}
+
+# wait_for_holder_exit waits for the holder to leave, and clears HOLDER_PID once
+# it has, so a second cleanup pass is a no-op.
+wait_for_holder_exit() {
+  local _
+  for _ in $(seq 1 "$HOLDER_POLL_TRIES"); do
+    if ! alive "$HOLDER_PID"; then HOLDER_PID=""; return 0; fi
+    sleep "$HOLDER_POLL"
+  done
+  if ! alive "$HOLDER_PID"; then HOLDER_PID=""; return 0; fi
+  return 1
+}
+
+# drain_holder asks the guest to power itself off and waits for the holder to
+# exit. Graceful first, then --force — which already escalates to terminating
+# the host process when the forced stop stalls. This script never sends SIGKILL
+# itself: the holder owns a live VM and its disk, so killing it from outside is
+# a power cut with no chance to sync (AGENTS.md section 8, "Data safety").
+drain_holder() {
+  discover_holder
+  if ! alive "$HOLDER_PID"; then HOLDER_PID=""; return 0; fi
+  note "cleanup: draining the holder (pid $HOLDER_PID)"
+  "$BIN" stop --instance "$NAME" --timeout "$DRAIN_TIMEOUT" >/dev/null 2>&1
+  if wait_for_holder_exit; then ok "holder drained"; return 0; fi
+
+  note "cleanup: the guest did not stop in time; forcing the stop through the VMM"
+  "$BIN" stop --instance "$NAME" --force >/dev/null 2>&1
+  if wait_for_holder_exit; then ok "holder drained"; return 0; fi
+
+  recover "holder pid $HOLDER_PID STILL owns a running VM. Inspect it with:"
+  recover "    ps -p $HOLDER_PID -o pid,etime,command"
+  recover "  then stop it with: '$BIN' stop --instance '$NAME' --force"
+  return 1
+}
+
 cleanup() {
-  local rc=$?
+  local rc="$1"
   set +e
-  if alive "$SPAWNER_PID"; then
-    kill -9 "$SPAWNER_PID" 2>/dev/null
+  # An interrupted `wait` leaves the long command it was watching running and
+  # unreaped; this ends it and reaps it exactly once.
+  reap_interruptible_child
+
+  # The spawner is a child of THIS shell and is only a sleep loop — no VM, no
+  # disk — so killing it outright is safe. One wait reaps it; a second reports
+  # "not a child" and is discarded, which is what makes a repeat pass harmless.
+  if [[ -n "$SPAWNER_PID" ]]; then
+    alive "$SPAWNER_PID" && kill -9 "$SPAWNER_PID" 2>/dev/null
     wait "$SPAWNER_PID" 2>/dev/null
+    SPAWNER_PID=""
   fi
-  if alive "$HOLDER_PID"; then
-    note "cleanup: draining the holder (pid $HOLDER_PID)"
-    "$BIN" stop --instance "$NAME" --force >/dev/null 2>&1
-    for _ in $(seq 1 15); do alive "$HOLDER_PID" || break; sleep 2; done
-    alive "$HOLDER_PID" && kill -9 "$HOLDER_PID" 2>/dev/null
-  fi
+
+  drain_holder || rc=1
+
   if [[ "$PASS" -eq 1 && "$rc" -eq 0 ]]; then
     rm -rf "$WORK"
     printf '\n\033[1;32m==> SMOKE PASSED\033[0m\n'
-  else
-    printf '\n\033[1;31m==> SMOKE FAILED (see above)\033[0m\n' >&2
-    printf '    work dir kept for diagnosis: %s\n' "$WORK" >&2
-    [[ -f "$HOLDER_LOG" ]] && printf '    holder log tail:\n' >&2 && tail -n 30 "$HOLDER_LOG" >&2
+    return 0
   fi
+  # A run that never reached PASS=1 failed, whatever status brought us here.
+  [[ "$rc" -eq 0 ]] && rc=1
+  printf '\n\033[1;31m==> SMOKE FAILED (see above)\033[0m\n' >&2
+  printf '    work dir kept for diagnosis: %s\n' "$WORK" >&2
+  [[ -f "$HOLDER_LOG" ]] && printf '    holder log tail:\n' >&2 && tail -n 30 "$HOLDER_LOG" >&2
+  if [[ -n "$RECOVERY" ]]; then
+    printf '\n\033[1;31m==> MANUAL RECOVERY NEEDED on this host:\033[0m\n' >&2
+    printf '%s' "$RECOVERY" >&2
+  fi
+  return "$rc"
 }
-trap cleanup EXIT
+install_cleanup_traps
 
 note "Preflight: Apple Silicon macOS with a codesigned binary"
 [[ "$(uname -s)" == "Darwin" ]] || fail "this smoke test needs macOS (got $(uname -s)) — the holder runs a Virtualization.framework VM"
@@ -190,10 +274,9 @@ done
 ok "guest booted and is reachable — with no parent process anywhere"
 
 note "Draining the holder cleanly (ACPI, wait for stopped, no power cut)"
-"$BIN" stop --instance "$NAME" --timeout "$DRAIN_TIMEOUT" || fail "'br stop --instance $NAME' failed"
-for _ in $(seq 1 30); do alive "$HOLDER_PID" || break; sleep 2; done
-alive "$HOLDER_PID" && fail "holder still running after a clean stop"
-HOLDER_PID=""
+run_interruptible "$BIN" stop --instance "$NAME" --timeout "$DRAIN_TIMEOUT" \
+  || fail "'br stop --instance $NAME' failed"
+wait_for_holder_exit || fail "holder still running after a clean stop"
 ok "holder exited"
 
 note "Asserting the instance retracted itself"
@@ -215,7 +298,7 @@ ok "'br instances' no longer lists it"
 note "PHASE 2: 'br start' must return, leaving the VM running"
 # Foreground, and it BLOCKS until the guest is ready: that is the preserved UX.
 # What is new is that it comes back at all.
-if ! "$BIN" start --state-dir "$SLOT" --timeout "${READY_TIMEOUT}s" >"$START_LOG" 2>&1; then
+if ! run_interruptible "$BIN" start --state-dir "$SLOT" --timeout "${READY_TIMEOUT}s" >"$START_LOG" 2>&1; then
   sed 's/^/      /' "$START_LOG" >&2
   fail "'br start' failed — see $START_LOG"
 fi
@@ -224,7 +307,7 @@ ok "'br start' returned (it used to block for the life of the VM)"
 # The CLI process is gone by definition — the command above completed — so the
 # only thing that can still be holding the VM is the holder.
 [[ -e "$REGISTRY" ]] || fail "no registry entry at $REGISTRY after 'br start' returned"
-HOLDER_PID="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$REGISTRY" | head -1)"
+HOLDER_PID="$(registry_pid "$REGISTRY")"
 [[ -n "$HOLDER_PID" ]] || fail "registry entry names no holder pid: $REGISTRY"
 [[ "$HOLDER_PID" != "$$" ]] || fail "the holder pid is this script — 'br start' did not detach the VM"
 alive "$HOLDER_PID" || fail "THE VM DIED WITH THE CLI — this is goal 1 unfulfilled on the ordinary path"
@@ -236,10 +319,9 @@ ok "the VM still answers on its control socket"
 ok "the guest is reachable with no CLI process anywhere"
 
 note "Draining the VM 'br start' left behind"
-"$BIN" stop --instance "$NAME" --timeout "$DRAIN_TIMEOUT" || fail "'br stop --instance $NAME' failed"
-for _ in $(seq 1 30); do alive "$HOLDER_PID" || break; sleep 2; done
-alive "$HOLDER_PID" && fail "holder still running after a clean stop"
-HOLDER_PID=""
+run_interruptible "$BIN" stop --instance "$NAME" --timeout "$DRAIN_TIMEOUT" \
+  || fail "'br stop --instance $NAME' failed"
+wait_for_holder_exit || fail "holder still running after a clean stop"
 ok "holder exited"
 [[ -e "$REGISTRY" ]] && fail "registry entry survived the drain: $REGISTRY"
 ok "registry entry retracted"
