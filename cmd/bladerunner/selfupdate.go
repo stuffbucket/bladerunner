@@ -21,6 +21,10 @@ var selfUpdateFlags struct {
 var selfUpdateCmd = &cobra.Command{
 	Use:   "self-update",
 	Short: "Update a .dmg-installed Bladerunner.app in place",
+	// A user typing `update` means "update bladerunner", which is this.
+	// NOTE colima update means something else entirely — it updates the
+	// container runtime INSIDE the VM, which has no counterpart here.
+	Aliases: []string{"update"},
 	Long: `Download and install the latest signed Bladerunner.app over the current
 one, verifying its Ed25519 signature before replacing anything.
 

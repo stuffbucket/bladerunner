@@ -39,6 +39,10 @@ type configKeyInfo struct {
 var configCmd = &cobra.Command{
 	Use:   "config <get|set|keys> [key] [value]",
 	Short: "Get or set configuration values",
+	// colima spells the configuration verb `template`, because it opens an
+	// editor on one. This edits the same settings through get/set instead of
+	// an editor, so the alias points at the right subject, not the same UX.
+	Aliases: []string{"template"},
 	Long: `Manage Bladerunner configuration.
 
 Most config values can be read without a running VM. Values that are

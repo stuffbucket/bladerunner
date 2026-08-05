@@ -489,6 +489,10 @@ func incusClientForTarget() (*incus.Client, error) {
 var instancesCmd = &cobra.Command{
 	Use:   "instances",
 	Short: "List running VM instances",
+	// colima spells this `list`. Note `br ls` is a DIFFERENT thing: Incus
+	// instances inside the guest, not the VMs themselves. The names are close
+	// and the meanings are not, which is why both are in the grouped help.
+	Aliases: []string{"list"},
 	Long: `List the bladerunner VM instances that are currently running, with the
 ports they published and the process holding each one.
 

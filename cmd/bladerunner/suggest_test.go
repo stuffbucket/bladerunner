@@ -5,51 +5,84 @@ import (
 	"testing"
 )
 
-// A user arriving from another tool types the verb that tool used. Cobra
-// already suggests NEAR-MISSES by edit distance, so "resart" finds restart —
-// but a synonym is not a near-miss. `br delete` is nowhere near `br reset`, and
-// without a declared synonym it gets "unknown command" and nothing else.
-//
-// These are suggestions, not aliases. Adding `br delete` as a real verb, or a
-// third spelling of the two list commands, would trade one confusion for
-// another; pointing at the right verb and letting the user choose does not.
-func TestSynonymsFromOtherToolsAreSuggested(t *testing.T) {
-	cases := []struct {
-		typed string
-		want  string
-		from  string
-	}{
-		{typed: "delete", want: "reset", from: "colima delete"},
-		{typed: "destroy", want: "reset", from: "vagrant destroy"},
-		{typed: "rm", want: "reset", from: "docker rm"},
-		{typed: "teardown", want: "reset", from: "colima's own wording"},
-		{typed: "list", want: "instances", from: "colima list"},
-		{typed: "halt", want: "stop", from: "vagrant halt"},
-		{typed: "down", want: "stop", from: "docker compose down"},
-		{typed: "console", want: "shell", from: "multipass/serial console"},
-	}
+// aliasCase is one verb another tool uses and the bladerunner command it must
+// reach.
+type aliasCase struct {
+	typed string
+	want  string
+	from  string
+}
 
-	for _, tc := range cases {
+// Verbs from other tools must RESOLVE, not merely be suggested.
+//
+// A suggestion still costs the user a second attempt. Where the meaning is the
+// same and only the spelling differs, the word should just work.
+var aliasCases = []aliasCase{
+	{typed: "delete", want: "reset", from: "colima delete"},
+	{typed: "list", want: "instances", from: "colima list"},
+	{typed: "ps", want: "ls", from: "docker ps"},
+	{typed: "template", want: "config", from: "colima template"},
+	{typed: "update", want: "self-update", from: "colima update"},
+}
+
+func TestOtherToolsVerbsResolve(t *testing.T) {
+	for _, tc := range aliasCases {
 		t.Run(tc.typed, func(t *testing.T) {
-			got := rootCmd.SuggestionsFor(tc.typed)
-			if !slices.Contains(got, tc.want) {
-				t.Errorf("`br %s` (%s) suggests %v, want %q among them",
-					tc.typed, tc.from, got, tc.want)
+			cmd, _, err := rootCmd.Find([]string{tc.typed})
+			if err != nil {
+				t.Fatalf("`br %s` (%s) does not resolve: %v", tc.typed, tc.from, err)
+			}
+			if cmd.Name() != tc.want {
+				t.Errorf("`br %s` (%s) resolves to %q, want %q", tc.typed, tc.from, cmd.Name(), tc.want)
 			}
 		})
 	}
 }
 
-// A synonym must not become a real command.
+// ls and list are DIFFERENT commands, on purpose.
 //
-// The suggestion exists precisely so the verb does NOT have to be added: two
-// commands that both list things under confusingly similar names is the state
-// this avoids.
-func TestSuggestedSynonymsAreNotRealCommands(t *testing.T) {
-	for _, name := range []string{"delete", "destroy", "rm", "list", "halt", "down"} {
-		cmd, _, err := rootCmd.Find([]string{name})
-		if err == nil && cmd.Name() == name {
-			t.Errorf("%q became a real command; it was meant to stay a suggestion", name)
-		}
+// `br ls` lists Incus instances inside the guest; `br list` lists the VMs
+// themselves. The names are close and the meanings are not. That is a
+// deliberate call: a colima user typing `list` means VMs, a docker user typing
+// `ps` means containers, and both now get what they meant. This pins that they
+// stay distinct rather than one quietly becoming an alias of the other.
+func TestLsAndListStayDistinct(t *testing.T) {
+	ls, _, err := rootCmd.Find([]string{"ls"})
+	if err != nil {
+		t.Fatalf("br ls does not resolve: %v", err)
+	}
+	list, _, err := rootCmd.Find([]string{"list"})
+	if err != nil {
+		t.Fatalf("br list does not resolve: %v", err)
+	}
+	if ls.Name() == list.Name() {
+		t.Errorf("br ls and br list both resolve to %q; they list different things", ls.Name())
+	}
+	if ls.Name() != "ls" || list.Name() != "instances" {
+		t.Errorf("ls -> %q, list -> %q; want ls -> ls, list -> instances", ls.Name(), list.Name())
+	}
+}
+
+// Synonyms with no exact counterpart stay SUGGESTIONS.
+//
+// These mean something near a bladerunner verb without meaning the same thing,
+// so pointing is honest where aliasing would over-promise. `br destroy` should
+// mention reset, not silently perform it.
+func TestApproximateSynonymsAreOnlySuggested(t *testing.T) {
+	for _, tc := range []aliasCase{
+		{typed: "destroy", want: "reset", from: "vagrant destroy"},
+		{typed: "rm", want: "reset", from: "docker rm"},
+		{typed: "halt", want: "stop", from: "vagrant halt"},
+		{typed: "down", want: "stop", from: "docker compose down"},
+		{typed: "console", want: "shell", from: "serial console"},
+	} {
+		t.Run(tc.typed, func(t *testing.T) {
+			if cmd, _, err := rootCmd.Find([]string{tc.typed}); err == nil && cmd.Name() == tc.typed {
+				t.Fatalf("%q became a real command; it was meant to stay a suggestion", tc.typed)
+			}
+			if got := rootCmd.SuggestionsFor(tc.typed); !slices.Contains(got, tc.want) {
+				t.Errorf("`br %s` (%s) suggests %v, want %q among them", tc.typed, tc.from, got, tc.want)
+			}
+		})
 	}
 }
