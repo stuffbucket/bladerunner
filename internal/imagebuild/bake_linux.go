@@ -14,7 +14,7 @@ import (
 // a default reached for internally would decide where large files land on behalf
 // of its caller.
 func HostMechanic(workDir string, log func(string)) (Mechanic, error) {
-	return func(ctx context.Context, basePath string, steps []Step) error {
+	return func(ctx context.Context, basePath string, steps []Step) ([]Skipped, error) {
 		return Customize(ctx, Options{
 			BaseImage: basePath,
 			WorkDir:   workDir,

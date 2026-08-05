@@ -30,25 +30,26 @@ type Options struct {
 	Log func(string)
 }
 
-// Customize applies steps to the image at opts.BaseImage, in place.
+// Customize applies steps to the image at opts.BaseImage, in place, and returns
+// the optional steps it skipped.
 //
 // The image is attached to an nbd device, its root filesystem mounted, and the
 // steps applied through a chroot. This is the fast mechanic: it needs Linux,
 // root, and a target architecture matching the host's, and in exchange it runs
 // roughly an order of magnitude quicker than the libguestfs appliance on a host
 // without KVM.
-func Customize(ctx context.Context, opts Options) (err error) {
+func Customize(ctx context.Context, opts Options) (skipped []Skipped, err error) {
 	if opts.BaseImage == "" {
-		return errors.New("no base image to customize")
+		return nil, errors.New("no base image to customize")
 	}
 	if _, statErr := os.Stat(opts.BaseImage); statErr != nil {
-		return fmt.Errorf("base image %s is not readable: %w", opts.BaseImage, statErr)
+		return nil, fmt.Errorf("base image %s is not readable: %w", opts.BaseImage, statErr)
 	}
 	if opts.WorkDir == "" {
-		return errors.New("no work directory for the mount point")
+		return nil, errors.New("no work directory for the mount point")
 	}
 	if len(opts.Steps) == 0 {
-		return errors.New("no build steps to apply")
+		return nil, errors.New("no build steps to apply")
 	}
 
 	device := opts.Device
@@ -63,7 +64,7 @@ func Customize(ctx context.Context, opts Options) (err error) {
 	logf(fmt.Sprintf("attaching %s to %s", opts.BaseImage, device))
 	mount, err := attachImage(ctx, opts.BaseImage, opts.WorkDir, device)
 	if err != nil {
-		return fmt.Errorf("attach the guest image: %w", err)
+		return nil, fmt.Errorf("attach the guest image: %w", err)
 	}
 
 	// Teardown is deferred rather than called at the end, so a failure part-way
@@ -78,12 +79,14 @@ func Customize(ctx context.Context, opts Options) (err error) {
 
 	logf(fmt.Sprintf("applying %d build steps to %s", len(opts.Steps), mount.Root))
 	runner := chrootRunner{root: mount.Root, log: func(line string) { logf("  " + line) }}
-	skipped, err := Apply(ctx, mount.Root, opts.Steps, runner)
+	skipped, err = Apply(ctx, mount.Root, opts.Steps, runner)
 	if err != nil {
-		return fmt.Errorf("apply the build steps: %w", err)
+		return skipped, fmt.Errorf("apply the build steps: %w", err)
 	}
-	// Optional steps that failed are reported, not swallowed. An image quietly
-	// missing a component is the failure this build exists to surface.
+	// Optional steps that failed are logged here for the build transcript AND
+	// returned, so the caller can put them in its own report. Logging alone is
+	// what let a bake publish an image with no web UI in it under a green tick
+	// (#265): one line in the middle of a long CI log nobody reads.
 	for _, s := range skipped {
 		logf(fmt.Sprintf("skipped (non-fatal): %s: %v", s.Step.Desc, s.Err))
 	}
@@ -92,5 +95,5 @@ func Customize(ctx context.Context, opts Options) (err error) {
 	// step that follows reads a qcow2 the kernel has not finished writing.
 	logf("flushing the guest filesystem")
 	syncFilesystems()
-	return nil
+	return skipped, nil
 }

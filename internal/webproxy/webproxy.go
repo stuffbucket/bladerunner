@@ -40,6 +40,16 @@ const (
 	responseHeaderTimeout = 60 * time.Second
 	// readHeaderTimeout bounds slow-header (Slowloris) clients on the browser side.
 	readHeaderTimeout = 10 * time.Second
+	// idleTimeout bounds how long an established keep-alive connection may sit
+	// between requests before the server closes it.
+	//
+	// It has to be stated. Go falls back to ReadTimeout for the idle bound and
+	// that is deliberately unset here, so without this every browser tab that
+	// ever opened the Incus UI held a descriptor and a goroutine on the holder
+	// until the browser itself dropped the connection (#285). Two minutes is
+	// longer than any browser's own keep-alive idle window, so a live tab never
+	// notices, and an abandoned one is reaped.
+	idleTimeout = 120 * time.Second
 	// shutdownTimeout bounds graceful shutdown.
 	shutdownTimeout = 5 * time.Second
 	// serialBits is the bit length of the random certificate serial number.
@@ -133,6 +143,16 @@ func New(opts Options) (*Proxy, error) {
 		Handler:           rp,
 		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		// ReadTimeout and WriteTimeout are deliberately LEFT UNSET, and must
+		// stay that way. They are whole-request and whole-response deadlines,
+		// and this proxy carries long-lived streams: the Incus event stream and
+		// the console/exec WebSocket upgrades both stay open for as long as the
+		// UI is watching. A WriteTimeout would cut every one of them off at the
+		// deadline, which surfaces as the web UI losing its connection for no
+		// visible reason. ReadHeaderTimeout covers the Slowloris case those
+		// would otherwise be reached for, and IdleTimeout above bounds idle
+		// connections without touching an active stream.
 	}
 
 	return &Proxy{

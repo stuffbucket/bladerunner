@@ -99,7 +99,7 @@ func TestCustomizeAppliesStepsToARealImage(t *testing.T) {
 
 	recipe := offlineRecipe()
 	logged := &logCollector{}
-	err := Customize(t.Context(), Options{
+	_, err := Customize(t.Context(), Options{
 		BaseImage: image,
 		WorkDir:   t.TempDir(),
 		Steps:     offlineSteps(recipe),
@@ -133,7 +133,7 @@ func TestCustomizeDetachesAfterAFailedStep(t *testing.T) {
 		Argv: []string{"/bin/sh", "-c", "exit 7"},
 	})
 
-	err := Customize(t.Context(), Options{
+	_, err := Customize(t.Context(), Options{
 		BaseImage: image,
 		WorkDir:   t.TempDir(),
 		Steps:     steps,
@@ -156,7 +156,7 @@ func TestCustomizeRestoresTheImageResolver(t *testing.T) {
 	before := guestResolvLink(t, image)
 
 	recipe := offlineRecipe()
-	if err := Customize(t.Context(), Options{
+	if _, err := Customize(t.Context(), Options{
 		BaseImage: image,
 		WorkDir:   t.TempDir(),
 		Steps:     offlineSteps(recipe),

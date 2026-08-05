@@ -19,6 +19,7 @@ type recordingBake struct {
 	fetched string
 	argv    [][]string
 	steps   int
+	skipped []Skipped
 }
 
 func (b *recordingBake) deps() BakeDeps {
@@ -45,10 +46,10 @@ func (b *recordingBake) deps() BakeDeps {
 			b.argv = append(b.argv, argv)
 			return fail(phase)
 		},
-		Customize: func(_ context.Context, _ string, steps []Step) error {
+		Customize: func(_ context.Context, _ string, steps []Step) ([]Skipped, error) {
 			b.order = append(b.order, string(PhaseCustomize))
 			b.steps = len(steps)
-			return fail(string(PhaseCustomize))
+			return b.skipped, fail(string(PhaseCustomize))
 		},
 		Publish: func(_, _ string) error {
 			b.order = append(b.order, string(PhasePublish))
@@ -62,7 +63,7 @@ func TestBakeRunsEveryPhaseInOrder(t *testing.T) {
 	p := planFor(t, t.TempDir(), "/tmp/guest.qcow2", 8)
 	rec := &recordingBake{}
 
-	if err := Bake(t.Context(), p, rec.deps()); err != nil {
+	if _, err := Bake(t.Context(), p, rec.deps()); err != nil {
 		t.Fatalf("Bake: %v", err)
 	}
 
@@ -88,7 +89,7 @@ func TestBakeStopsAtTheFirstFailure(t *testing.T) {
 			p := planFor(t, t.TempDir(), "/tmp/guest.qcow2", 8)
 			rec := &recordingBake{failOn: phase}
 
-			err := Bake(t.Context(), p, rec.deps())
+			_, err := Bake(t.Context(), p, rec.deps())
 			if err == nil {
 				t.Fatalf("Bake succeeded although %s failed", phase)
 			}
@@ -118,7 +119,7 @@ func TestBakeRefusesIncompleteDeps(t *testing.T) {
 		"no publish":   {Fetch: full.Fetch, Run: full.Run, Customize: full.Customize},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := Bake(t.Context(), p, deps); err == nil {
+			if _, err := Bake(t.Context(), p, deps); err == nil {
 				t.Error("Bake accepted a dependency set it cannot finish with")
 			}
 		})
@@ -134,7 +135,7 @@ func TestBakePublishesTheCompletedPartial(t *testing.T) {
 	deps := (&recordingBake{}).deps()
 	deps.Publish = func(f, t2 string) error { from, to = f, t2; return nil }
 
-	if err := Bake(t.Context(), p, deps); err != nil {
+	if _, err := Bake(t.Context(), p, deps); err != nil {
 		t.Fatalf("Bake: %v", err)
 	}
 	if from != p.PartialPath || to != p.OutputPath {
@@ -149,7 +150,7 @@ func TestBakePublishesTheCompletedPartial(t *testing.T) {
 // The mechanic is the only part that varies by platform, and it arrives as an
 // argument, so this holds everywhere without a build tag.
 func TestNewBakeDepsIsComplete(t *testing.T) {
-	deps := NewBakeDeps(func(context.Context, string, []Step) error { return nil }, nil)
+	deps := NewBakeDeps(func(context.Context, string, []Step) ([]Skipped, error) { return nil, nil }, nil)
 
 	if err := deps.validate(); err != nil {
 		t.Fatalf("NewBakeDeps returned an incomplete set: %v", err)
@@ -218,7 +219,7 @@ func TestBakeCreatesTheOutputDirectory(t *testing.T) {
 	nested := filepath.Join(t.TempDir(), "does", "not", "exist", "guest.qcow2")
 	p := planFor(t, t.TempDir(), nested, 8)
 
-	if err := Bake(t.Context(), p, (&recordingBake{}).deps()); err != nil {
+	if _, err := Bake(t.Context(), p, (&recordingBake{}).deps()); err != nil {
 		t.Fatalf("Bake: %v", err)
 	}
 	if _, err := os.Stat(filepath.Dir(nested)); err != nil {

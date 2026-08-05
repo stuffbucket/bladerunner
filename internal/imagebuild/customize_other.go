@@ -32,7 +32,10 @@ type Options struct {
 // operations. CheckHost already refuses this host before a bake starts — this
 // exists so the refusal is a compile-time guarantee too, rather than only a
 // runtime one.
-func Customize(_ context.Context, _ Options) error {
-	return fmt.Errorf("%w: the mechanic needs Linux to mount a guest root and chroot into it, but this host is %s",
+//
+// The skipped-step return keeps the signature identical to the Linux build, so
+// a caller threading the skipped list compiles on every platform.
+func Customize(_ context.Context, _ Options) ([]Skipped, error) {
+	return nil, fmt.Errorf("%w: the mechanic needs Linux to mount a guest root and chroot into it, but this host is %s",
 		ErrUnsupportedHost, runtime.GOOS)
 }
