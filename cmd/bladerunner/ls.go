@@ -14,9 +14,12 @@ import (
 var lsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List Incus instances",
-	Long:  `List Incus instances (containers and virtual machines) running in the Bladerunner VM.`,
-	Args:  cobra.NoArgs,
-	RunE:  runLs,
+	// `ps` is what docker calls this: list the things running INSIDE. Here that
+	// is Incus instances in the guest, which is what `br ls` already lists.
+	Aliases: []string{"ps"},
+	Long:    `List Incus instances (containers and virtual machines) running in the Bladerunner VM.`,
+	Args:    cobra.NoArgs,
+	RunE:    runLs,
 }
 
 func runLs(_ *cobra.Command, _ []string) error {

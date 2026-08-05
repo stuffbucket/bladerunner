@@ -12,6 +12,10 @@ import (
 var resetCmd = &cobra.Command{
 	Use:   "reset",
 	Short: "Reset VM to baseline state",
+	// colima spells this `delete`. Its teardown is more complete than reset —
+	// reset keeps the base image, SSH keys and client certificates — so the
+	// alias points at the nearest verb rather than promising an identical one.
+	Aliases: []string{"delete"},
 	Long: `Reset the Bladerunner VM by removing its disk and cloud-init files, allowing a fresh start.
 This keeps the base image, SSH keys, and client certificates intact.
 
