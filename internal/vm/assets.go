@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -202,7 +204,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		if !util.FileExists(cfg.BaseImagePath) {
 			return "", fmt.Errorf("base image path does not exist: %s", cfg.BaseImagePath)
 		}
-		if err := ensureRawDiskImage(cfg.BaseImagePath); err != nil {
+		if err := ensureRawDiskImage(ctx, cfg.BaseImagePath); err != nil {
 			return "", err
 		}
 		logging.L().Info("using provided base image", "path", cfg.BaseImagePath)
@@ -218,7 +220,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 
 	path := filepath.Join(cfg.VMDir, "base-image.raw")
 	if util.FileExists(path) {
-		if err := ensureRawDiskImage(path); err != nil {
+		if err := ensureRawDiskImage(ctx, path); err != nil {
 			return "", err
 		}
 		logging.L().Info("using cached base image", "path", path)
@@ -250,7 +252,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 		return "", err
 	}
 
-	if err := ensureRawDiskImage(path); err != nil {
+	if err := ensureRawDiskImage(ctx, path); err != nil {
 		return "", err
 	}
 
@@ -358,7 +360,7 @@ func cachedImageForURL(imageURL string) (string, bool) {
 		return "", false
 	}
 	cachePath := config.ImageCachePath(digest)
-	if !util.FileExists(cachePath) || !util.FileExists(cachePath+".ok") {
+	if !util.FileExists(cachePath) || !util.FileExists(cachePath+cacheStampSuffix) {
 		return "", false
 	}
 	return cachePath, true
@@ -373,7 +375,7 @@ func ensureHostedOrDebian(ctx context.Context, cfg *config.Config, path string) 
 		err = verifyImageChecksum(ctx, cfg.BaseImageURL, "", true, path)
 	}
 	if err == nil {
-		if convErr := ensureRawDiskImage(path); convErr != nil {
+		if convErr := ensureRawDiskImage(ctx, path); convErr != nil {
 			return "", convErr
 		}
 		logging.L().Info("using pre-baked guest image (verified)", "path", path)
@@ -400,11 +402,96 @@ func ensureHostedOrDebian(ctx context.Context, cfg *config.Config, path string) 
 		_ = os.Remove(path)
 		return "", err
 	}
-	if err := ensureRawDiskImage(path); err != nil {
+	if err := ensureRawDiskImage(ctx, path); err != nil {
 		return "", err
 	}
 	logging.L().Info("using Debian base image (cloud-init path, fallback)", "path", path)
 	return path, nil
+}
+
+// Cache entry siblings. A content-addressed slot owns three of them, all
+// derived from the same path so one digest is one slot.
+const (
+	// cacheStampSuffix marks an entry whose download was verified and whose
+	// conversion completed. Only a stamped entry is reusable.
+	cacheStampSuffix = ".ok"
+	// cacheStagingSuffix is where the download lands before it is verified,
+	// converted, and renamed into the slot.
+	cacheStagingSuffix = ".dl"
+	// cacheLockSuffix names the flock(2) file that serializes staging into
+	// one slot.
+	cacheLockSuffix = ".lock"
+)
+
+// imageCacheLockRetryInterval is how often a caller waiting for a cache entry
+// retries. flock(2) has no context-aware blocking form, so the wait polls the
+// non-blocking one and honors cancellation between attempts.
+const imageCacheLockRetryInterval = 25 * time.Millisecond
+
+// errImageCacheBusy reports that another bladerunner process holds the shared
+// cache entry and this one stopped waiting for it. It exists so that a failure
+// caused by LOCAL CONCURRENCY is never worded like a digest mismatch: a
+// mismatch says the bytes on the wire were not the bytes that were pinned,
+// which sends the user hunting a supply-chain compromise. This says the
+// machine is busy with the same download.
+var errImageCacheBusy = errors.New("another bladerunner process is staging this base image into the shared cache")
+
+// cacheLock is a held claim on one content-addressed cache slot.
+type cacheLock struct {
+	file *os.File
+}
+
+// lockImageCacheEntry claims exclusive use of one cache slot, waiting for
+// whoever holds it until ctx is done.
+//
+// The cache is GLOBAL (config.ImageCacheDir) while every other lock in the
+// system is per-state-directory, so two instances booting cold at the same
+// moment share no lock at all and stage through the same fixed paths. The
+// claim is keyed on the slot rather than on the whole cache directory, so two
+// different images still download in parallel.
+//
+// flock(2) is the mechanism, as in internal/cartridge: the kernel drops it
+// when the holder dies, however it died, so a crashed download leaves a stale
+// lock FILE (harmless, reused in place) and never a stale LOCK. Waiting rather
+// than racing also means the second caller reuses the first caller's bytes —
+// on a metered connection, the difference is a gigabyte.
+func lockImageCacheEntry(ctx context.Context, cachePath string) (*cacheLock, error) {
+	path := cachePath + cacheLockSuffix
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open image cache lock: %w", err)
+	}
+
+	ticker := time.NewTicker(imageCacheLockRetryInterval)
+	defer ticker.Stop()
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return &cacheLock{file: f}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, fmt.Errorf("lock image cache entry: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, fmt.Errorf("%w: %w", errImageCacheBusy, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// release drops the claim. Closing the descriptor is what releases the kernel
+// lock. The lock FILE stays: unlinking it would let a second process create
+// and lock a different inode for the same path while this one still believes
+// it holds the claim.
+func (l *cacheLock) release() {
+	if l == nil || l.file == nil {
+		return
+	}
+	_ = l.file.Close()
+	l.file = nil
 }
 
 // ensureCachedBaseImage materializes the base image into the shared,
@@ -417,9 +504,14 @@ func ensureHostedOrDebian(ctx context.Context, cfg *config.Config, path string) 
 // raw's own digest necessarily differs from the qcow2 digest, so it cannot be
 // re-verified on reuse, and re-hashing a multi-GB raw on every boot would be
 // wasteful.
+//
+// Staging holds an exclusive claim on the slot, because the cache is shared
+// between processes while the staging paths are derived from the digest alone.
+// A second caller waits and then takes the warm-cache branch, so the bytes are
+// fetched once however many instances boot cold together.
 func ensureCachedBaseImage(ctx context.Context, cfg *config.Config, expectedSHA256 string) (string, error) {
 	cachePath := config.ImageCachePath(expectedSHA256)
-	okStamp := cachePath + ".ok"
+	okStamp := cachePath + cacheStampSuffix
 	if util.FileExists(cachePath) && util.FileExists(okStamp) {
 		logging.L().Info("using cached base image (content-addressed)", "path", cachePath, "sha256", expectedSHA256)
 		return cachePath, nil
@@ -432,11 +524,25 @@ func ensureCachedBaseImage(ctx context.Context, cfg *config.Config, expectedSHA2
 		return "", fmt.Errorf("create image cache dir: %w", err)
 	}
 
+	lock, err := lockImageCacheEntry(ctx, cachePath)
+	if err != nil {
+		return "", err
+	}
+	defer lock.release()
+
+	// Whoever held the claim may have just finished this exact entry, so the
+	// warm test is repeated under it. That is also what stops the removal below
+	// from deleting an entry another process has already returned to its caller.
+	if util.FileExists(cachePath) && util.FileExists(okStamp) {
+		logging.L().Info("using cached base image (content-addressed)", "path", cachePath, "sha256", expectedSHA256)
+		return cachePath, nil
+	}
+
 	// A prior interrupted attempt may have left an unverified entry; clear it.
 	_ = os.Remove(cachePath)
 	_ = os.Remove(okStamp)
 
-	dlPath := cachePath + ".dl"
+	dlPath := cachePath + cacheStagingSuffix
 	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", cachePath, "sha256", expectedSHA256)
 	if err := downloadFile(ctx, cfg.BaseImageURL, dlPath); err != nil {
 		_ = os.Remove(dlPath)
@@ -456,7 +562,7 @@ func ensureCachedBaseImage(ctx context.Context, cfg *config.Config, expectedSHA2
 	}
 	logging.L().Info("base image SHA-256 verified", "sha256", got)
 
-	if err := ensureRawDiskImage(dlPath); err != nil {
+	if err := ensureRawDiskImage(ctx, dlPath); err != nil {
 		_ = os.Remove(dlPath)
 		return "", err
 	}
@@ -472,7 +578,7 @@ func ensureCachedBaseImage(ctx context.Context, cfg *config.Config, expectedSHA2
 	return cachePath, nil
 }
 
-func ensureRawDiskImage(path string) error {
+func ensureRawDiskImage(ctx context.Context, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open disk image: %w", err)
@@ -483,7 +589,7 @@ func ensureRawDiskImage(path string) error {
 		if string(header) == "QFI\xfb" {
 			_ = f.Close()
 			logging.L().Info("qcow2 image detected, converting to raw format", "path", path)
-			if err := convertQcow2ToRaw(path); err != nil {
+			if err := convertQcow2ToRaw(ctx, path); err != nil {
 				return fmt.Errorf("convert qcow2 to raw: %w", err)
 			}
 			logging.L().Info("conversion complete", "path", path)
@@ -494,7 +600,31 @@ func ensureRawDiskImage(path string) error {
 	return nil
 }
 
-func convertQcow2ToRaw(qcow2Path string) error {
+// rawConvertSuffix names the staging file qemu-img writes the raw image to
+// before it is renamed over its source.
+const rawConvertSuffix = ".raw"
+
+// convertTimeout bounds one qcow2->raw conversion. A ~1 GB image converts in
+// seconds to a few minutes on any supported host, so this length of silence
+// means qemu-img is wedged — and a wedged conversion must not hold a boot open
+// forever with no way to interrupt it.
+const convertTimeout = 30 * time.Minute
+
+// convertQcow2ToRaw converts the qcow2 at qcow2Path into a raw image AT THE
+// SAME PATH.
+//
+// Two properties are load-bearing, because this runs on a CALLER-OWNED path —
+// ensureBaseImage passes the user's --base-image-path straight in:
+//
+//   - The converted output is renamed OVER the source. os.Rename replaces an
+//     existing destination, so at every instant qcow2Path holds either the
+//     original bytes or the converted ones. Unlinking the source first (as this
+//     did) opens a window in which a crash or a failed rename leaves the user
+//     with no file at all — a file bladerunner does not own and cannot re-fetch.
+//   - The partial output is removed on every error return. Raw expansion of a
+//     ~1 GB image is several GB, a full disk is the likeliest failure, and a
+//     leaked partial makes the retry more likely to fail the same way.
+func convertQcow2ToRaw(ctx context.Context, qcow2Path string) error {
 	start := time.Now()
 
 	// Check if qemu-img is available
@@ -502,21 +632,30 @@ func convertQcow2ToRaw(qcow2Path string) error {
 		return err
 	}
 
-	rawPath := qcow2Path + ".raw"
+	rawPath := qcow2Path + rawConvertSuffix
 	logging.L().Info("converting disk image", "from", qcow2Path, "to", rawPath)
 
-	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", qcow2Path, rawPath)
+	converted := false
+	defer func() {
+		if !converted {
+			_ = os.Remove(rawPath)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(ctx, convertTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "qemu-img", "convert", "-f", "qcow2", "-O", "raw", qcow2Path, rawPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("qemu-img convert failed: %w: %s", err, string(output))
 	}
 
-	// Replace original with converted image
-	if err := os.Remove(qcow2Path); err != nil {
-		logging.L().Warn("failed to remove qcow2 file", "path", qcow2Path, "err", err)
-	}
+	// Replace the original with the converted image. The rename is the only
+	// step: it is atomic, and it never leaves qcow2Path absent.
 	if err := os.Rename(rawPath, qcow2Path); err != nil {
 		return fmt.Errorf("rename converted image: %w", err)
 	}
+	converted = true
 
 	logging.L().Info("qcow2 to raw conversion complete", "path", qcow2Path, "elapsed", time.Since(start).Round(time.Millisecond).String())
 	return nil
@@ -539,13 +678,25 @@ func downloadFile(ctx context.Context, url, path string) error {
 		return fmt.Errorf("download base image failed: %s", resp.Status)
 	}
 
-	tmpPath := path + ".tmp"
+	// downloadTempSuffix names the file the body streams into before it is
+	// renamed into place, so a reader never sees a partial image at path.
+	const downloadTempSuffix = ".tmp"
+	tmpPath := path + downloadTempSuffix
 	_ = os.Remove(tmpPath)
 
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("create temp image file: %w", err)
 	}
+
+	// A failed download must not strand its partial body. The removal is
+	// disarmed once the bytes are renamed into place.
+	moved := false
+	defer func() {
+		if !moved {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
 	progress := logging.NewByteProgress("Downloading base image", resp.ContentLength)
 	if _, err := io.Copy(f, io.TeeReader(resp.Body, progress)); err != nil {
@@ -561,6 +712,7 @@ func downloadFile(ctx context.Context, url, path string) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("move downloaded image into place: %w", err)
 	}
+	moved = true
 	logging.L().Info("download complete", "url", url, "path", path, "elapsed", time.Since(start).Round(time.Millisecond).String())
 	return nil
 }
