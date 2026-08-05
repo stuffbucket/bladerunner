@@ -37,6 +37,11 @@ import (
 // All proofs are an SSH signature over a server-issued single-use nonce, verified
 // against the registered identity's public key. Tokens, tickets, codes, sessions
 // and pending requests are short-lived and held in memory only.
+//
+// Both paths bind an authorization code to exactly one registered client_id at
+// /authorize, and /token redeems a code only for that same client_id. The
+// binding is what stops one local client from redeeming another's code, so an
+// unbound or unregistered client is refused rather than accommodated.
 
 const (
 	// PathAuthnNonce serves the single-use nonce a client signs to prove it
@@ -551,6 +556,19 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "redirect_uri must be loopback")
 		return
 	}
+	// The client binding of an authorization code is established here and
+	// nowhere else. A request that names no client, or names one this provider
+	// does not serve, has nothing to bind a code to, so it is refused before any
+	// code exists — not redirected, because an unverified client_id makes the
+	// redirect target itself untrustworthy as an error sink.
+	if clientID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+		return
+	}
+	if !p.knownClient(clientID) {
+		writeError(w, http.StatusBadRequest, "unauthorized_client", "client_id is not registered with this provider")
+		return
+	}
 	if respType != "" && respType != responseTypeCode {
 		// redirectURI was rejected above unless it is loopback or relative, and
 		// buildErrorRedirect only appends query params without touching the host.
@@ -638,20 +656,27 @@ func (p *Provider) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
 		return
 	}
-	if ac.clientID != "" && clientID != "" && ac.clientID != clientID {
-		writeError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
+	// Exact client binding. The stored value is the only authority: an empty one
+	// means the code was minted without a binding, which no endpoint can produce
+	// any more, so it is refused instead of adopting whatever the caller sent.
+	if ac.clientID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_grant",
+			"refusing to redeem a code that carries no client binding")
+		return
+	}
+	if clientID != ac.clientID {
+		writeError(w, http.StatusBadRequest, "invalid_grant",
+			"refusing to redeem a code issued to a different client_id")
 		return
 	}
 	if err := verifyPKCE(ac.codeChallenge, ac.codeMethod, verifier); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
-	cid := ac.clientID
-	if cid == "" {
-		cid = clientID
-	}
 	ident := Identity{Fingerprint: ac.fingerprint, Comment: ac.comment}
-	tok, claims, err := p.issuer.Issue(ident, cid)
+	// The signed claim carries the client from the authorization grant, never
+	// the value the token request supplied.
+	tok, claims, err := p.issuer.Issue(ident, ac.clientID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return

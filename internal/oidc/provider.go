@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,9 +56,13 @@ const (
 // caller has proven possession of a registered SSH key, see sso.go) and then
 // redeems that code here for a signed JWT.
 type Provider struct {
-	issuer   *Issuer
-	store    *Store
-	sso      *ssoState
+	issuer *Issuer
+	store  *Store
+	sso    *ssoState
+	// clients is the registry of client_id values this provider will start a
+	// flow for. It is never empty: an authorization code is bound to one entry
+	// of this set, so an unlisted value has nothing to bind to.
+	clients  map[string]struct{}
 	listener net.Listener
 	server   *http.Server
 	addr     string
@@ -81,6 +86,13 @@ type Config struct {
 	SigningKey *SigningKey
 	// Store is the identity registry.
 	Store *Store
+	// ClientIDs is the explicit registry of OAuth2 client_id values allowed to
+	// start an authorization flow. Empty means the provider's single default
+	// client, oidcClientID. Every issued authorization code is bound to exactly
+	// one of these values and only that value can redeem it, so an entry added
+	// here is a client that can mint tokens: list only clients this provider
+	// really serves.
+	ClientIDs []string
 	// TokenTTL is the lifetime of issued tokens. Zero means DefaultTokenTTL.
 	TokenTTL time.Duration
 	// Listener, when non-nil, is an ALREADY BOUND loopback listener the
@@ -124,10 +136,37 @@ func NewProvider(cfg Config) (*Provider, error) {
 		issuer:   issuer,
 		store:    cfg.Store,
 		sso:      newSSOState(),
+		clients:  clientRegistry(cfg.ClientIDs),
 		listener: cfg.Listener,
 		addr:     cfg.ListenAddr,
 		baseURL:  cfg.IssuerURL,
 	}, nil
+}
+
+// clientRegistry builds the set of accepted client_id values. An empty or
+// blank-only list falls back to the single default client rather than to "any
+// client": a provider that accepts every client_id cannot bind a code to one.
+func clientRegistry(ids []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		set[oidcClientID] = struct{}{}
+	}
+	return set
+}
+
+// knownClient reports whether id names a registered client. An empty id is
+// never known, so it can never become a wildcard.
+func (p *Provider) knownClient(id string) bool {
+	if id == "" {
+		return false
+	}
+	_, ok := p.clients[id]
+	return ok
 }
 
 // Issuer returns the underlying token issuer, useful for callers that want to
