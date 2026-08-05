@@ -66,6 +66,7 @@ second copy in a different package.
 | DiskArbitration | `internal/diskarb` | Do not add a second cgo bridge |
 | VM lifecycle | `internal/vmhost` | Do not start a VM from `package main` |
 | Paths and file names | `internal/config` | Do not write a path as a string literal |
+| Outbound HTTP budgets | `internal/httpfetch` | Do not use `http.DefaultClient`, and do not build your own `http.Client` |
 
 Two more rules:
 
