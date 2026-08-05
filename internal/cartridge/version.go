@@ -234,24 +234,44 @@ func IsCartridge(mountpoint string) bool {
 // missingLayout names every required layout element that is absent, of the
 // wrong kind, or (for files) empty, in a stable order so the message is
 // deterministic.
+//
+// Every entry is inspected with Lstat, never Stat, so a SYMLINK is judged as
+// itself rather than as whatever it points at. A cartridge is by definition
+// self-contained — that is the whole promise of the artifact people AirDrop to
+// each other — and a link is how that promise is broken from inside: a
+// symlinked root.img has the VM write its disk into an arbitrary host file, a
+// symlinked state/ redirects EFI and cloud-init writes into a host directory,
+// and a symlinked share/ hands the guest read-write access to unrelated host
+// data. None of those is a cartridge, so each is reported as a wrong-kind
+// entry rather than resolved and accepted.
+//
+// Rejecting the link outright is preferred to resolving it and testing
+// containment: the resolved path can change between the check and the boot,
+// and a required entry has no legitimate reason to be a link.
 func missingLayout(mountpoint string) []string {
 	missing := make([]string, 0, len(requiredCartridgeFiles)+len(requiredCartridgeDirs))
 	for _, name := range requiredCartridgeFiles {
-		st, err := os.Stat(filepath.Join(mountpoint, name))
+		st, err := os.Lstat(filepath.Join(mountpoint, name))
 		switch {
 		case err != nil:
 			missing = append(missing, name)
+		case st.Mode()&os.ModeSymlink != 0:
+			missing = append(missing, name+" (is a symlink, want a file inside the cartridge)")
 		case st.IsDir():
 			missing = append(missing, name+" (is a directory, want a file)")
+		case !st.Mode().IsRegular():
+			missing = append(missing, name+" (is not a regular file)")
 		case st.Size() == 0:
 			missing = append(missing, name+" (empty)")
 		}
 	}
 	for _, name := range requiredCartridgeDirs {
-		st, err := os.Stat(filepath.Join(mountpoint, name))
+		st, err := os.Lstat(filepath.Join(mountpoint, name))
 		switch {
 		case err != nil:
 			missing = append(missing, name+"/")
+		case st.Mode()&os.ModeSymlink != 0:
+			missing = append(missing, name+"/ (is a symlink, want a directory inside the cartridge)")
 		case !st.IsDir():
 			missing = append(missing, name+"/ (is a file, want a directory)")
 		}
