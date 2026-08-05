@@ -132,6 +132,10 @@ func (r Recipe) Steps() []Step {
 
 	steps = append(steps, maskTimeSyncSteps(r)...)
 	steps = append(steps, webUISteps()...)
+	// After the units are enabled and before the image is sealed: the daemon
+	// this starts by hand needs the package installed, and the state it writes
+	// has to be inside the image.
+	steps = append(steps, incusInitSteps()...)
 
 	steps = append(steps,
 		Step{
