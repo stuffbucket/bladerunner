@@ -6,12 +6,16 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/util"
@@ -588,5 +592,248 @@ func TestCachedImageForURLRequiresBothFileAndStamp(t *testing.T) {
 	}
 	if got != cachePath {
 		t.Errorf("hit resolved to %q, want %q", got, cachePath)
+	}
+}
+
+// --- the shared cache under concurrent cold boots -------------------------
+
+const (
+	// racingChunkSize is the body chunk the racing server flushes at a time.
+	// The body is served in pieces so two downloads are inside io.Copy
+	// together rather than one finishing before the other opens its file.
+	racingChunkSize = 128 * 1024
+	// racingChunks makes the served body big enough for that overlap to be
+	// wide, without making the test slow.
+	racingChunks = 64
+	// racingBarrierGrace releases the two-request barrier when only ONE
+	// request ever arrives, which is exactly what a build that serializes the
+	// cache does. It is a release valve for the serialized path, never the
+	// synchronization for the racing one: two concurrent downloads trip the
+	// barrier on the request COUNT and never wait for this timer.
+	racingBarrierGrace = 250 * time.Millisecond
+)
+
+// racingImageServer serves image bytes at /image (with a 404 sidecar) and holds
+// every request until two are in flight, so two concurrent
+// ensureCachedBaseImage calls stage their downloads at the same instant. The
+// returned func reports how many image downloads were served.
+func racingImageServer(t *testing.T, image []byte) (*httptest.Server, func() int) {
+	t.Helper()
+
+	var mu sync.Mutex
+	requests := 0
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	open := func() { releaseOnce.Do(func() { close(release) }) }
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/image.sha256", func(w http.ResponseWriter, _ *http.Request) { http.NotFound(w, nil) })
+	mux.HandleFunc("/image", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		inFlight := requests
+		mu.Unlock()
+		if inFlight >= 2 {
+			open()
+		}
+		select {
+		case <-release:
+		case <-time.After(racingBarrierGrace):
+			open()
+		}
+
+		w.Header().Set("Content-Length", strconv.Itoa(len(image)))
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for off := 0; off < len(image); off += racingChunkSize {
+			if _, err := w.Write(image[off:min(off+racingChunkSize, len(image))]); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return requests
+	}
+}
+
+// TestEnsureCachedBaseImage_ConcurrentColdBoots holds the exclusion the shared
+// image cache needs. Multi-instance makes two cold boots at the same moment an
+// ordinary user action, and the cache is global while every other lock in the
+// system is per-state-directory. Without exclusion both callers stage through
+// the same fixed path, the bytes interleave, and both fail with a digest
+// mismatch that reads like a tampered upstream artifact.
+func TestEnsureCachedBaseImage_ConcurrentColdBoots(t *testing.T) {
+	data := bytes.Repeat([]byte("bladerunner shared base image bytes\n"), racingChunks*racingChunkSize/36)
+	digest := sha256Hex(data)
+	srv, served := racingImageServer(t, data)
+	defer srv.Close()
+
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
+	cfg := &config.Config{
+		BaseImageURL:            srv.URL + "/image",
+		BaseImageExpectedSHA256: digest,
+	}
+
+	const callers = 2
+	paths := make([]string, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			paths[i], errs[i] = ensureCachedBaseImage(context.Background(), cfg, digest)
+		}()
+	}
+	wg.Wait()
+
+	want := config.ImageCachePath(digest)
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: ensureCachedBaseImage: %v", i, errs[i])
+		}
+		if paths[i] != want {
+			t.Errorf("caller %d resolved to %q, want %q", i, paths[i], want)
+		}
+	}
+
+	cached, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("read cached image: %v", err)
+	}
+	if !bytes.Equal(cached, data) {
+		t.Fatalf("cached image is %d bytes and does not match the served image (%d bytes)", len(cached), len(data))
+	}
+	if !util.FileExists(want + ".ok") {
+		t.Error("a completed cache entry must carry its .ok stamp")
+	}
+	if n := served(); n != 1 {
+		t.Errorf("served %d downloads, want 1: the waiting caller must reuse the first download, not repeat it", n)
+	}
+}
+
+// TestEnsureCachedBaseImage_BusyCacheIsNotAMismatch holds the diagnostic half
+// of the same defect: a failure caused by LOCAL concurrency must never be
+// worded like a genuine digest mismatch, which sends the user hunting a
+// supply-chain compromise that did not happen.
+func TestEnsureCachedBaseImage_BusyCacheIsNotAMismatch(t *testing.T) {
+	data := []byte("staged by another process")
+	digest := sha256Hex(data)
+	srv := fakeServer(t, data, "404")
+	defer srv.Close()
+
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
+	if err := os.MkdirAll(config.ImageCacheDir(), 0o755); err != nil {
+		t.Fatalf("create cache dir: %v", err)
+	}
+	held, err := lockImageCacheEntry(context.Background(), config.ImageCachePath(digest))
+	if err != nil {
+		t.Fatalf("take the cache lock: %v", err)
+	}
+	defer held.release()
+
+	// A canceled context stands in for "gave up waiting", with no sleep.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cfg := &config.Config{
+		BaseImageURL:            srv.URL + "/image",
+		BaseImageExpectedSHA256: digest,
+	}
+	_, err = ensureCachedBaseImage(ctx, cfg, digest)
+	if err == nil {
+		t.Fatal("expected a busy-cache error while another process holds the entry")
+	}
+	if !errors.Is(err, errImageCacheBusy) {
+		t.Errorf("error is not errImageCacheBusy: %v", err)
+	}
+	if strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("a local concurrency failure must not read as a digest mismatch: %v", err)
+	}
+}
+
+// --- conversion safety ----------------------------------------------------
+
+// qemuImgStub puts a fake qemu-img first on PATH for the duration of the test,
+// so a conversion failure can be produced without qemu installed and without
+// writing a multi-gigabyte image.
+func qemuImgStub(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "qemu-img"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write qemu-img stub: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// qcow2Fixture writes a file with the qcow2 magic, which is what makes
+// ensureRawDiskImage convert it.
+func qcow2Fixture(t *testing.T) (path string, content []byte) {
+	t.Helper()
+	content = []byte("QFI\xfbthe only copy of the user's disk image")
+	return writeTempFile(t, content), content
+}
+
+// pathExists reports whether anything at all is at path — a file OR a
+// directory, unlike util.FileExists.
+func pathExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// TestConvertQcow2ToRaw_FailureRemovesPartialOutput holds that a conversion
+// that fails partway reclaims what qemu-img had already written. The raw
+// expansion of a ~1 GB image is several GB, a full disk is the likeliest
+// trigger, and a leaked partial makes the retry more likely to fail the same
+// way — a ratchet.
+func TestConvertQcow2ToRaw_FailureRemovesPartialOutput(t *testing.T) {
+	qemuImgStub(t, "#!/bin/sh\nfor a in \"$@\"; do dst=\"$a\"; done\nprintf 'partially converted' > \"$dst\"\necho 'simulated qemu-img failure' >&2\nexit 1\n")
+	path, content := qcow2Fixture(t)
+
+	if err := ensureRawDiskImage(context.Background(), path); err == nil {
+		t.Fatal("expected the stubbed conversion to fail")
+	}
+	if pathExists(path + ".raw") {
+		t.Error("a failed conversion must not leave its partial output on disk")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read input after the failed conversion: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Error("a failed conversion must leave its input byte-identical")
+	}
+}
+
+// TestConvertQcow2ToRaw_FailedRenameKeepsInput holds the data-safety half.
+// ensureBaseImage reaches this function with a CALLER-OWNED path — the user's
+// --base-image-path — so unlinking the source before the rename can destroy a
+// file bladerunner does not own and cannot re-fetch. The stub reports success
+// without producing an output file, which makes the rename fail; it stands for
+// any rename failure (a crash in the window, EIO, a read-only directory). The
+// input must still be there afterward.
+func TestConvertQcow2ToRaw_FailedRenameKeepsInput(t *testing.T) {
+	qemuImgStub(t, "#!/bin/sh\nexit 0\n")
+	path, content := qcow2Fixture(t)
+
+	if err := ensureRawDiskImage(context.Background(), path); err == nil {
+		t.Fatal("expected the rename onto the input to fail")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the caller's input is gone after a failed rename: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Error("a failed rename must leave the caller's input byte-identical")
+	}
+	if pathExists(path + ".raw") {
+		t.Error("a failed conversion must not leave its output on disk")
 	}
 }
