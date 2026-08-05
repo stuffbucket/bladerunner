@@ -77,11 +77,18 @@ func startWedgedHolder(t *testing.T) wedgedHolder {
 	if err := holder.Start(); err != nil {
 		t.Fatalf("start stand-in holder: %v", err)
 	}
+	// ONE waiter. os/exec panics on a second Wait, and the reap has to happen
+	// off this goroutine so waitForProcessGone sees the process actually leave
+	// the table rather than linger as a zombie that kill(pid, 0) still finds.
+	reaped := make(chan struct{})
+	go func() {
+		_ = holder.Wait()
+		close(reaped)
+	}()
 	t.Cleanup(func() {
 		_ = holder.Process.Kill()
-		_ = holder.Wait()
+		<-reaped
 	})
-	go func() { _ = holder.Wait() }()
 
 	pid := holder.Process.Pid
 	if err := os.WriteFile(control.LockPath(dir), []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
