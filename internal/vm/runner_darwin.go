@@ -136,10 +136,17 @@ func (r *Runner) SupportsSaveRestore() error {
 	return nil
 }
 
-// SaveState pauses the guest and writes its machine state to path. On success
-// the VM is left paused: callers either ResumeVM for a live snapshot, or Stop
-// for an upgrade handoff. The guest must not resume between save and a
-// subsequent Stop, or the on-disk image diverges from the saved RAM.
+// SaveState pauses the guest and writes its machine state to path, together
+// with the metadata sidecar that makes the state safe to restore. The two are
+// published as one generation: if the sidecar cannot be written the state file
+// is removed again and SaveState fails, because a state file without its stamp
+// of the disk it was taken against is not a snapshot anyone should restore.
+//
+// On success the VM is left paused: callers either ResumeVM for a live
+// snapshot, or Stop for an upgrade handoff. The guest must not resume between
+// save and a subsequent Stop, or the on-disk image diverges from the saved RAM.
+// On failure the guest is resumed where it can be, so a failed save does not
+// strand a paused VM.
 func (r *Runner) SaveState(path string) error {
 	if r.vm == nil {
 		return errors.New("vm not started")
@@ -153,23 +160,21 @@ func (r *Runner) SaveState(path string) error {
 	if err := r.vm.Pause(); err != nil {
 		return fmt.Errorf("pause vm: %w", err)
 	}
-	// VZ refuses to overwrite an existing save file, so clear any stale one.
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		_ = r.vm.Resume()
-		return fmt.Errorf("remove stale saved state %s: %w", path, err)
-	}
-	if err := r.vm.SaveMachineStateToPath(path); err != nil {
+	// One generation: the state file, then the sidecar recording the snapshot's
+	// hardware config and disk stamp, with any stale generation cleared first
+	// (VZ also refuses to overwrite an existing state file). The sidecar is
+	// written while the guest is paused, so the disk is frozen and the stamp is
+	// consistent with the saved RAM.
+	if err := publishSaveGeneration(path,
+		func() error { return r.vm.SaveMachineStateToPath(path) },
+		func() error {
+			return writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.GUI, r.cfg.DiskPath, r.effectiveShareTag())
+		},
+	); err != nil {
 		_ = r.vm.Resume() // best effort: don't strand a paused VM on failure
 		return fmt.Errorf("save vm state: %w", err)
 	}
 	r.savedState = true
-
-	// Record the snapshot's hardware config + disk stamp alongside the file so
-	// restore can rebuild a matching configuration and detect a changed disk.
-	// Written while paused (disk frozen). Non-fatal: the save itself succeeded.
-	if err := writeSaveMetadata(path, r.cfg.CPUs, r.cfg.MemoryGiB, r.cfg.DiskSizeGiB, r.cfg.GUI, r.cfg.DiskPath, r.effectiveShareTag()); err != nil {
-		logging.L().Warn("could not write saved-state metadata sidecar", "err", err)
-	}
 	return nil
 }
 
@@ -181,16 +186,21 @@ func guiModeLabel(gui bool) string {
 	return "headless"
 }
 
-// prepareRestore loads the saved-state sidecar (when present), applies the
-// snapshot's hardware configuration so the VZ config matches, and refuses the
-// restore if the disk has changed since the snapshot. A missing sidecar (an
-// older save) degrades to the current config with no disk check.
+// prepareRestore loads the saved-state sidecar, applies the snapshot's hardware
+// configuration so the VZ config matches, and refuses the restore if the disk
+// has changed since the snapshot.
+//
+// A missing sidecar refuses the restore. It used to fall back to the current
+// config with no disk check, which turned the guard off exactly when its input
+// was gone: the disk stamp is the only thing that stops saved RAM from being
+// pushed into a disk image that moved on since the snapshot, and a save that
+// lost its sidecar is precisely a save we cannot vouch for. Refusing with a
+// reason costs an operator one cold boot; skipping costs them the guest.
 func (r *Runner) prepareRestore() error {
 	meta, err := LoadSaveMetadata(r.restoreFrom)
 	if err != nil {
 		if os.IsNotExist(err) {
-			logging.L().Warn("no saved-state metadata sidecar; using current config and skipping disk-stamp check", "save", r.restoreFrom)
-			return nil
+			return fmt.Errorf("refusing restore: saved state %s has no metadata sidecar (%s), so the disk it was taken against cannot be verified; delete the saved state and boot normally instead", r.restoreFrom, SaveMetadataPath(r.restoreFrom))
 		}
 		return fmt.Errorf("read saved-state metadata: %w", err)
 	}

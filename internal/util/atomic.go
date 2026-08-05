@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -79,6 +80,40 @@ func PublishFileAtomic(src, dst string) error {
 		return fmt.Errorf("publish %s over %s: %w", src, dst, err)
 	}
 	syncDir(filepath.Dir(dst))
+	return nil
+}
+
+// CopyFileDurable copies src to a NEW file at dst and flushes it to stable
+// storage. dst must not already exist: this is the staging half of a publish,
+// so it creates the copy that PublishFileAtomic then renames into place, and it
+// must never overwrite whatever the destination already holds.
+//
+// It is the fallback for a destination PublishFileAtomic cannot reach by rename
+// — another filesystem, or one with no hard links — where the bytes really do
+// have to be read and written. The copy is created with perm; a failed copy is
+// removed by the caller, which owns the staging name.
+func CopyFileDurable(src, dst string, perm fs.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copy %s to %s: %w", src, dst, err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("flush %s: %w", dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
 	return nil
 }
 
