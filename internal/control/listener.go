@@ -36,6 +36,17 @@ const (
 	// lockAttempts bounds the stale-lock reclaim loop: one attempt to create
 	// the lock, and one more after reclaiming a lock whose holder is gone.
 	lockAttempts = 2
+
+	// acceptRetryDelay is the first pause after an accept error that is not
+	// net.ErrClosed, and acceptRetryDelayMax is the ceiling the delay doubles
+	// up to. A transient accept failure (EMFILE, ECONNABORTED) is worth
+	// retrying, but retrying it with no pause turns one bad file descriptor
+	// into a hot loop that writes a log line per iteration.
+	acceptRetryDelay    = 5 * time.Millisecond
+	acceptRetryDelayMax = 1 * time.Second
+	// acceptRetryFactor is how much the retry delay grows after each
+	// consecutive failure.
+	acceptRetryFactor = 2
 )
 
 // ErrInstanceLocked reports that another live process already claims this
@@ -259,22 +270,53 @@ func (l *Listener) Router() *Router {
 }
 
 // Start begins accepting connections (blocking).
+//
+// It returns when the context is canceled or when the listener is closed.
+// Closing the listener is a terminal condition: Accept then returns
+// net.ErrClosed immediately and forever, so continuing the loop would spin a
+// core and write a log line per iteration until something else canceled the
+// context. That window is real — teardown closes the listener while the context
+// is still live — and the flood rotates the log file away, erasing exactly the
+// history that explains why the VM went down.
+//
+// Any other accept error is treated as transient and retried after a growing
+// pause, so a failure this code does not recognize also cannot become a hot
+// loop.
 func (l *Listener) Start(ctx context.Context) {
 	defer close(l.done)
 
+	delay := time.Duration(0)
 	for {
 		conn, err := l.netListen.Accept()
 		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			delay = nextAcceptDelay(delay)
+			logging.L().Warn("control listener accept error", "error", err, "retry_in", delay)
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				logging.L().Warn("control listener accept error", "error", err)
-				continue
+			case <-time.After(delay):
 			}
+			continue
 		}
+		delay = 0
 		go l.handleConnection(ctx, conn)
 	}
+}
+
+// nextAcceptDelay grows the pause between accept retries, capped at
+// acceptRetryDelayMax.
+func nextAcceptDelay(current time.Duration) time.Duration {
+	if current <= 0 {
+		return acceptRetryDelay
+	}
+	next := current * acceptRetryFactor
+	if next > acceptRetryDelayMax {
+		return acceptRetryDelayMax
+	}
+	return next
 }
 
 func (l *Listener) handleConnection(ctx context.Context, conn net.Conn) {
@@ -326,6 +368,28 @@ func (l *Listener) Close() error {
 		return errs[0]
 	}
 	return nil
+}
+
+// LockOwnerPID returns the PID recorded in the start lock of stateDir — the
+// process that bound (or is binding) the control socket there.
+//
+// It is the answer to "who holds this instance?" that does NOT require the
+// control socket to answer. The socket is the better source when it works,
+// because the server reports its own PID; but a holder that is alive and wedged
+// answers nothing, and that is precisely when a caller needs the PID in order to
+// signal it. The lock file is written before the socket is bound and removed
+// after the socket is cleaned up, so a lock present next to a live socket names
+// the process that owns it.
+//
+// It is best effort, like the lock itself: a directory that could not hold a
+// lock file has no record, and the error says so. It reports the recorded PID
+// only — ask internal/instance.ProcessAlive whether that process still exists.
+func LockOwnerPID(stateDir string) (int, error) {
+	pid, err := readLockPID(LockPath(stateDir))
+	if err != nil {
+		return 0, fmt.Errorf("read control lock owner for %s: %w", stateDir, err)
+	}
+	return pid, nil
 }
 
 // LockPath returns the start-lock path for a state directory. It is the single
