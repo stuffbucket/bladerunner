@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
+    "test": "node --test src/lib/release.test.js",
     "preview": "astro preview",
     "astro": "astro"
   },

@@ -5,10 +5,11 @@ name: Site version pin
 # "pin"   → freezes the site on a specific release tag by setting the
 #           SITE_PIN_VERSION repo variable (read at build time as
 #           VITE_SITE_PIN_VERSION — see pages.yml + site/src/pages/index.astro).
-# "unpin" → deletes the variable so the site resumes tracking /releases/latest.
+# "unpin" → deletes the variable so the site resumes discovering the newest
+#           product release itself.
 #
 # Use it to cut + validate a release without the landing page advancing to it,
-# then unpin to track latest again.
+# then unpin to resume discovery.
 #
 # Managing an Actions *variable* needs a token with Variables:write — the
 # default GITHUB_TOKEN cannot. Provide a fine-grained PAT (this repo,
@@ -19,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Pin the site to a version, or unpin to resume tracking latest
+        description: Pin the site to a version, or unpin to resume discovery
         type: choice
         options: [pin, unpin]
         default: pin
@@ -81,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           if gh variable delete SITE_PIN_VERSION --repo "$GITHUB_REPOSITORY" 2>/dev/null; then
-            echo "Unpinned — the site resumes tracking /releases/latest on redeploy."
+            echo "Unpinned — the site rediscovers the newest release on redeploy."
           else
             echo "SITE_PIN_VERSION was not set — nothing to unpin."
           fi
