@@ -129,22 +129,44 @@ func instanceID(name, userData string) string {
 	return fmt.Sprintf("bladerunner-%s-%s", name, hex.EncodeToString(sum[:])[:instanceIDDigestLength])
 }
 
+// Seed layout. The file names are fixed by the NoCloud datasource -- the guest
+// looks for exactly these on the seed volume, so they are not configurable --
+// and the modes are what a datasource needs to read them.
+const (
+	// seedUserDataName is the NoCloud user-data document.
+	seedUserDataName = "user-data"
+	// seedMetaDataName is the NoCloud meta-data document.
+	seedMetaDataName = "meta-data"
+	// seedVolumeName is the volume label the guest datasource searches for.
+	seedVolumeName = "cidata"
+	// seedDirMode is the mode of the staging directory and the ISO's parent.
+	seedDirMode os.FileMode = 0o755
+	// seedFileMode is the mode of a seed document. It carries no secret: the
+	// whole thing is handed to the guest on a readable volume.
+	seedFileMode os.FileMode = 0o644
+)
+
 // WriteSeedFiles stages the two documents from BuildCloudInit in
-// cfg.CloudInitDir, creating the directory if it is absent. The file names
-// "user-data" and "meta-data" are fixed by the NoCloud datasource: the guest
-// looks for exactly those on the seed volume, so they are not configurable.
-// This only populates the staging directory; BuildCloudInitISO turns it into
-// the volume the VM attaches.
+// cfg.CloudInitDir, creating the directory if it is absent. This only populates
+// the staging directory; BuildCloudInitISO turns it into the volume the VM
+// attaches.
+//
+// Each document is published through internal/util.WriteFileAtomic, the owner
+// of atomic file writes. A plain os.WriteFile opens O_TRUNC, so an interrupted
+// rewrite left a truncated document where a complete previous generation had
+// been -- and a guest that reads a half-written user-data provisions itself
+// from it (#212). The rename means a reader sees the whole previous generation
+// or the whole new one.
 func WriteSeedFiles(cfg *config.Config, userData, metaData string) error {
 	start := time.Now()
-	if err := os.MkdirAll(cfg.CloudInitDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.CloudInitDir, seedDirMode); err != nil {
 		return fmt.Errorf("create cloud-init dir: %w", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(cfg.CloudInitDir, "user-data"), []byte(userData), 0o644); err != nil {
+	if err := util.WriteFileAtomic(filepath.Join(cfg.CloudInitDir, seedUserDataName), []byte(userData), seedFileMode); err != nil {
 		return fmt.Errorf("write user-data: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(cfg.CloudInitDir, "meta-data"), []byte(metaData), 0o644); err != nil {
+	if err := util.WriteFileAtomic(filepath.Join(cfg.CloudInitDir, seedMetaDataName), []byte(metaData), seedFileMode); err != nil {
 		return fmt.Errorf("write meta-data: %w", err)
 	}
 
@@ -152,54 +174,101 @@ func WriteSeedFiles(cfg *config.Config, userData, metaData string) error {
 	return nil
 }
 
+// ISO staging. hdiutil writes wherever it is pointed and picks its own
+// extension, so the build lands in a private directory beside the destination
+// and only the finished file is renamed into place.
+const (
+	// isoStagePrefix is the os.MkdirTemp pattern for the staging directory. It
+	// sits in the destination's own directory so the publishing rename never
+	// crosses a filesystem, and the random suffix keeps two concurrent
+	// generations off a shared predictable name.
+	isoStagePrefix = "cidata.stage-"
+	// isoStageName is what hdiutil is told to write inside that directory.
+	isoStageName = "cidata"
+	// isoSectorBytes is the ISO 9660 logical sector size.
+	isoSectorBytes = 2048
+	// isoPVDSector holds the primary volume descriptor; the 16 sectors before
+	// it are the system area.
+	isoPVDSector = 16
+	// isoMinBytes is the smallest file that can carry an ISO 9660 primary
+	// volume descriptor, and so the floor a staged image must clear before it
+	// is allowed to replace a working one.
+	isoMinBytes = (isoPVDSector + 1) * isoSectorBytes
+)
+
 // BuildCloudInitISO packs the staging directory cfg.CloudInitDir into the image
 // at cfg.CloudInitISO, with the volume name "cidata" that the guest NoCloud
 // datasource searches for. The VM configuration attaches that file read-only as
 // a disk (see vmconfig_darwin.go), which is how the seed reaches the guest.
 //
-// Any existing image at the path is replaced first, so a boot always presents
-// the seed files as they are on disk now. hdiutil picks its own extension for
-// the output, so the produced file is renamed to cfg.CloudInitISO when it lands
-// under another name. It shells out to hdiutil and therefore works on macOS
-// only.
+// The build happens in a private staging directory beside the destination and
+// the result is published with internal/util.PublishFileAtomic, the owner of
+// single-rename publication. The previous image is therefore intact and usable
+// until a complete replacement exists: this used to remove the destination
+// first, so a canceled or failed hdiutil left the VM with no seed volume at all
+// where a moment earlier it had a working one (#212). Staged output is removed
+// on every path, success or failure.
+//
+// It shells out to hdiutil and therefore works on macOS only.
 func BuildCloudInitISO(ctx context.Context, cfg *config.Config) error {
 	start := time.Now()
-	if err := os.MkdirAll(filepath.Dir(cfg.CloudInitISO), 0o755); err != nil {
+	destDir := filepath.Dir(cfg.CloudInitISO)
+	if err := os.MkdirAll(destDir, seedDirMode); err != nil {
 		return fmt.Errorf("create cloud-init ISO parent: %w", err)
 	}
 
-	_ = os.Remove(cfg.CloudInitISO)
-	baseOut := strings.TrimSuffix(cfg.CloudInitISO, filepath.Ext(cfg.CloudInitISO))
+	stageDir, err := os.MkdirTemp(destDir, isoStagePrefix)
+	if err != nil {
+		return fmt.Errorf("create cloud-init ISO staging dir in %s: %w", destDir, err)
+	}
+	defer func() { _ = os.RemoveAll(stageDir) }()
 
+	baseOut := filepath.Join(stageDir, isoStageName)
 	cmd := exec.CommandContext(ctx,
 		"hdiutil", "makehybrid",
 		"-o", baseOut,
 		cfg.CloudInitDir,
 		"-iso", "-joliet",
-		"-default-volume-name", "cidata",
+		"-default-volume-name", seedVolumeName,
 	)
-	logging.L().Info("building cloud-init ISO", "input_dir", cfg.CloudInitDir, "output", cfg.CloudInitISO)
+	logging.L().Info("building cloud-init ISO", "input_dir", cfg.CloudInitDir, "output", cfg.CloudInitISO, "staging", baseOut)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("create cloud-init iso with hdiutil: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	candidates := []string{baseOut, baseOut + ".iso", baseOut + ".cdr", cfg.CloudInitISO}
-	for _, c := range candidates {
-		if util.FileExists(c) {
-			if c != cfg.CloudInitISO {
-				_ = os.Remove(cfg.CloudInitISO)
-				if err := os.Rename(c, cfg.CloudInitISO); err != nil {
-					return fmt.Errorf("rename cloud-init iso from %s: %w", c, err)
-				}
-			}
-			logging.L().Info("cloud-init ISO built", "path", cfg.CloudInitISO, "elapsed", time.Since(start).Round(time.Millisecond).String())
-			return nil
-		}
+	staged, err := stagedISO(baseOut)
+	if err != nil {
+		return err
+	}
+	if err := util.PublishFileAtomic(staged, cfg.CloudInitISO); err != nil {
+		return fmt.Errorf("publish cloud-init iso: %w", err)
 	}
 
-	return fmt.Errorf("cloud-init ISO not produced at expected paths (wanted %s)", cfg.CloudInitISO)
+	logging.L().Info("cloud-init ISO built", "path", cfg.CloudInitISO, "elapsed", time.Since(start).Round(time.Millisecond).String())
+	return nil
+}
+
+// stagedISO returns the file hdiutil actually produced under baseOut, after
+// checking it is big enough to be an ISO 9660 volume.
+//
+// hdiutil chooses the extension, so the name is not known in advance. The size
+// check is what makes the publication a decision rather than a reflex: a
+// zero-length or truncated output must not replace a seed volume that works.
+func stagedISO(baseOut string) (string, error) {
+	for _, c := range []string{baseOut, baseOut + ".iso", baseOut + ".cdr"} {
+		info, err := os.Stat(c)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Size() < isoMinBytes {
+			return "", fmt.Errorf("staged cloud-init iso %s is %d bytes, too small to hold an ISO 9660 volume descriptor (want at least %d)",
+				c, info.Size(), isoMinBytes)
+		}
+		return c, nil
+	}
+	return "", fmt.Errorf("cloud-init ISO not produced at any staged path under %s", baseOut)
 }
 
 func renderBootstrapScript(cfg *config.Config) string {
