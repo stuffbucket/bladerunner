@@ -60,6 +60,44 @@ const unmountedPlist = `<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 `
 
+// nonDictEntitiesPlist is a parseable attach plist whose system-entities array
+// holds values that are not dictionaries, so nothing usable can be read out of
+// it — and an empty one, which is the same dead end reached a different way.
+const nonDictEntitiesPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>system-entities</key>
+	<array>
+		<string>/dev/disk12</string>
+		<integer>7</integer>
+	</array>
+</dict>
+</plist>
+`
+
+const emptyEntitiesPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>system-entities</key>
+	<array/>
+</dict>
+</plist>
+`
+
+// noDevEntryPlist parses and names entities, but not one of them carries a
+// dev-entry, so the attach cannot clean itself up out of its own output.
+const noDevEntryPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>system-entities</key>
+	<array>
+		<dict><key>content-hint</key><string>GUID_partition_scheme</string></dict>
+		<dict><key>volume-kind</key><string>apfs</string></dict>
+	</array>
+</dict>
+</plist>
+`
+
 func TestMountPolicyZeroValueIsBrowsable(t *testing.T) {
 	var zero MountPolicy
 	if zero.Resolve() != MountBrowsable {
@@ -204,44 +242,105 @@ func TestAttachBrowsableCreatesNoDirectory(t *testing.T) {
 // policy: there the plist is additive (we dictated the location), here it is the
 // only source of truth, so an unusable plist is fatal — and whatever did attach
 // is unwound rather than stranded.
+//
+// The unwind may NOT depend on the malformed output naming the device needed to
+// clean itself up. Every row below is a successful attach whose description is
+// useless in a different way; each must still end with the image released.
 func TestAttachBrowsableFailsWithoutAMountpoint(t *testing.T) {
+	const image = "/images/demo" + SparseExt
+	// What `hdiutil info` reports when asked which device serves the image the
+	// attach just succeeded on — the recovery handle a malformed attach cannot
+	// take away.
+	recovered := fakeResult{stdout: infoPlistFor("/Volumes/bladerunner-demo", "/dev/disk12s2", image, true)}
+	nothing := fakeResult{stdout: emptyInfoPlist}
+
 	tests := []struct {
-		name        string
-		stdout      string
-		wantDetach  string
-		wantUnwound bool
+		name       string
+		stdout     string
+		recovery   *fakeResult
+		wantDetach string
 	}{
 		{
-			name:        "attached but mounted nothing",
-			stdout:      unmountedPlist,
-			wantDetach:  "/dev/disk12",
-			wantUnwound: true,
+			name:       "attached but mounted nothing",
+			stdout:     unmountedPlist,
+			wantDetach: "/dev/disk12", // the whole disk, straight out of the plist
 		},
 		{
-			name:   "output is not a plist at all",
-			stdout: "/dev/disk12\tGUID_partition_scheme\t\n",
+			name:       "output is not a plist at all",
+			stdout:     "/dev/disk12\tGUID_partition_scheme\t\n",
+			recovery:   &recovered,
+			wantDetach: "/dev/disk12s2",
+		},
+		{
+			name:       "system-entities holds no dictionaries",
+			stdout:     nonDictEntitiesPlist,
+			recovery:   &recovered,
+			wantDetach: "/dev/disk12s2",
+		},
+		{
+			name:       "system-entities is empty",
+			stdout:     emptyEntitiesPlist,
+			recovery:   &recovered,
+			wantDetach: "/dev/disk12s2",
+		},
+		{
+			name:       "no entity carries a dev-entry",
+			stdout:     noDevEntryPlist,
+			recovery:   &recovered,
+			wantDetach: "/dev/disk12s2",
+		},
+		{
+			name:     "the attach left nothing attached after all",
+			stdout:   emptyEntitiesPlist,
+			recovery: &nothing,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeRunner{results: []fakeResult{{stdout: tc.stdout}}}
-			_, err := attach(context.Background(), f, attachRequest{
-				path:   "/images/demo" + SparseExt,
-				policy: MountBrowsable,
-			})
+			results := []fakeResult{{stdout: tc.stdout}}
+			if tc.recovery != nil {
+				results = append(results, *tc.recovery)
+			}
+			f := &fakeRunner{results: results}
+			_, err := attach(context.Background(), f, attachRequest{path: image, policy: MountBrowsable})
 			if !errors.Is(err, ErrMountpointUnknown) {
 				t.Fatalf("err = %v, want ErrMountpointUnknown", err)
 			}
-			if !tc.wantUnwound {
-				if len(f.calls) != 1 {
-					t.Fatalf("hdiutil calls = %v, want only the attach", f.calls)
+			verbs := hdiutilVerbs(f)
+			if tc.wantDetach == "" {
+				// hdiutil confirmed nothing is attached from the image, so there
+				// is nothing to release and no detach to run.
+				if len(verbs) != 2 || verbs[1] != cmdInfo {
+					t.Fatalf("hdiutil calls = %v, want the attach and the probe alone", f.calls)
 				}
 				return
 			}
-			if len(f.calls) != 2 || f.calls[1][1] != cmdDetach || f.calls[1][2] != tc.wantDetach {
+			last := f.lastCall()
+			if len(last) < 3 || last[1] != cmdDetach || last[2] != tc.wantDetach {
 				t.Fatalf("hdiutil calls = %v, want the attach unwound by detach %s", f.calls, tc.wantDetach)
 			}
 		})
+	}
+}
+
+// A successful attach that can be neither described nor released is the one
+// outcome the user has to be told about twice: the cartridge is unusable AND a
+// volume nothing owns is still on their machine.
+func TestAttachBrowsableReportsAnUnwindItCouldNotConfirm(t *testing.T) {
+	const image = "/images/demo" + SparseExt
+	f := &fakeRunner{results: []fakeResult{
+		{stdout: emptyEntitiesPlist},                                // attached, but nothing usable to address
+		{stderr: "hdiutil: info failed", err: errors.New("exit 1")}, // and the recovery probe fails
+	}}
+
+	_, err := attach(context.Background(), f, attachRequest{path: image, policy: MountBrowsable})
+	if !errors.Is(err, ErrMountpointUnknown) {
+		t.Fatalf("err = %v, want it to keep reporting ErrMountpointUnknown", err)
+	}
+	for _, want := range []string{image, "hdiutil detach"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q, so the user cannot clear the stranded volume", err, want)
+		}
 	}
 }
 

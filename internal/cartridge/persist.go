@@ -91,13 +91,15 @@ var ErrWriteBackReadOnly = errors.New("cartridge: cannot replace the cartridge i
 // the one fact that matters: the original cartridge is unchanged.
 var ErrWriteBackFailed = errors.New("cartridge write-back failed; the original cartridge is unchanged")
 
-// closeBudget is how long Close may take. A discarding close is a detach; a
-// committing one additionally probes, compacts, compresses and verifies a whole
-// disk image, and a budget that did not cover the convert would kill the
-// write-back on exactly the cartridges big enough for anyone to care about.
+// closeBudget is how long Close may take. A discarding close is a detach — plus,
+// when no device node was captured, the `hdiutil info` probe that recovers the
+// one to detach; a committing one additionally probes, compacts, compresses and
+// verifies a whole disk image, and a budget that did not cover the convert would
+// kill the write-back on exactly the cartridges big enough for anyone to care
+// about.
 func (o *Opened) closeBudget() time.Duration {
 	if o == nil || !o.persist || o.WorkingCopy == "" {
-		return detachTimeout
+		return detachTimeout + infoTimeout
 	}
 	return detachTimeout + infoTimeout + compactTimeout + convertTimeout + verifyTimeout
 }
@@ -107,13 +109,14 @@ func (o *Opened) closeBudget() time.Duration {
 // cartridge was opened with Persist, and discarded otherwise.
 //
 // It is the one place the two outcomes are chosen between, so "the default is
-// discard" is a property of a single branch rather than of every caller.
+// discard" is a property of a single branch rather than of every caller. It is
+// only ever reached once the detach is CONFIRMED (see Opened.closeWith), which
+// is what makes removing the backing file safe here.
 func (o *Opened) settleWorkingCopy(ctx context.Context, r commandRunner) error {
 	if err := o.writeBack(ctx, r); err != nil {
 		return o.rescueWorkingCopy(err)
 	}
-	o.removeWorkingCopy()
-	return nil
+	return o.removeWorkingCopy()
 }
 
 // writeBack commits the guest's changes back over the shipped .dmg.

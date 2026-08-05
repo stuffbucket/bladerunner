@@ -290,6 +290,32 @@ func TestWriteBackRefusesWhenAttachmentCannotBeConfirmed(t *testing.T) {
 	}
 }
 
+// The same malformed output reaches the write-back's detach confirmation, which
+// reads "nothing is attached from that file" as permission to compress it and
+// rename the result over the user's cartridge. A record this build cannot read
+// must be refused there too, or a live image gets compressed mid-write and
+// shipped as a cartridge.
+func TestWriteBackRefusesOnUnreadableInfoOutput(t *testing.T) {
+	for name, plist := range malformedInfoPlists {
+		t.Run(name, func(t *testing.T) {
+			o, dmg, _ := persistFixture(t, true)
+			before := hashOf(t, dmg)
+			o.Mount = Mount{} // this process's own detach reported success
+			f := &fakeRunner{results: []fakeResult{{stdout: plist}}}
+
+			if err := o.writeBack(context.Background(), f); !errors.Is(err, ErrWriteBackAttached) {
+				t.Fatalf("writeBack = %v, want ErrWriteBackAttached", err)
+			}
+			if got := hashOf(t, dmg); got != before {
+				t.Fatalf("an unconfirmed write-back changed the original: %s -> %s", before, got)
+			}
+			if verbs := hdiutilVerbs(f); len(verbs) != 1 || verbs[0] != cmdInfo {
+				t.Errorf("hdiutil verbs = %v, want the probe alone — nothing may be read off the image", verbs)
+			}
+		})
+	}
+}
+
 // A cartridge sitting on a read-only volume (a mounted DMG, a locked share)
 // cannot be replaced. Say so BEFORE spending half an hour compressing an
 // artifact that has nowhere to go.
@@ -393,15 +419,17 @@ func TestWriteBackClearsAStagingFileFromAnInterruptedAttempt(t *testing.T) {
 }
 
 // The write-back budget has to cover the convert, or Close would kill its own
-// compression on every cartridge big enough to matter.
+// compression on every cartridge big enough to matter. A discarding close is a
+// detach plus the `hdiutil info` probe that recovers a device node the attach
+// plist never supplied.
 func TestCloseBudgetCoversTheWriteBack(t *testing.T) {
 	o, _, _ := persistFixture(t, true)
 	if got := o.closeBudget(); got <= convertTimeout {
 		t.Errorf("closeBudget() = %v, want more than the convert budget %v", got, convertTimeout)
 	}
 	o.persist = false
-	if got := o.closeBudget(); got != detachTimeout {
-		t.Errorf("a discarding close budget = %v, want %v", got, detachTimeout)
+	if got := o.closeBudget(); got != detachTimeout+infoTimeout {
+		t.Errorf("a discarding close budget = %v, want %v", got, detachTimeout+infoTimeout)
 	}
 }
 

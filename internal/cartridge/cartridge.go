@@ -111,6 +111,12 @@ type Mount struct {
 	// DiskArbitration and `diskutil` address a volume by, so cartridge
 	// eject/unmount-request handling needs it. Best-effort: empty when hdiutil
 	// emitted no parseable plist and the kernel could not be asked either.
+	//
+	// An empty DevNode asserts NOTHING. It is an ordinary outcome, not an
+	// exceptional one, so no code may read it as "this volume is gone" — that
+	// is the answer that authorizes unlinking a backing store. Ask
+	// releaseMount / DetachMount, which recover the device from hdiutil rather
+	// than assume there is none.
 	DevNode string
 	// Policy is the mount policy the volume was attached under. It is what
 	// tells a holder whether the user can Finder-eject this cartridge (and so
@@ -240,6 +246,50 @@ func attach(ctx context.Context, r commandRunner, req attachRequest) (*Mount, er
 // detach unmounts the cartridge at mountpoint using the production backoff.
 func detach(ctx context.Context, r commandRunner, mountpoint string) error {
 	return detachWithBackoff(ctx, r, mountpoint, detachBackoff)
+}
+
+// releaseMount detaches the volume m describes, and returns nil ONLY once
+// nothing is attached from image any more. It is the precondition every unlink
+// of a cartridge image is gated on.
+//
+// It addresses the volume by the BSD DEVICE NODE m captured at attach time,
+// never by m.Mountpoint. A mountpoint is a path: a cartridge that was
+// force-ejected releases its /Volumes entry, and an unrelated volume can be
+// mounted there by the time teardown runs, so detaching the remembered path
+// would eject somebody else's disk.
+//
+// When no device node was captured the state is UNKNOWN, and unknown is never
+// read as detached. hdiutil is asked which device it serves image from, which
+// is the one handle that survives a plist we could not parse: a conclusive
+// "nothing" succeeds, a recovered device is detached, and a probe that cannot be
+// completed returns an error so the caller keeps the mount, the backing file and
+// its claim for a later retry.
+func releaseMount(ctx context.Context, r commandRunner, m Mount, image string) error {
+	if m.Mountpoint == "" && m.DevNode == "" {
+		// Nothing was ever attached, or an earlier release already took it.
+		return nil
+	}
+	device := m.DevNode
+	if device == "" {
+		recovered, err := attachedDeviceFor(ctx, r, image)
+		switch {
+		case errors.Is(err, errNothingAttached):
+			return nil
+		case err != nil:
+			return fmt.Errorf("release the cartridge volume at %s: %w", mountDescription(m, image), err)
+		}
+		device = recovered
+	}
+	return detach(ctx, r, device)
+}
+
+// mountDescription names a mount in a message the user can act on, preferring
+// the location they can see over the image path they may never have looked at.
+func mountDescription(m Mount, image string) string {
+	if m.Mountpoint != "" {
+		return m.Mountpoint
+	}
+	return image
 }
 
 // detachWithBackoff unmounts the cartridge at mountpoint. It retries on
@@ -670,6 +720,11 @@ func Attach(path, mountpoint string) (*Mount, error) {
 
 // Detach unmounts the cartridge at mountpoint, retrying on "Resource busy" and
 // finally forcing the eject. An already-detached mountpoint is a no-op.
+//
+// It addresses a volume by PATH, so use it only where a path is all the caller
+// has (a volume this process did not attach, named by the user or by mount
+// detection). A caller holding the Mount must use DetachMount, which addresses
+// the volume by device node and confirms the release.
 func Detach(mountpoint string) error {
 	if !hostSupported() {
 		return ErrUnsupported
@@ -677,6 +732,30 @@ func Detach(mountpoint string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), detachTimeout)
 	defer cancel()
 	return detach(ctx, defaultRunner, mountpoint)
+}
+
+// DetachMount releases the volume m describes and reports whether it is gone.
+//
+// It is the safe form of Detach for a caller that attached the image itself: it
+// addresses the volume by the BSD device node m captured at attach time rather
+// than by its remembered mountpoint, and when no device node was captured it
+// asks hdiutil which device is served from m.Path instead of assuming there is
+// none.
+//
+// A nil return is a POSITIVE confirmation that nothing is attached from the
+// image any more, so it — and only it — may be used as the precondition for
+// unlinking that image. Every other outcome, including a probe that could not
+// be completed, is an error.
+func DetachMount(m Mount) error {
+	if m.Mountpoint == "" && m.DevNode == "" {
+		return nil // nothing was attached, so nothing has to be released
+	}
+	if !hostSupported() {
+		return ErrUnsupported
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), detachTimeout+infoTimeout)
+	defer cancel()
+	return releaseMount(ctx, defaultRunner, m, m.Path)
 }
 
 // Compact reclaims unused space in a detached sparse cartridge image.
@@ -762,3 +841,16 @@ func DevNodeAt(mountpoint string) (string, error) {
 	}
 	return info.DevNode, nil
 }
+
+// ErrMayStillBeAttached marks an error whose attachment state could not be
+// established: an attach that succeeded and whose unwind could not be
+// confirmed. It is not "attached" and not "detached" — it is "unknown", and
+// every destructive step keys on it because unknown must be treated as
+// attached.
+//
+// It exists so a caller can tell the two failure shapes apart. `attach`
+// returning a plain error means nothing was left behind and the working copy is
+// pure waste; returning one that wraps this means a volume may be live on that
+// image, so unlinking it would be the data loss this package refuses at every
+// other door.
+var ErrMayStillBeAttached = errors.New("attachment state could not be established")

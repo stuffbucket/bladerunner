@@ -53,6 +53,18 @@ var ErrNoBackingImage = errors.New("no attached disk image backs that device or 
 // device node / mountpoint.
 var ErrNoImageRef = errors.New("cartridge: no device node or mountpoint given")
 
+// errMalformedInfo reports that `hdiutil info -plist` produced a document this
+// build cannot read: the images key is present but not an array, an entry is
+// not a dictionary, or an entry omits the image path a lookup has to match on.
+//
+// It is deliberately DISTINCT from ErrNoBackingImage. Callers act on the
+// difference: ErrNoBackingImage is a conclusive "that file is not attached" and
+// authorizes an unlink, while this one means the question was never answered
+// and must leave the image exactly where it is. Folding the two together is
+// what let malformed output authorize deleting the backing store of a live
+// mount.
+var errMalformedInfo = errors.New("hdiutil info output does not have the shape this build can read")
+
 // ImageBacking is the disk image file behind a mounted volume, together with
 // the entity that matched the lookup.
 type ImageBacking struct {
@@ -152,6 +164,44 @@ func attachedImageAt(ctx context.Context, r commandRunner, imagePath string) (*I
 	return nil, fmt.Errorf("%s: %w", imagePath, ErrNoBackingImage)
 }
 
+// errNothingAttached is the POSITIVE answer that no volume is served from an
+// image any more — the only answer that may authorize unlinking it. It is
+// returned by attachedDeviceFor and is never produced by a lookup that merely
+// failed.
+var errNothingAttached = errors.New("cartridge: nothing is attached from that image")
+
+// attachedDeviceFor asks hdiutil which BSD device it currently serves image
+// from, so an attachment can be released when the Mount that recorded it is
+// gone, incomplete, or was never readable in the first place.
+//
+// The image FILE is the handle that survives everything else: a mountpoint is
+// chosen by macOS and can be occupied by an unrelated volume later, and a device
+// node is only known if the attach plist parsed. Three answers, and the caller
+// must tell them apart:
+//
+//   - a device node, which is what to detach;
+//   - errNothingAttached, the conclusive "there is nothing to release";
+//   - any other error, meaning the state is UNKNOWN — which callers must treat
+//     as still attached, never as detached.
+func attachedDeviceFor(parent context.Context, r commandRunner, image string) (string, error) {
+	if image == "" {
+		return "", fmt.Errorf("%w: no image path to identify the attachment by", errMalformedInfo)
+	}
+	ctx, cancel := context.WithTimeout(parent, infoTimeout)
+	defer cancel()
+
+	at, err := attachedImageAt(ctx, r, image)
+	switch {
+	case errors.Is(err, ErrNoBackingImage):
+		return "", errNothingAttached
+	case err != nil:
+		return "", fmt.Errorf("could not establish what %s is attached as: %w", image, err)
+	case at.DevNode == "":
+		return "", fmt.Errorf("%w: %s is attached but hdiutil named no device for it", errMalformedInfo, image)
+	}
+	return at.DevNode, nil
+}
+
 // principalEntity is the entity that best represents an image in a lookup that
 // matched the IMAGE rather than one of its devices: the first mounted one when
 // there is one (that is what a user has to eject), else the first device the
@@ -178,49 +228,88 @@ func listAttachedImages(ctx context.Context, r commandRunner) ([]attachedImage, 
 }
 
 // parseInfoImages decodes the images array from `hdiutil info -plist` stdout.
-// A well-formed plist with no images array yields no images and no error: "no
-// disk image is attached" is a normal state, and hdiutil omits the key then.
+//
+// A well-formed plist that OMITS the images key yields no images and no error:
+// "no disk image is attached" is a normal state, and hdiutil omits the key then.
+// Everything else that does not decode is an ERROR, never an empty list. This
+// parser is the authority behind clearStaleWorkingCopy and confirmDetached, both
+// of which unlink or overwrite a file once they read "nothing is attached", so a
+// record this build cannot read has to be reported rather than dropped: a
+// silently skipped entry is indistinguishable from an absent one, and the absent
+// answer is the destructive one.
 func parseInfoImages(stdout string) ([]attachedImage, error) {
 	root, err := parsePlistRootDict(stdout)
 	if err != nil {
 		return nil, fmt.Errorf("parse hdiutil %s output: %w", cmdInfo, err)
 	}
-	raw, ok := root[plistKeyImages].([]any)
-	if !ok {
+	value, present := root[plistKeyImages]
+	if !present {
 		return nil, nil
 	}
+	raw, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s is %T, not an array", errMalformedInfo, plistKeyImages, value)
+	}
 	images := make([]attachedImage, 0, len(raw))
-	for _, item := range raw {
-		dict, ok := item.(map[string]any)
-		if !ok {
-			continue
+	for i, item := range raw {
+		img, decodeErr := decodeAttachedImage(item)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("%w: %s[%d]: %w", errMalformedInfo, plistKeyImages, i, decodeErr)
 		}
-		images = append(images, attachedImage{
-			path:      plistString(dict, plistKeyImagePath),
-			imageType: plistString(dict, plistKeyImageType),
-			writable:  plistBool(dict, plistKeyWritable),
-			removable: plistBool(dict, plistKeyRemovable),
-			entities:  decodeEntities(dict[plistKeyEntities]),
-		})
+		images = append(images, img)
 	}
 	return images, nil
 }
 
+// decodeAttachedImage converts one entry of the images array into a typed image.
+//
+// image-path is REQUIRED because it is the key every reverse lookup matches on
+// (attachedImageAt): an entry whose path this build cannot read is an
+// attachment that would silently fail to match, which reads to the caller as
+// "your image is not attached".
+func decodeAttachedImage(item any) (attachedImage, error) {
+	dict, ok := item.(map[string]any)
+	if !ok {
+		return attachedImage{}, fmt.Errorf("entry is %T, not a dictionary", item)
+	}
+	path, err := plistRequiredString(dict, plistKeyImagePath)
+	if err != nil {
+		return attachedImage{}, err
+	}
+	entities, err := decodeEntities(dict[plistKeyEntities])
+	if err != nil {
+		return attachedImage{}, err
+	}
+	return attachedImage{
+		path:      path,
+		imageType: plistString(dict, plistKeyImageType),
+		writable:  plistBool(dict, plistKeyWritable),
+		removable: plistBool(dict, plistKeyRemovable),
+		entities:  entities,
+	}, nil
+}
+
 // decodeEntities converts a decoded system-entities array into typed entities.
+// An image that carries no system-entities key at all decodes to no entities,
+// which is how an attachment with nothing to address is spelled; a key that is
+// present but malformed is an error, for the reason parseInfoImages gives.
 //
 // parseAttachEntities does the same job for `hdiutil attach -plist`, where the
 // array hangs off the ROOT dict; here it hangs off each image, so the walk
 // starts from an already-decoded value rather than from stdout.
-func decodeEntities(raw any) []systemEntity {
+func decodeEntities(raw any) ([]systemEntity, error) {
+	if raw == nil {
+		return nil, nil
+	}
 	arr, ok := raw.([]any)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("%s is %T, not an array", plistKeyEntities, raw)
 	}
 	entities := make([]systemEntity, 0, len(arr))
-	for _, item := range arr {
+	for i, item := range arr {
 		dict, ok := item.(map[string]any)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("%s[%d] is %T, not a dictionary", plistKeyEntities, i, item)
 		}
 		entities = append(entities, systemEntity{
 			DevEntry:   plistString(dict, plistKeyDevEntry),
@@ -228,7 +317,21 @@ func decodeEntities(raw any) []systemEntity {
 			VolumeKind: plistString(dict, plistKeyVolumeKind),
 		})
 	}
-	return entities
+	return entities, nil
+}
+
+// plistRequiredString reads a key a lookup cannot proceed without: a missing
+// key and a wrong-typed value are both reported rather than read as "".
+func plistRequiredString(dict map[string]any, key string) (string, error) {
+	value, present := dict[key]
+	if !present {
+		return "", fmt.Errorf("no %s key", key)
+	}
+	s, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s is %T, not a string", key, value)
+	}
+	return s, nil
 }
 
 // plistBool reads a boolean-valued key from a decoded plist dict, yielding
