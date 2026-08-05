@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
+	"math"
 )
 
 // GPT on-disk layout constants. Sector size is fixed at 512 because that is what
@@ -18,6 +20,8 @@ const (
 	// headerLBA is the logical block holding the primary GPT header.
 	headerLBA = 1
 
+	headerSizeOffset       = 12
+	headerCRCOffset        = 16
 	headerEntryLBAOffset   = 72
 	headerEntryCountOffset = 80
 	headerEntrySizeOffset  = 84
@@ -30,6 +34,22 @@ const (
 	maxPartitionEntries = 512
 	// minEntrySize is the smallest GPT entry the spec allows.
 	minEntrySize = 128
+	// maxEntrySize bounds the other end. The spec fixes no ceiling, and the
+	// field is a uint32 read straight off the disk, so without one a header
+	// carrying 0xFFFFFFFF asks for a 4 GiB allocation before anything about it
+	// has been checked. Real tables use 128.
+	maxEntrySize = 4096
+	// entrySizeAlignment is the multiple the spec requires entry size to be.
+	entrySizeAlignment = 8
+
+	// minHeaderSize is the smallest GPT header the spec defines, and the least
+	// that can hold every field read here.
+	minHeaderSize = 92
+
+	// maxEntryArrayLBA bounds where the entry array may start. A uint64 LBA
+	// multiplied by the sector size overflows int64 long before this, and no
+	// real table puts its entries 2^40 blocks in.
+	maxEntryArrayLBA = 1 << 40
 )
 
 // gptSignature marks a GPT header.
@@ -75,13 +95,25 @@ func findRootPartition(r io.ReaderAt) (partition, error) {
 	if !hasPrefix(header, gptSignature) {
 		return partition{}, errNoGPT
 	}
+	// Check the header's own CRC BEFORE trusting any field in it. Everything
+	// below — where the entry array lives, how many entries, how large each one
+	// is — is read from this header and used to size allocations and compute
+	// file offsets. Validating first means the bounds checks that follow are a
+	// second line rather than the only one.
+	if err := verifyHeaderCRC(header); err != nil {
+		return partition{}, err
+	}
 
 	entryLBA := binary.LittleEndian.Uint64(header[headerEntryLBAOffset:])
 	count := binary.LittleEndian.Uint32(header[headerEntryCountOffset:])
 	size := binary.LittleEndian.Uint32(header[headerEntrySizeOffset:])
 
-	if size < minEntrySize {
-		return partition{}, fmt.Errorf("%w: entry size %d is below the %d-byte minimum", errNoGPT, size, minEntrySize)
+	if size < minEntrySize || size > maxEntrySize || size%entrySizeAlignment != 0 {
+		return partition{}, fmt.Errorf("%w: entry size %d is not a multiple of %d between %d and %d",
+			errNoGPT, size, entrySizeAlignment, minEntrySize, maxEntrySize)
+	}
+	if entryLBA == 0 || entryLBA > maxEntryArrayLBA {
+		return partition{}, fmt.Errorf("%w: entry array starts at implausible LBA %d", errNoGPT, entryLBA)
 	}
 	if count > maxPartitionEntries {
 		count = maxPartitionEntries
@@ -90,9 +122,17 @@ func findRootPartition(r io.ReaderAt) (partition, error) {
 	var best partition
 	var found bool
 	entry := make([]byte, size)
+	arrayStart := entryLBA * sectorSize
 	for i := range count {
-		offset := int64(entryLBA)*sectorSize + int64(i)*int64(size)
-		if _, err := r.ReadAt(entry, offset); err != nil {
+		// Computed in uint64 and range-checked before narrowing. The operands
+		// come off the disk, and a signed multiply that wraps produces a
+		// negative offset — which ReadAt happens to reject today, making this a
+		// latent bug rather than a live one. Not a distinction worth relying on.
+		offset := arrayStart + uint64(i)*uint64(size)
+		if offset > math.MaxInt64 {
+			break
+		}
+		if _, err := r.ReadAt(entry, int64(offset)); err != nil {
 			break // A short table is not fatal; use whatever was readable.
 		}
 		if isZero(entry[:minEntrySize]) {
@@ -118,6 +158,32 @@ func findRootPartition(r io.ReaderAt) (partition, error) {
 		return partition{}, fmt.Errorf("%w: the largest partition is empty or starts at LBA 0", errNoGPT)
 	}
 	return best, nil
+}
+
+// verifyHeaderCRC checks the GPT header against the CRC32 stored inside it.
+//
+// The CRC covers HeaderSize bytes with its own four bytes taken as zero, which
+// is why this works on a copy. A header that fails here is corrupt or forged,
+// and every field the caller goes on to use comes out of it — so this is the
+// check that makes the rest of the parse meaningful rather than hopeful.
+func verifyHeaderCRC(header []byte) error {
+	headerSize := binary.LittleEndian.Uint32(header[headerSizeOffset:])
+	if headerSize < minHeaderSize || headerSize > uint32(len(header)) {
+		return fmt.Errorf("%w: header size %d is outside %d..%d",
+			errNoGPT, headerSize, minHeaderSize, len(header))
+	}
+
+	want := binary.LittleEndian.Uint32(header[headerCRCOffset:])
+
+	scratch := make([]byte, headerSize)
+	copy(scratch, header[:headerSize])
+	// The stored CRC is excluded from its own calculation.
+	binary.LittleEndian.PutUint32(scratch[headerCRCOffset:], 0)
+
+	if got := crc32.ChecksumIEEE(scratch); got != want {
+		return fmt.Errorf("%w: header CRC is %#08x but the header claims %#08x", errNoGPT, got, want)
+	}
+	return nil
 }
 
 // hasPrefix reports whether b starts with prefix.
