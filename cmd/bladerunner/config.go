@@ -215,7 +215,7 @@ func runConfigSet(args []string) error {
 	client := control.NewClient(stateDir)
 
 	if !client.IsRunning() {
-		err := fmt.Errorf("VM is not running; start it first with: %s", command("br start"))
+		err := fmt.Errorf("VM is not running; start it first with: %s", command("br up"))
 		if jsonOutput {
 			emitJSONError(err)
 		}
@@ -237,7 +237,7 @@ func runConfigSet(args []string) error {
 
 	if meta.RequiresReset {
 		fmt.Printf("\n%s This change requires a VM reset to take effect.\n", errorf("⚠"))
-		fmt.Printf("  Run %s and then %s\n", command("br reset"), command("br start"))
+		fmt.Printf("  Run %s and then %s\n", command("br reset"), command("br up"))
 	}
 
 	return nil

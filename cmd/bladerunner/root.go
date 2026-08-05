@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/ui"
 )
@@ -52,7 +50,7 @@ const (
 )
 
 func init() {
-	rootCmd.SetVersionTemplate(fmt.Sprintf("br version %s (commit: %s, built: %s)\n", version, commit, date))
+	rootCmd.SetVersionTemplate(versionLine() + "\n")
 
 	// Prepend the gradient banner to help output when running interactively.
 	defaultHelp := rootCmd.HelpTemplate()
@@ -89,11 +87,11 @@ func init() {
 	}
 
 	addToGroup(groupLifecycle,
-		upCmd, startCmd, stopCmd, bootCmd, ejectCmd,
+		upCmd, startCmd, stopCmd, restartCmd, bootCmd, ejectCmd,
 		saveCmd, restoreCmd, resetCmd, upgradeCmd, selfUpdateCmd, reconnectCmd,
 	)
 	addToGroup(groupAccess,
-		sshCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd, eventsCmd,
+		shellCmd, sshConfigCmd, execCmd, incusCmd, lsCmd, logsCmd, eventsCmd,
 	)
 	addToGroup(groupMedia,
 		diskCmd, disksCmd,
@@ -102,7 +100,7 @@ func init() {
 		webCmd, menubarCmd,
 	)
 	addToGroup(groupConfig,
-		statusCmd, instancesCmd, configCmd, userCmd, noticeCmd,
+		statusCmd, instancesCmd, configCmd, userCmd, noticeCmd, versionCmd,
 	)
 
 	// With groups defined, the built-in help/completion commands would otherwise
@@ -117,8 +115,8 @@ func init() {
 	// the flag, which is why only the two accepting policies are listed here.
 	// A subcommand inherits its parent unless it declares its own.
 	declareInstancePolicy(instanceHonored,
-		statusCmd, stopCmd, resetCmd, ejectCmd, saveCmd, restoreCmd, upgradeCmd,
-		reconnectCmd, sshCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd,
+		statusCmd, stopCmd, restartCmd, resetCmd, ejectCmd, saveCmd, restoreCmd, upgradeCmd,
+		reconnectCmd, sshConfigCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd,
 		eventsCmd, webCmd, configCmd,
 	)
 	// `br instances` lists every instance; selecting one would mean nothing.

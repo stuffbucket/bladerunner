@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // jsonOutput is bound to the global --json persistent flag (see root.go). When
@@ -35,11 +36,20 @@ func emitJSONError(err error) {
 // agents still get parseable output, then hands the error back for the RunE to
 // return (so the process exits non-zero). Returns nil when --json is unset, so
 // callers can guard with a single `if err := ...; err != nil { return err }`.
-func rejectJSONForInteractive(name string) error {
+//
+// instead names the command that DOES answer the question in JSON, when a
+// better answer exists than the general one. `br ssh --json` is the case that
+// forced it: it used to print SSH details and now opens a shell, so anyone
+// scripting it needs pointing at `br ssh-config --json` rather than at status.
+func rejectJSONForInteractive(name string, instead ...string) error {
 	if !jsonOutput {
 		return nil
 	}
-	err := fmt.Errorf("--json is not supported for the interactive %q command; use 'br status --json' or 'br ls --json' for machine-readable state", name)
+	alternatives := "'br status --json' or 'br ls --json'"
+	if len(instead) > 0 {
+		alternatives = "'" + strings.Join(instead, "' or '") + "'"
+	}
+	err := fmt.Errorf("--json is not supported for the interactive %q command; use %s for machine-readable state", name, alternatives)
 	emitJSONError(err)
 	return err
 }

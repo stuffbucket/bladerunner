@@ -271,7 +271,7 @@ func reportResetHuman(o resetOutcome, all bool) {
 	}
 	fmt.Println()
 	if !all {
-		fmt.Printf("\nRun 'br start' to create a fresh VM.\n")
+		fmt.Printf("\nRun 'br up' to create a fresh VM.\n")
 	}
 }
 
