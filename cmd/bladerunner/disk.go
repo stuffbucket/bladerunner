@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -224,6 +225,56 @@ type diskActionReport struct {
 	Arch   string `json:"arch,omitempty"`
 	Output string `json:"output,omitempty"`
 	SHA256 string `json:"sha256,omitempty"`
+	// Skipped names the optional build steps a bake passed over. A bake that
+	// skipped one publishes an image missing a component, so a consumer of the
+	// JSON — the release workflow annotating its run — needs it here rather
+	// than in a log line (#265).
+	Skipped []skippedStep `json:"skipped,omitempty"`
+}
+
+// skippedStep is one optional build step a bake did not complete, in a form
+// that survives JSON. imagebuild.Skipped carries a Step and an error, and an
+// error marshals to an empty object, so the reason would vanish on the way out.
+type skippedStep struct {
+	// Step is the step's description, as the recipe words it.
+	Step string `json:"step"`
+	// Reason is why it was passed over.
+	Reason string `json:"reason"`
+}
+
+// bakeReport assembles the result of a completed bake, including the optional
+// steps it passed over.
+//
+// It exists as its own function because the skipped list is the part that used
+// to be dropped: it was known one frame below this one and never made it into
+// anything the caller printed (#265). Building the report here means a test can
+// hand it a skipped step and see it come out the other side.
+func bakeReport(name, arch, output, digest string, skipped []imagebuild.Skipped) diskActionReport {
+	rep := diskActionReport{
+		Status: "baked",
+		Name:   name,
+		Arch:   arch,
+		Output: output,
+		SHA256: digest,
+	}
+	for _, s := range skipped {
+		rep.Skipped = append(rep.Skipped, skippedStep{Step: s.Step.Desc, Reason: s.Err.Error()})
+	}
+	return rep
+}
+
+// printBakeResult writes the human-readable form of a bake report.
+//
+// The skipped steps come AFTER the success line, because that line is what a
+// reader takes away. A tick and a digest with nothing after them is exactly
+// what shipped a guest image with no Incus web UI in it while the build
+// reported success.
+func printBakeResult(w io.Writer, rep diskActionReport) {
+	fmt.Fprintf(w, "%s Baked %s (%s): %s  %s%s\n",
+		success("✓"), value(rep.Name), rep.Arch, subtle(rep.Output), key("sha256="), rep.SHA256)
+	for _, s := range rep.Skipped {
+		fmt.Fprintf(w, "%s Skipped (non-fatal): %s: %s\n", warning("!"), value(s.Step), s.Reason)
+	}
 }
 
 // writeManifest marshals m and publishes it to path.
@@ -442,7 +493,8 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return jsonOrError(err)
 	}
-	if err := imagebuild.Bake(ctx, plan, imagebuild.NewBakeDeps(mechanic, logf)); err != nil {
+	skipped, err := imagebuild.Bake(ctx, plan, imagebuild.NewBakeDeps(mechanic, logf))
+	if err != nil {
 		return jsonOrError(fmt.Errorf("bake %s: %w", name, err))
 	}
 
@@ -463,11 +515,11 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(err)
 	}
 
+	rep := bakeReport(name, arch, absOut, digest, skipped)
 	if jsonOutput {
-		return emitJSON(diskActionReport{Status: "baked", Name: name, Arch: arch, Output: absOut, SHA256: digest})
+		return emitJSON(rep)
 	}
-	fmt.Printf("%s Baked %s (%s): %s  %s%s\n",
-		success("✓"), value(name), arch, subtle(absOut), key("sha256="), digest)
+	printBakeResult(os.Stdout, rep)
 	return nil
 }
 

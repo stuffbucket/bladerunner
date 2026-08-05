@@ -9,8 +9,9 @@ import (
 	"path/filepath"
 )
 
-// Mechanic applies steps to an image in place. It is the ONE part of a bake
-// that needs a platform, and the one part there is currently only one of.
+// Mechanic applies steps to an image in place and reports the optional steps it
+// passed over. It is the ONE part of a bake that needs a platform, and the one
+// part there is currently only one of.
 //
 // It is a named type so a bake takes its mechanic as an argument rather than
 // finding one for itself. Today the only implementation mounts the image and
@@ -18,7 +19,11 @@ import (
 // shape, where the mechanic is selected by build tag inside the package, is how
 // this code came to advertise two mechanics that were never written. A
 // dependency that is passed in cannot be claimed without being supplied.
-type Mechanic func(ctx context.Context, basePath string, steps []Step) error
+//
+// The skipped steps are RETURNED rather than logged, because the caller is the
+// only frame that can act on them. A mechanic that logged them left `br disk
+// bake` printing a tick over an image with no web UI in it (#265).
+type Mechanic func(ctx context.Context, basePath string, steps []Step) ([]Skipped, error)
 
 // BakeDeps are the operations a bake performs. They are injected so the
 // ORCHESTRATION — which phases run, in what order, and what happens when one
@@ -29,7 +34,8 @@ type BakeDeps struct {
 	Fetch func(ctx context.Context, r Release, dest string) error
 	// Run executes a host command, normally qemu-img.
 	Run func(ctx context.Context, argv []string) error
-	// Customize applies steps to the image in place.
+	// Customize applies steps to the image in place and reports the optional
+	// ones it skipped.
 	Customize Mechanic
 	// Publish moves the finished image to its final name.
 	Publish func(from, to string) error
@@ -57,48 +63,56 @@ func NewBakeDeps(customize Mechanic, log func(string)) BakeDeps {
 	}
 }
 
-// Bake performs a plan.
+// Bake performs a plan and reports the optional steps it skipped.
 //
 // Phases run in the order Phases() gives and the first failure stops the bake.
 // A partially built image that reports success is the failure worth
 // preventing: it gets published, boots, and is missing something nobody
 // notices until production.
-func Bake(ctx context.Context, p BakePlan, deps BakeDeps) error {
+//
+// An optional step that failed is the quieter version of that same failure, so
+// the skipped list comes back even when the bake succeeds — and even when it
+// does not, because a step skipped before an unrelated failure is still part of
+// what happened. The caller must say so; nothing below this frame can.
+func Bake(ctx context.Context, p BakePlan, deps BakeDeps) ([]Skipped, error) {
 	if err := deps.validate(); err != nil {
-		return err
+		return nil, err
 	}
 	// qemu-img does not create parent directories, so the compress phase would
 	// fail writing the partial — several minutes and several hundred megabytes
 	// after a mistake that was knowable before any of it started.
 	if err := os.MkdirAll(filepath.Dir(p.OutputPath), guestDirMode); err != nil {
-		return fmt.Errorf("create the output directory for %s: %w", p.OutputPath, err)
+		return nil, fmt.Errorf("create the output directory for %s: %w", p.OutputPath, err)
 	}
+	var skipped []Skipped
 	for _, phase := range p.Phases() {
 		if deps.Log != nil {
 			deps.Log(string(phase))
 		}
-		if err := deps.run(ctx, p, phase); err != nil {
-			return fmt.Errorf("%s: %w", phase, err)
+		phaseSkipped, err := deps.run(ctx, p, phase)
+		skipped = append(skipped, phaseSkipped...)
+		if err != nil {
+			return skipped, fmt.Errorf("%s: %w", phase, err)
 		}
 	}
-	return nil
+	return skipped, nil
 }
 
-// run performs one phase.
-func (d BakeDeps) run(ctx context.Context, p BakePlan, phase BakePhase) error {
+// run performs one phase, reporting any optional steps it passed over.
+func (d BakeDeps) run(ctx context.Context, p BakePlan, phase BakePhase) ([]Skipped, error) {
 	switch phase {
 	case PhaseFetch:
-		return d.Fetch(ctx, p.Release, p.BasePath)
+		return nil, d.Fetch(ctx, p.Release, p.BasePath)
 	case PhaseResize:
-		return d.Run(ctx, p.ResizeArgs())
+		return nil, d.Run(ctx, p.ResizeArgs())
 	case PhaseCustomize:
 		return d.Customize(ctx, p.BasePath, p.Recipe.Steps())
 	case PhaseCompress:
-		return d.Run(ctx, p.CompressArgs())
+		return nil, d.Run(ctx, p.CompressArgs())
 	case PhasePublish:
-		return d.Publish(p.PartialPath, p.OutputPath)
+		return nil, d.Publish(p.PartialPath, p.OutputPath)
 	default:
-		return fmt.Errorf("unknown bake phase %q", phase)
+		return nil, fmt.Errorf("unknown bake phase %q", phase)
 	}
 }
 

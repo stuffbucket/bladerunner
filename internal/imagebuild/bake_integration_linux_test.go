@@ -46,7 +46,7 @@ func TestBakeProducesAnImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HostMechanic: %v", err)
 	}
-	if err := Bake(t.Context(), plan, NewBakeDeps(mechanic, logf)); err != nil {
+	if _, err := Bake(t.Context(), plan, NewBakeDeps(mechanic, logf)); err != nil {
 		t.Fatalf("Bake: %v", err)
 	}
 
