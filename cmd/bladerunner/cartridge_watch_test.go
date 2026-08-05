@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -355,36 +356,72 @@ func TestDecideForVolumeIgnoresASecondMountOfABootedCartridge(t *testing.T) {
 // hand-built Detected, so a detector that silently downgraded an unreadable
 // volume to "not a cartridge" was invisible to all of them.
 //
-// A volume named like a cartridge whose contents cannot be traversed is the TCC
+// A volume named like a cartridge whose manifest cannot be read is the TCC
 // failure mode — an AirDropped cartridge in ~/Downloads inspected by a menubar
 // LaunchAgent with no Files and Folders grant — and staying silent about it
 // tells the user their cartridge is not a cartridge.
 func TestDecideForVolumeWarnsOnAnUnreadableCartridgeVolume(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root traverses a directory with no search bit, so the probe cannot fail")
+	tests := []struct {
+		name string
+		// stage breaks the manifest probe and reports whether it could.
+		stage      func(t *testing.T, mount string)
+		skipAsRoot bool
+		wantReason string
+	}{
+		{
+			// Readable, not searchable: the volume stats, its manifest does not.
+			name: "the volume cannot be traversed",
+			stage: func(t *testing.T, mount string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(mount, "disk.json"), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(mount, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(mount, 0o755) })
+			},
+			skipAsRoot: true,
+			wantReason: reasonUnreadable,
+		},
+		{
+			// Not a permission problem and not an absence either: the probe
+			// simply could not be completed, which is equally not a negative.
+			name: "the manifest probe fails for another reason",
+			stage: func(t *testing.T, mount string) {
+				t.Helper()
+				if err := os.Symlink("disk.json", filepath.Join(mount, "disk.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantReason: "could not be checked for disk.json",
+		},
 	}
-	mount := filepath.Join(t.TempDir(), "bladerunner-demo")
-	if err := os.MkdirAll(mount, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(mount, "disk.json"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Readable, not searchable: the volume stats, its manifest does not.
-	if err := os.Chmod(mount, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(mount, 0o755) })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.skipAsRoot && os.Geteuid() == 0 {
+				t.Skip("root traverses a directory with no search bit, so the probe cannot fail")
+			}
+			mount := filepath.Join(t.TempDir(), "bladerunner-demo")
+			if err := os.MkdirAll(mount, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tt.stage(t, mount)
 
-	got := decideForVolume(diskarb.DiskInfo{
-		BSDName:    "disk9s1",
-		VolumeName: "bladerunner-demo",
-		VolumePath: mount,
-		VolumeKind: "apfs",
-	}, cartridge.Detect, nil)
+			got := decideForVolume(diskarb.DiskInfo{
+				BSDName:    "disk9s1",
+				VolumeName: "bladerunner-demo",
+				VolumePath: mount,
+				VolumeKind: "apfs",
+			}, cartridge.Detect, nil)
 
-	if got.Verdict != verdictWarn || got.Reason != reasonUnreadable {
-		t.Fatalf("verdict = %q reason = %q, want warn/%q", got.Verdict, got.Reason, reasonUnreadable)
+			if got.Verdict != verdictWarn {
+				t.Fatalf("verdict = %q reason = %q, want warn", got.Verdict, got.Reason)
+			}
+			if !strings.Contains(got.Reason, tt.wantReason) {
+				t.Errorf("reason = %q, want it to contain %q", got.Reason, tt.wantReason)
+			}
+		})
 	}
 }
 
