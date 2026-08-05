@@ -58,6 +58,46 @@ func TestConfigureShareAddsDevice(t *testing.T) {
 	}
 }
 
+// TestConfigureShareHonorsReadOnly is the Darwin half of #203. configureShare
+// used to pass a hardcoded false to vz.NewSharedDirectory, so a cartridge
+// manifest asking for a read-only share got a read-write VirtioFS export and
+// the guest could write into the host directory.
+//
+// The vz API exposes no getter for a SharedDirectory's read-only flag, so the
+// value handed to it is asserted through effectiveShareReadOnly — the single
+// source of truth configureShare reads — and the device chain is then built for
+// real with that value to prove VZ accepts it. Whether the guest is actually
+// refused a write needs a booted VM; that is the smoke test's job.
+func TestConfigureShareHonorsReadOnly(t *testing.T) {
+	shareDir := t.TempDir()
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{"the default cartridge share is read-write",
+			&config.Config{ShareDir: shareDir, ShareTag: config.DefaultShareTag}, false},
+		{"an explicit read-only share is read-only",
+			&config.Config{ShareDir: shareDir, ShareTag: config.DefaultShareTag, ShareReadOnly: true}, true},
+		{"no share means nothing to make read-only",
+			&config.Config{ShareReadOnly: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Runner{cfg: tt.cfg}
+			if got := r.effectiveShareReadOnly(); got != tt.want {
+				t.Fatalf("effectiveShareReadOnly = %v, want %v", got, tt.want)
+			}
+			if tt.cfg.ShareDir == "" {
+				return // configureShare is never reached with no share dir
+			}
+			if err := r.configureShare(newMinimalVZConfig(t)); err != nil {
+				t.Fatalf("configureShare: %v", err)
+			}
+		})
+	}
+}
+
 // TestConfigureShareSkippedWhenEmpty verifies newVMConfiguration's gate: with
 // ShareDir empty, configureShare is never invoked, so no device is added. We
 // assert the gate condition directly (newVMConfiguration needs far more setup),

@@ -438,8 +438,8 @@ func (o *Opened) StillAttached() bool {
 }
 
 // ApplyTo roots a VM config inside the mounted cartridge: the bootable
-// root.img, EFI + cloud-init state under state/, and the read-write share under
-// share/.
+// root.img, EFI + cloud-init state under state/, and the share under share/
+// with the access the manifest asks for.
 //
 // It must be applied AFTER any manifest and flag overrides, so the cartridge's
 // own image and state always win — a cartridge is by definition self-contained.
@@ -463,10 +463,14 @@ func (o *Opened) ApplyTo(cfg *config.Config) {
 	cfg.EFIVarsPath = o.Layout.EFIVarsPath()
 	cfg.CloudInitDir = o.Layout.CloudInitDir()
 
-	// The read-write host<->guest share lives inside the cartridge too.
+	// The host<->guest share lives inside the cartridge too. It is read-write
+	// unless the manifest says otherwise, and when it says otherwise that has to
+	// reach the VMM: a cartridge asking for a read-only share is asking not to
+	// have its host directory written to.
 	cfg.ShareDir = o.Layout.ShareDir()
 	cfg.ShareTag = ShareTag(o.Manifest)
 	cfg.ShareGuestPath = ShareGuestPath(o.Manifest)
+	cfg.ShareReadOnly = ShareReadOnly(o.Manifest)
 }
 
 // GUI reports whether the cartridge's manifest asks for a GUI boot.

@@ -191,6 +191,17 @@ func ShareGuestPath(m *disk.Manifest) string {
 	return config.DefaultShareGuestPath
 }
 
+// ShareReadOnly reports whether a manifest's share is exported read-only.
+//
+// A cartridge with no share spec, and the default share PackManifest
+// synthesizes, are both read-write: a cartridge's share is a host<->guest
+// exchange folder, so read-only is the deliberate exception. It is the third
+// of the effective-share accessors (with ShareTag and ShareGuestPath) so every
+// caller reads the manifest's share through one place.
+func ShareReadOnly(m *disk.Manifest) bool {
+	return m != nil && m.Share != nil && m.Share.ReadOnly
+}
+
 // PackManifest rewrites a disk manifest for embedding in a cartridge: the image
 // becomes the local root.img so a boot never re-downloads (and disk.json
 // honestly describes a self-contained source), and a default read-write share

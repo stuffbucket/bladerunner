@@ -668,6 +668,15 @@ func renderTimeHeal(cfg *config.Config) string {
 	return b.String()
 }
 
+// Mount options for the VirtioFS host<->guest share. nofail keeps boot
+// resilient when the share device is absent (a stripped image booted without a
+// cartridge) and _netdev orders it after the device is available; the first
+// option is the access mode the cartridge manifest asked for.
+const (
+	shareRWMountOptions = "defaults,nofail,_netdev"
+	shareROMountOptions = "ro,nofail,_netdev"
+)
+
 // renderShareSetup returns the guest-side bootstrap fragment that mounts the
 // VirtioFS host<->guest share and pins ACPI poweroff so `br eject` triggers
 // a deterministic clean shutdown. It returns "" when sharing is disabled
@@ -694,6 +703,14 @@ func renderShareSetup(cfg *config.Config) string {
 	// The systemd .mount unit filename MUST be the escaped mount path
 	// (/mnt/share -> mnt-share.mount) or systemd rejects it.
 	unitName := strings.ReplaceAll(strings.TrimPrefix(guestPath, "/"), "/", "-") + ".mount"
+	// The host-side VirtioFS export is what ENFORCES read-only; mounting ro as
+	// well is what makes the guest say so. A rw mount over a read-only export
+	// fails at the first write with an error nobody can read back to the
+	// cartridge that asked for it.
+	mountOptions := shareRWMountOptions
+	if cfg.ShareReadOnly {
+		mountOptions = shareROMountOptions
+	}
 
 	return fmt.Sprintf(`
 # --- VirtioFS host<->guest share automount + ACPI poweroff pin (cartridge) ---
@@ -712,7 +729,7 @@ After=local-fs.target
 What=%s
 Where=%s
 Type=virtiofs
-Options=defaults,nofail,_netdev
+Options=%s
 
 [Install]
 WantedBy=multi-user.target
@@ -721,7 +738,7 @@ MOUNTUNIT
 # Belt-and-suspenders fstab line (same tag) so the share also mounts if the unit
 # is ever masked; nofail so a missing device never blocks boot.
 if ! grep -q '%s %s virtiofs' /etc/fstab 2>/dev/null; then
-  echo '%s %s virtiofs defaults,nofail,_netdev 0 0' >> /etc/fstab
+  echo '%s %s virtiofs %s 0 0' >> /etc/fstab
 fi
 
 systemctl daemon-reload
@@ -744,9 +761,9 @@ systemctl restart systemd-logind 2>/dev/null || true
 `,
 		guestPath,
 		unitName,
+		tag, guestPath, mountOptions,
 		tag, guestPath,
-		tag, guestPath,
-		tag, guestPath,
+		tag, guestPath, mountOptions,
 		unitName,
 		cfg.SSHUser, cfg.SSHUser, guestPath,
 	)

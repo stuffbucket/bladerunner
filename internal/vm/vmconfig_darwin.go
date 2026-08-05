@@ -216,9 +216,10 @@ func (r *Runner) configureGraphics(cfg *vz.VirtualMachineConfiguration) error {
 }
 
 // configureShare adds a VirtioFS directory-sharing device exposing
-// r.cfg.ShareDir to the guest under r.cfg.ShareTag as a read-WRITE share (the
-// cartridge host<->guest folder). Called only when r.cfg.ShareDir != "" so plain
-// start/boot — which leaves ShareDir empty — adds no device and is unchanged.
+// r.cfg.ShareDir to the guest under r.cfg.ShareTag (the cartridge host<->guest
+// folder), read-write unless the cartridge manifest asked for read-only.
+// Called only when r.cfg.ShareDir != "" so plain start/boot — which leaves
+// ShareDir empty — adds no device and is unchanged.
 // The directory-sharing topology is fixed at config-build time like graphics, so
 // a non-empty tag is required (VZ rejects an empty tag); the cartridge boot path
 // ensures the share dir exists before start so VZ validation passes.
@@ -236,10 +237,19 @@ func (r *Runner) effectiveShareTag() string {
 	return r.cfg.ShareTag
 }
 
+// effectiveShareReadOnly reports whether the directory-sharing device would be
+// built read-only. It is the single source of truth for the flag handed to
+// vz.NewSharedDirectory, which used to be a hardcoded false — so a cartridge
+// manifest asking for a read-only share got a writable export of the host
+// directory. No share dir means no device, and so nothing to make read-only.
+func (r *Runner) effectiveShareReadOnly() bool {
+	return r.cfg.ShareDir != "" && r.cfg.ShareReadOnly
+}
+
 func (r *Runner) configureShare(cfg *vz.VirtualMachineConfiguration) error {
 	tag := r.effectiveShareTag()
 
-	sharedDir, err := vz.NewSharedDirectory(r.cfg.ShareDir, false) // readOnly=false => RW both ways
+	sharedDir, err := vz.NewSharedDirectory(r.cfg.ShareDir, r.effectiveShareReadOnly())
 	if err != nil {
 		return fmt.Errorf("create shared directory %s: %w", r.cfg.ShareDir, err)
 	}

@@ -1042,6 +1042,76 @@ func TestOpenedApplyToRootsConfigInsideMount(t *testing.T) {
 	}
 }
 
+// TestOpenedApplyToCarriesTheShareReadOnlyFlag is the #203 regression.
+//
+// disk.ShareSpec.ReadOnly is parsed, preserved by PackManifest, written into
+// the cartridge's disk.json — and then dropped on the floor: ApplyTo copied the
+// share directory, tag and guest path into the runtime config and nothing else,
+// so a cartridge that says "read_only": true handed the guest write access to
+// the host directory it named.
+func TestOpenedApplyToCarriesTheShareReadOnlyFlag(t *testing.T) {
+	mp := "/state/mnt/demo"
+	tests := []struct {
+		name     string
+		manifest *disk.Manifest
+		want     bool
+	}{
+		{"a cartridge with no share spec stays read-write", &disk.Manifest{}, false},
+		{
+			"an explicit read-write share stays read-write",
+			&disk.Manifest{Share: &disk.ShareSpec{Tag: "t", ReadOnly: false}}, false,
+		},
+		{
+			"an explicit read-only share reaches the config",
+			&disk.Manifest{Share: &disk.ShareSpec{Tag: "t", ReadOnly: true}}, true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &Opened{
+				Name:     "demo",
+				Mount:    Mount{Mountpoint: mp},
+				Layout:   NewLayout(mp),
+				Manifest: tt.manifest,
+			}
+			cfg := &config.Config{}
+			o.ApplyTo(cfg)
+			if cfg.ShareReadOnly != tt.want {
+				t.Errorf("ShareReadOnly = %v, want %v", cfg.ShareReadOnly, tt.want)
+			}
+			// The share is still configured either way: read-only is a property
+			// of the share, not a reason to withhold it.
+			if cfg.ShareDir != filepath.Join(mp, ShareDirName) {
+				t.Errorf("ShareDir = %q", cfg.ShareDir)
+			}
+		})
+	}
+}
+
+// The flag has to survive the round trip through the packed disk.json too: it
+// is written on one machine and read on another, so a manifest that loses it in
+// transit is the same bug one step earlier.
+func TestPackedManifestPreservesTheReadOnlyShare(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLayout(dir)
+	source := validSourceManifest()
+	source.Share = &disk.ShareSpec{Tag: "t", GuestPath: "/mnt/share", ReadOnly: true}
+	if err := l.WriteManifest(PackManifest(source, "demo")); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	m, err := l.LoadManifest()
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if !ShareReadOnly(m) {
+		t.Fatalf("the read-only share did not survive the pack: %+v", m.Share)
+	}
+	// And the default cartridge share, which PackManifest synthesizes, is not.
+	if ShareReadOnly(PackManifest(validSourceManifest(), "demo")) {
+		t.Error("the default cartridge share must stay read-write")
+	}
+}
+
 func TestOpenedApplyToIsANoOpWhenNothingIsOpen(t *testing.T) {
 	cfg := &config.Config{BaseImageURL: "https://keep"}
 	var none *Opened
