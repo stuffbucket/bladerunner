@@ -26,8 +26,11 @@ const instanceDirName = "config.d"
 // configFileName is the aggregator file inside Dir().
 const configFileName = "config"
 
-// dirPerm/filePerm are the permissions for the generated config tree. ssh
-// refuses to use a config file that is group/world writable.
+// dirPerm/filePerm are the permissions for the whole generated ssh tree: the
+// directory, the config files, the private key and the lock files. ssh refuses
+// to use a config file or a key that is group/world readable or writable, so one
+// pair of values covers every private file this package writes. The public key
+// is the single exception; see pubKeyPerm.
 const (
 	dirPerm  os.FileMode = 0o700
 	filePerm os.FileMode = 0o600
