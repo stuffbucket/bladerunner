@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -30,7 +29,10 @@ func runLs(_ *cobra.Command, _ []string) error {
 		}
 		return err
 	}
-	instances, err := client.ListInstances(context.Background())
+	ctx, stop := interruptibleContext()
+	defer stop()
+
+	instances, err := client.ListInstances(ctx)
 	if err != nil {
 		if jsonOutput {
 			emitJSONError(err)
