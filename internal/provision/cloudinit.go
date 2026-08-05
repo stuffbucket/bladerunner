@@ -298,7 +298,22 @@ native_incus_distro() {
 # --- Critical control-path packages FIRST, resiliently. socat + sshd are all
 #     the host<->guest vsock SSH bridge needs; install them (with retries)
 #     before the heavier, failure-prone incus provisioning below.
-if command -v apt-get >/dev/null 2>&1; then
+#
+#     SKIPPED ENTIRELY on a pre-baked image. That image already contains every
+#     package this installs, and the stamp is written by the build pipeline as
+#     the last word on what it contains — so this block was re-deriving a
+#     conclusion the image already carried, at a measured cost of 20s of
+#     apt-update against the Debian mirror plus 5s of install no-ops. The
+#     Debian genericcloud fallback carries no stamp and still does all of it.
+#
+#     The path is written literally because this is a format string and a
+#     placeholder here would renumber every positional arg after it. That is two
+#     spellings of one filename, so a test asserts it equals
+#     config.GuestImageVersionPath.
+if [ -f /etc/bladerunner-image-version ]; then
+  br_stage prebaked-skip-base
+  echo "bladerunner: pre-baked image $(cat /etc/bladerunner-image-version 2>/dev/null); skipping base package install" >&2
+elif command -v apt-get >/dev/null 2>&1; then
   br_stage apt-update
   apt_update_retry
   br_stage apt-install-base
