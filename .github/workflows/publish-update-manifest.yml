@@ -25,6 +25,11 @@ on:
         description: "Existing release tag to (re)publish the manifest for, e.g. v0.4.8"
         required: true
         type: string
+      allow_downgrade:
+        description: "Publish even if this tag is older than the manifest already live (rollback)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -62,6 +67,45 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Publishing update manifest for ${TAG}"
+
+      - name: Refuse a downgrade
+        # Runs BEFORE the 30-minute poll so a mistaken re-dispatch of an old tag
+        # fails in seconds rather than after half an hour of polling.
+        #
+        # `br self-update` offers whatever version this manifest names, so
+        # publishing an older tag over a newer one actively pushes users
+        # backward. The release trigger cannot hit this (tags only move forward),
+        # but workflow_dispatch takes an arbitrary tag and re-running an old one
+        # is an ordinary mistake. A deliberate rollback is still possible via the
+        # allow_downgrade input.
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          ALLOW_DOWNGRADE: ${{ github.event.inputs.allow_downgrade }}
+        run: |
+          set -euo pipefail
+          NEW="${TAG#v}"
+          LIVE="$(jq -r '.version // empty' site/public/latest.json 2>/dev/null || true)"
+          if [ -z "$LIVE" ]; then
+            echo "::notice::No manifest published yet; nothing to compare against."
+            exit 0
+          fi
+          if [ "$NEW" = "$LIVE" ]; then
+            echo "::notice::Republishing the live version ${LIVE}."
+            exit 0
+          fi
+          # sort -V puts the lower version first. If that is the incoming one,
+          # this is a downgrade.
+          LOWEST="$(printf '%s\n%s\n' "$NEW" "$LIVE" | sort -V | head -n1)"
+          if [ "$LOWEST" = "$NEW" ]; then
+            if [ "${ALLOW_DOWNGRADE}" = "true" ]; then
+              echo "::warning::Publishing ${NEW} over live ${LIVE} (allow_downgrade set)."
+              exit 0
+            fi
+            echo "::error::Refusing to publish ${NEW}: the live manifest is ${LIVE}." >&2
+            echo "Re-run with allow_downgrade if this rollback is intended." >&2
+            exit 1
+          fi
+          echo "Version ${NEW} supersedes live ${LIVE}."
 
       - name: Poll release for updater assets
         id: poll
@@ -169,12 +213,43 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add site/public/latest.json
-          if git diff --cached --quiet; then
-            echo "::notice::latest.json unchanged for $TAG — nothing to commit."
-            exit 0
-          fi
-          # Subject kept <=50 chars (commit-msg hook style). $TAG is ~7 chars.
-          git commit -m "chore: publish update manifest for $TAG"
-          git push origin HEAD:main
-          echo "Pushed latest.json for $TAG; pages.yml will redeploy the site."
+
+          # The checkout at the top of this job can be up to 30 minutes stale by
+          # now — the poll above waits that long for macos-builder's async
+          # upload, and main keeps moving in the meantime (release-please, other
+          # merges). Pushing that stale HEAD is a non-fast-forward, which fails
+          # the job and leaves the release with NO manifest: `br self-update`
+          # then never sees it. The concurrency group serializes runs of this
+          # workflow, not everyone else's pushes to main.
+          #
+          # So rebuild the commit on top of whatever main is NOW, and retry if
+          # main moves again while we push. The manifest is held outside the work
+          # tree so moving the branch cannot lose it.
+          STAGED="${RUNNER_TEMP}/latest.json"
+          cp site/public/latest.json "$STAGED"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin main
+            # Working tree is clean here (first pass: nothing modified; later
+            # passes: the previous attempt's change is committed), so moving the
+            # branch cannot discard uncommitted work.
+            git switch --quiet -C publish-manifest origin/main
+            mkdir -p site/public
+            cp "$STAGED" site/public/latest.json
+            git add site/public/latest.json
+            if git diff --cached --quiet; then
+              echo "::notice::latest.json unchanged for $TAG — nothing to commit."
+              exit 0
+            fi
+            # Subject kept <=50 chars (commit-msg hook style). $TAG is ~7 chars.
+            git commit --quiet -m "chore: publish update manifest for $TAG"
+            if git push --quiet origin HEAD:main; then
+              echo "Pushed latest.json for $TAG; pages.yml will redeploy the site."
+              exit 0
+            fi
+            echo "::warning::Push rejected (main moved); retrying (attempt ${attempt}/5)."
+            sleep $(( attempt * 5 ))
+          done
+
+          echo "::error::Could not publish latest.json for $TAG after 5 attempts." >&2
+          exit 1
