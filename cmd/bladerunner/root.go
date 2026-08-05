@@ -125,6 +125,19 @@ func init() {
 	// its parent honors.
 	declareInstancePolicy(instanceRefused, webUntrustCmd)
 
+	// Synonyms a user arriving from another tool will type. Cobra already
+	// suggests near-misses by edit distance ("resart" finds restart), but a
+	// SYNONYM is not a near-miss: `br delete` is nowhere near `br reset`, so
+	// without this it gets "unknown command" and nothing else.
+	//
+	// These do not create new verbs. `br ls` already means Incus instances and
+	// `br instances` means VMs; adding a third spelling of either would trade
+	// one confusion for another. A suggestion points and lets the user choose.
+	resetCmd.SuggestFor = []string{"delete", "destroy", "rm", "teardown"}
+	instancesCmd.SuggestFor = []string{"list"}
+	stopCmd.SuggestFor = []string{"halt", "down"}
+	shellCmd.SuggestFor = []string{"console", "attach"}
+
 	declareInstanceHint(upCmd, "'br up' brings the default VM up; boot a named instance with 'br boot <name>'")
 	declareInstanceHint(startCmd, "'br start' creates an instance; choose where with --state-dir, or boot a named one with 'br boot <name>'")
 	declareInstanceHint(bootCmd, "'br boot' names the instance it creates in its own argument: 'br boot <name>'")
