@@ -33,6 +33,7 @@ Run these commands from the repository root.
 | `make security` | Run govulncheck and trivy |
 | `make smoke-cartridge` | Test a cartridge on real hardware |
 | `make smoke-holder` | Test that a holder stays alive after its parent stops |
+| `make test-traps` | Test that the smoke cleanup traps fire on EXIT, INT, TERM and HUP. No hardware |
 | `make clonedetect` | Find duplicated concepts across packages |
 | `./scripts/mutation-test.sh` | Run gremlins mutation tests |
 

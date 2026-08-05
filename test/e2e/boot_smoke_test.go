@@ -57,7 +57,15 @@ const (
 	stopTimeout = 2 * time.Minute
 
 	// cmdTimeout bounds a single short control-plane subprocess (status/ls/stop).
+	// It is a CEILING, not an allowance: every probe is clamped to whatever is
+	// left of the boot deadline, so two 90s probes per loop iteration can no
+	// longer overrun the requested budget by minutes.
 	cmdTimeout = 90 * time.Second
+
+	// reapGrace is how long teardown lets `br start` exit on its own after the
+	// context is canceled, before it escalates to SIGKILL and waits for the
+	// owner goroutine to confirm the reap.
+	reapGrace = 30 * time.Second
 )
 
 // TestE2EBootSmoke brings a VM up from a clean, isolated state, waits (bounded)
@@ -103,11 +111,11 @@ func TestE2EBootSmoke(t *testing.T) {
 	// Teardown is registered BEFORE we start the VM so a failure anywhere below
 	// (including a panic or a t.Fatal in the readiness wait) still ejects the
 	// guest and reaps the `br start` process. It runs even if start never became
-	// ready — br stop is a no-op when nothing is running.
-	startCtx, cancelStart := context.WithCancel(context.Background())
-	var startCmd *exec.Cmd
+	// ready — br stop is a no-op when nothing is running, and teardown is inert
+	// when proc is still nil because the launch failed.
+	var proc *bgProcess
 	t.Cleanup(func() {
-		teardown(t, bin, env, cancelStart, startCmd)
+		teardown(t, bin, env, proc, reapGrace)
 	})
 
 	// Launch `br start --json` as a long-lived foreground server subprocess. It
@@ -117,14 +125,18 @@ func TestE2EBootSmoke(t *testing.T) {
 	if debian {
 		startArgs = append(startArgs, "--debian-image")
 	}
-	startCmd = exec.CommandContext(startCtx, bin, startArgs...)
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	startCmd := exec.CommandContext(startCtx, bin, startArgs...)
 	startCmd.Env = env
 	var startOut startLog
 	startCmd.Stdout = &startOut
 	startCmd.Stderr = &startOut
-	if err := startCmd.Start(); err != nil {
+	launched, err := startBackground(startCmd, cancelStart)
+	if err != nil {
+		cancelStart()
 		t.Fatalf("launch `br %s`: %v", strings.Join(startArgs, " "), err)
 	}
+	proc = launched
 	t.Logf("launched `br %s` (pid %d)", strings.Join(startArgs, " "), startCmd.Process.Pid)
 
 	// Wait for Incus to actually answer an authenticated `br ls`. That — not a
@@ -132,7 +144,7 @@ func TestE2EBootSmoke(t *testing.T) {
 	// optimistically mid-provision, and says nothing about client-cert
 	// authorization) — is the real readiness signal. Poll until it returns valid
 	// JSON or the boot budget elapses.
-	out, err := waitForIncus(t, bin, env, boot, startCmd, &startOut)
+	out, err := waitForIncus(t, bin, env, boot, proc, &startOut)
 	if err != nil {
 		t.Fatalf("Incus not reachable within %s: %v\n--- br start output ---\n%s",
 			boot, err, startOut.String())
@@ -262,6 +274,23 @@ func bootTimeout(t *testing.T) time.Duration {
 	return defaultBootTimeout
 }
 
+// probeFunc runs one control-plane probe under the supplied budget and returns
+// its combined output. The budget is never more than what is left of the
+// overall boot deadline.
+type probeFunc func(budget time.Duration) (string, error)
+
+// readiness is the bounded poll loop that waits for Incus to answer. The probes
+// are injected rather than hard-wired to `br` so the deadline arithmetic and
+// the early-exit path can be tested on any host, with no VM and no hardware.
+type readiness struct {
+	ls     probeFunc     // `br ls --json` — success plus valid JSON means ready
+	status probeFunc     // `br status --json` — diagnostics only
+	poll   time.Duration // gap between attempts
+	budget time.Duration // per-probe ceiling, clamped by the remaining deadline
+	proc   *bgProcess    // the launched `br start`; its single owner reaps it
+	log    func() string // that process's accumulated output, for the error
+}
+
 // waitForIncus polls `br ls --json` until it SUCCEEDS with valid JSON, the
 // deadline passes, or the `br start` process dies early. It returns that output.
 //
@@ -270,53 +299,84 @@ func bootTimeout(t *testing.T) time.Duration {
 // under way. Incus answering is the thing the caller actually needs. A failing
 // `br ls` — connection refused, not up yet, non-JSON — means keep waiting, which
 // is the normal state during first boot.
-func waitForIncus(t *testing.T, bin string, env []string, within time.Duration, startCmd *exec.Cmd, startOut *startLog) (string, error) {
+func waitForIncus(t *testing.T, bin string, env []string, within time.Duration, proc *bgProcess, startOut *startLog) (string, error) {
+	t.Helper()
+	r := readiness{
+		ls:     func(budget time.Duration) (string, error) { return runCmd(t, bin, env, budget, "ls", "--json") },
+		status: func(budget time.Duration) (string, error) { return runCmd(t, bin, env, budget, "status", "--json") },
+		poll:   pollInterval,
+		budget: cmdTimeout,
+		proc:   proc,
+		log:    startOut.String,
+	}
+	return r.wait(t, within)
+}
+
+// wait runs the poll loop under ONE deadline. Every probe is clamped to the
+// time that remains, and the deadline is re-checked before each one starts, so
+// the total cannot exceed the requested budget by more than a scheduling
+// margin. It never waits on the process itself: the single owner established by
+// startBackground does that, and this loop only observes its done channel.
+func (r readiness) wait(t *testing.T, within time.Duration) (string, error) {
 	t.Helper()
 	deadline := time.Now().Add(within)
-	ticker := time.NewTicker(pollInterval)
+	ticker := time.NewTicker(r.poll)
 	defer ticker.Stop()
-
-	// Watch for the start process exiting early (a signing/config error would
-	// make it exit before Incus ever comes up) so we fail fast instead of
-	// polling for the full timeout.
-	exited := make(chan error, 1)
-	go func() { exited <- startCmd.Wait() }()
+	overall := time.NewTimer(within)
+	defer overall.Stop()
 
 	var lastErr error
 	for {
-		out, err := runCmd(t, bin, env, cmdTimeout, "ls", "--json")
+		budget, ok := r.remaining(deadline)
+		if !ok {
+			return "", deadlineError(lastErr)
+		}
+		out, err := r.ls(budget)
 		if err == nil && json.Valid(bytes.TrimSpace([]byte(out))) {
 			return out, nil
 		}
 		lastErr = err
+
 		// A connection-refused / not-authorized / not-yet-up `br ls` just means
-		// keep waiting; log the status alongside for diagnosis.
-		if status, serr := queryStatus(t, bin, env); serr == nil {
+		// keep waiting; log the status alongside for diagnosis. Diagnostics are
+		// worth having but must not extend the budget, so the deadline is
+		// re-checked before this second probe starts.
+		if budget, ok = r.remaining(deadline); !ok {
+			return "", deadlineError(lastErr)
+		}
+		if status, serr := r.statusText(budget); serr == nil {
 			t.Logf("status: %s; `br ls` not ready yet (will retry)", status)
 		} else {
 			t.Logf("`br ls` not ready yet (will retry): %v", err)
 		}
 
 		select {
-		case werr := <-exited:
-			return "", &earlyExitError{err: werr, log: startOut.String()}
+		case <-r.proc.done():
+			return "", &earlyExitError{err: r.proc.wait(), log: r.log()}
+		case <-overall.C:
+			return "", deadlineError(lastErr)
 		case <-ticker.C:
-			if time.Now().After(deadline) {
-				if lastErr != nil {
-					return "", fmt.Errorf("deadline exceeded; last `br ls` error: %w", lastErr)
-				}
-				return "", context.DeadlineExceeded
-			}
 		}
 	}
 }
 
-// queryStatus runs `br status --json` and extracts the top-level "status"
-// field. A non-running VM reports "stopped"; a booting one may report
-// "unreachable" until the guest answers.
-func queryStatus(t *testing.T, bin string, env []string) (string, error) {
-	t.Helper()
-	out, err := runCmd(t, bin, env, cmdTimeout, "status", "--json")
+// remaining returns the ceiling for the next probe: the smaller of the
+// per-probe budget and what is left of the overall deadline. ok is false once
+// the deadline has passed, which is the signal to stop rather than start
+// another probe that could run for another 90 seconds.
+func (r readiness) remaining(deadline time.Time) (time.Duration, bool) {
+	left := time.Until(deadline)
+	if left <= 0 {
+		return 0, false
+	}
+	return min(r.budget, left), true
+}
+
+// statusText runs the status probe and extracts the top-level "status" field. A
+// non-running VM reports "stopped"; a booting one may report "unreachable"
+// until the guest answers.
+func (r readiness) statusText(budget time.Duration) (string, error) {
+	out, err := r.status(budget)
 	if err != nil {
 		return "", err
 	}
@@ -327,6 +387,15 @@ func queryStatus(t *testing.T, bin string, env []string) (string, error) {
 		return "", &statusParseError{raw: out, err: uerr}
 	}
 	return report.Status, nil
+}
+
+// deadlineError reports that the boot budget elapsed, naming the last probe
+// failure when there was one.
+func deadlineError(last error) error {
+	if last != nil {
+		return fmt.Errorf("deadline exceeded; last `br ls` error: %w", last)
+	}
+	return context.DeadlineExceeded
 }
 
 // runCmd runs a short br subcommand to completion with a bounded timeout,
@@ -344,8 +413,10 @@ func runCmd(t *testing.T, bin string, env []string, timeout time.Duration, args 
 
 // teardown always ejects the guest and reaps the `br start` process, even on
 // failure or timeout, so a hung boot never strands a VM. It is registered via
-// t.Cleanup before the VM is started.
-func teardown(t *testing.T, bin string, env []string, cancelStart context.CancelFunc, startCmd *exec.Cmd) {
+// t.Cleanup before the VM is started, and is inert when proc is nil because the
+// launch never happened. grace is how long the process gets to exit on its own
+// after cancellation before teardown escalates.
+func teardown(t *testing.T, bin string, env []string, proc *bgProcess, grace time.Duration) {
 	t.Helper()
 	t.Log("teardown: stopping VM and cleaning up")
 
@@ -357,17 +428,11 @@ func teardown(t *testing.T, bin string, env []string, cancelStart context.Cancel
 		t.Logf("teardown: `br stop --force` OK:\n%s", strings.TrimSpace(out))
 	}
 
-	// Cancel the start context (kills the foreground server process if stop did
-	// not already unblock it) and reap it so no orphan lingers.
-	if startCmd != nil && startCmd.Process != nil {
-		cancelStart()
-		done := make(chan struct{})
-		go func() { _, _ = startCmd.Process.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			_ = startCmd.Process.Kill()
-		}
+	// The child has exactly one waiter, established at launch. Teardown asks it
+	// to end and blocks until that owner confirms the exit; it never calls Wait
+	// itself, and it never returns while the process is still unreaped.
+	if err := proc.stop(grace); err != nil {
+		t.Logf("teardown: `br start` exited with %v", err)
 	}
 }
 

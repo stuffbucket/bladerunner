@@ -42,6 +42,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BIN="$PROJECT_ROOT/bin/br"
 
+# Cleanup traps and interruptible long commands live in one place, shared with
+# smoke-holder.sh and exercised by scripts/test-cleanup-traps.sh.
+# shellcheck source=scripts/lib/cleanup-traps.sh
+. "$SCRIPT_DIR/lib/cleanup-traps.sh"
+
 DISK="${SMOKE_DISK:-debian-trixie-gui}"
 READY_TIMEOUT="${SMOKE_READY_TIMEOUT:-600}"
 SHARE_TIMEOUT="${SMOKE_SHARE_TIMEOUT:-300}"  # the runcmd configures the share after SSH is up
@@ -49,6 +54,7 @@ NAME="smoke-cartridge"
 VOLNAME="bladerunner-$NAME"                  # what `hdiutil create -volname` bakes in
 WORK="$(mktemp -d)"
 CART="$WORK/${NAME}.sparseimage"
+INSPECT="$WORK/inspect"                      # where the layout assertion attaches privately
 # `read` returns 1 at EOF, which `set -e` would treat as fatal for an
 # unset SMOKE_BOOT_ARGS; the || true keeps an empty array empty.
 read -r -a BOOT_ARGS <<< "${SMOKE_BOOT_ARGS:-}" || true
@@ -56,11 +62,23 @@ read -r -a BOOT_ARGS <<< "${SMOKE_BOOT_ARGS:-}" || true
 STATE_DIR="${BLADERUNNER_STATE_DIR:-$HOME/.local/state/bladerunner}"
 PRIVATE_MNT="$STATE_DIR/mnt/$NAME"     # where --private-mount (and `disk pack`) attach
 BROWSABLE_MNT="/Volumes/$VOLNAME"      # where the browsable default lands
+REGISTRY="$STATE_DIR/instances/$NAME.json"  # the holder records its pid here
 MNT=""                                 # resolved after boot; see resolve_mnt
 SHARE=""                               # host side of the RW VirtioFS share
+BROWSE_DEV=""                          # /dev node of the browsable-policy attach
+BROWSE_MNT=""                          # its mountpoint
 
 HOLDER_PID=""                          # the `br vmd` that owns the VM after boot returns
 PASS=0
+RECOVERY=""                            # steps cleanup could not take itself, printed at the end
+
+# Cleanup budgets. The eject timeout is what the guest gets for a graceful ACPI
+# shutdown; the poll tries bound the wait for the holder to leave afterwards.
+EJECT_TIMEOUT=90        # seconds handed to `br eject --timeout`
+HOLDER_POLL_TRIES=30    # x HOLDER_POLL seconds waiting for the holder to exit
+HOLDER_POLL=2
+DETACH_TRIES=5          # x DETACH_WAIT seconds of graceful detach attempts
+DETACH_WAIT=2
 
 note() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
@@ -93,31 +111,144 @@ resolve_mnt() {
   return 0
 }
 
-cleanup() {
-  local rc=$?
-  set +e
-  if [[ -n "$HOLDER_PID" ]] && kill -0 "$HOLDER_PID" 2>/dev/null; then
-    note "cleanup: ejecting (force) and stopping the holder"
-    "$BIN" eject "$NAME" --force >/dev/null 2>&1
-    for _ in $(seq 1 15); do kill -0 "$HOLDER_PID" 2>/dev/null || break; sleep 2; done
-    kill -9 "$HOLDER_PID" 2>/dev/null
+# --- cleanup ---------------------------------------------------------------
+#
+# cleanup runs on EXIT, INT, TERM and HUP (scripts/lib/cleanup-traps.sh). A bare
+# `trap cleanup EXIT` did not: bash skips an EXIT trap when a signal it has no
+# handler for kills the shell, so a CI cancellation or a Ctrl-C left a VM
+# running, a cartridge attached and a volume mounted on a shared machine (#227).
+#
+# Nothing below forces anything. The old fallback ran a FORCED hdiutil detach
+# across five candidate mountpoints after a best-effort eject and a SIGKILL,
+# with no evidence that the VMM had released the disk. Forcing a detach out from
+# under a live writer is the damage AGENTS.md section 8 ("Data safety") exists
+# to prevent, so a volume that will not release is PRESERVED and reported.
+
+# recover records a step a human has to take on this host.
+recover() { RECOVERY="$RECOVERY    - $1"$'\n'; }
+
+holder_alive() { [[ -n "$HOLDER_PID" ]] && kill -0 "$HOLDER_PID" 2>/dev/null; }
+
+# registry_pid prints the holder pid recorded in a registry entry.
+registry_pid() {
+  sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" | head -1
+}
+
+# discover_holder fills HOLDER_PID from the registry when the script has not
+# read it yet. A signal during `br boot` leaves a holder behind that this script
+# never learned the pid of, and an unknown holder is precisely the one that gets
+# orphaned.
+discover_holder() {
+  if [[ -n "$HOLDER_PID" ]]; then return 0; fi
+  if [[ ! -e "$REGISTRY" ]]; then return 0; fi
+  HOLDER_PID="$(registry_pid "$REGISTRY" 2>/dev/null)"
+  if [[ -n "$HOLDER_PID" ]]; then
+    note "cleanup: found holder pid $HOLDER_PID recorded at $REGISTRY"
   fi
-  # Belt-and-suspenders: detach the cartridge if anything left it mounted, at
-  # whichever location the policy in force put it.
-  for mp in "$MNT" "$BROWSABLE_MNT" "$PRIVATE_MNT" "$WORK/inspect" "$WORK/browsable"; do
-    [[ -n "$mp" ]] && hdiutil detach "$mp" -force >/dev/null 2>&1
+  return 0
+}
+
+# wait_for_holder_exit waits for the holder to leave. A holder that exits has
+# powered the guest off and detached the cartridge itself, so its exit is also
+# the evidence that the image was RELEASED — which is what makes any later
+# detach safe rather than a guess.
+wait_for_holder_exit() {
+  local _
+  for _ in $(seq 1 "$HOLDER_POLL_TRIES"); do
+    if ! holder_alive; then HOLDER_PID=""; return 0; fi
+    sleep "$HOLDER_POLL"
   done
+  if ! holder_alive; then HOLDER_PID=""; return 0; fi
+  return 1
+}
+
+# stop_guest asks the guest to power itself off and waits for the holder to go.
+# It escalates from a graceful ACPI eject to --force (still a real stop, driven
+# through the VMM) but never to SIGKILL: killing the holder is a power cut that
+# also leaves the image attached with no owner — the state that then tempts a
+# forced detach.
+stop_guest() {
+  discover_holder
+  if ! holder_alive; then return 0; fi
+  note "cleanup: ejecting '$NAME' (graceful ACPI shutdown; holder pid $HOLDER_PID)"
+  "$BIN" eject "$NAME" --timeout "${EJECT_TIMEOUT}s" >/dev/null 2>&1
+  if wait_for_holder_exit; then ok "holder exited; the cartridge was released"; return 0; fi
+
+  note "cleanup: the guest did not stop in time; forcing the stop through the VMM"
+  "$BIN" eject "$NAME" --force >/dev/null 2>&1
+  if wait_for_holder_exit; then ok "holder exited; the cartridge was released"; return 0; fi
+
+  recover "holder pid $HOLDER_PID STILL owns the VM and its disk. Inspect it with:"
+  recover "    ps -p $HOLDER_PID -o pid,etime,command"
+  recover "  then stop it with: '$BIN' eject '$NAME' --force"
+  recover "  The cartridge is deliberately left attached — detaching it out from under a"
+  recover "  live VMM is how the image gets corrupted."
+  return 1
+}
+
+# attached reports whether hdiutil still knows about a path or /dev node.
+attached() { [[ -n "$1" ]] && hdiutil info 2>/dev/null | grep -qF "$1"; }
+
+# detach_gently detaches an attachment WITHOUT -force. A detach that still
+# refuses after DETACH_TRIES means something is holding the volume; the
+# attachment is preserved and reported rather than ripped out.
+detach_gently() {
+  local target="$1" what="$2" _
+  if ! attached "$target"; then return 0; fi
+  for _ in $(seq 1 "$DETACH_TRIES"); do
+    hdiutil detach "$target" >/dev/null 2>&1
+    if ! attached "$target"; then return 0; fi
+    sleep "$DETACH_WAIT"
+  done
+  recover "$what is still attached at '$target'. Once nothing is using it: hdiutil detach '$target'"
+  return 1
+}
+
+cleanup() {
+  local rc="$1" mp
+  set +e
+  # An interrupted `wait` leaves the long command it was watching running and
+  # unreaped; this ends it and reaps it exactly once.
+  reap_interruptible_child
+
+  stop_guest || rc=1
+
+  # Attachments this script made itself. No VM ever wrote to them, and both are
+  # already detached on the happy path.
+  detach_gently "$INSPECT" "the layout inspection mount" || rc=1
+  detach_gently "$BROWSE_DEV" "the browsable-policy mount" || rc=1
+  detach_gently "$BROWSE_MNT" "the browsable-policy mount" || rc=1
+
+  # The BOOTED cartridge belongs to the holder, which detaches it on the way
+  # out. Touch it only once the holder is positively gone: ownership is
+  # established before the detach rather than assumed.
+  if holder_alive; then
+    recover "the booted cartridge is left mounted on purpose while pid $HOLDER_PID still owns it"
+    rc=1
+  else
+    for mp in "$MNT" "$BROWSABLE_MNT" "$PRIVATE_MNT"; do
+      detach_gently "$mp" "the booted cartridge" || rc=1
+    done
+  fi
+
   if [[ "$PASS" -eq 1 && "$rc" -eq 0 ]]; then
     rm -rf "$WORK"
     printf '\n\033[1;32m==> SMOKE PASSED\033[0m\n'
-  else
-    # Preserve the work dir (incl. boot.log) for diagnosis on failure.
-    printf '\n\033[1;31m==> SMOKE FAILED (see above)\033[0m\n' >&2
-    printf '    work dir kept for diagnosis: %s\n' "$WORK" >&2
-    [[ -f "$WORK/boot.log" ]] && printf '    boot log tail:\n' >&2 && tail -n 25 "$WORK/boot.log" >&2
+    return 0
   fi
+  # A run that never reached PASS=1 failed, whatever status brought us here.
+  [[ "$rc" -eq 0 ]] && rc=1
+  # Preserve the work dir (incl. boot.log) for diagnosis on failure.
+  printf '\n\033[1;31m==> SMOKE FAILED (see above)\033[0m\n' >&2
+  printf '    work dir kept for diagnosis: %s\n' "$WORK" >&2
+  [[ -f "$WORK/boot.log" ]] && printf '    boot log tail:\n' >&2 && tail -n 25 "$WORK/boot.log" >&2
+  if [[ -n "$RECOVERY" ]]; then
+    printf '\n\033[1;31m==> MANUAL RECOVERY NEEDED on this host:\033[0m\n' >&2
+    printf '%s' "$RECOVERY" >&2
+  fi
+  return "$rc"
 }
-trap cleanup EXIT
+install_cleanup_traps
 
 note "Building + codesigning bladerunner"
 make -C "$PROJECT_ROOT" sign >/dev/null
@@ -140,14 +271,13 @@ done
 ok "local ports free"
 
 note "Packing a cartridge from '$DISK' (downloads image, bakes root.img, real hdiutil) + --ship"
-"$BIN" disk pack "$DISK" --out "$CART" --ship
+run_interruptible "$BIN" disk pack "$DISK" --out "$CART" --ship
 [[ -f "$CART" ]] || fail "pack did not produce $CART"
 DMG="${CART%.sparseimage}.dmg"
 [[ -f "$DMG" ]] || fail "--ship did not produce $DMG"
 ok "packed $(basename "$CART") + $(basename "$DMG")"
 
 note "Asserting cartridge layout (PRIVATE policy: attach read-only at a dictated mountpoint, check files, detach)"
-INSPECT="$WORK/inspect"
 hdiutil attach "$CART" -mountpoint "$INSPECT" -nobrowse -owners on -noverify >/dev/null
 layout_ok=1
 for f in disk.json root.img state share; do
@@ -172,12 +302,16 @@ esac
 [[ -e "$BROWSE_MNT/disk.json" ]] || fail "browsable mount is missing disk.json — mount detection would ignore it"
 ok "volume name matches the bladerunner- prefix mount detection filters on"
 hdiutil detach "$BROWSE_DEV" >/dev/null || fail "could not detach the browsable mount"
+# Forget the device now that it is released. A /dev/diskN number is recycled,
+# and cleanup must never detach a node that some other image has since taken.
+BROWSE_DEV=""
+BROWSE_MNT=""
 ok "browsable mount detached"
 
 note "Booting the cartridge headless (the VM runs under a holder, not under br boot)"
 # `br boot` now spawns a `br vmd` holder, attaches to it, and RETURNS once the
 # guest is up. It blocks for the whole boot, so this is a foreground call.
-"$BIN" boot "$CART" --headless --timeout "${READY_TIMEOUT}s" ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"} >"$WORK/boot.log" 2>&1 \
+run_interruptible "$BIN" boot "$CART" --headless --timeout "${READY_TIMEOUT}s" ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"} >"$WORK/boot.log" 2>&1 \
   || { sed 's/^/      /' "$WORK/boot.log" >&2; fail "br boot failed — see $WORK/boot.log"; }
 ok "br boot returned (log: $WORK/boot.log)"
 
@@ -185,9 +319,8 @@ note "GOAL 1: br boot has EXITED and the VM is still running"
 # This is the assertion the whole refactor exists for. Before it, `br boot` WAS
 # the VM: the process that ran this command owned the VMM, and it had to stay
 # alive for the rest of the script. Now it is gone and a holder owns the VM.
-REGISTRY="$STATE_DIR/instances/$NAME.json"
 [[ -e "$REGISTRY" ]] || fail "no registry entry at $REGISTRY after boot returned"
-HOLDER_PID="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$REGISTRY" | head -1)"
+HOLDER_PID="$(registry_pid "$REGISTRY")"
 [[ -n "$HOLDER_PID" ]] || fail "registry entry names no holder pid: $REGISTRY"
 kill -0 "$HOLDER_PID" 2>/dev/null || fail "the holder (pid $HOLDER_PID) is not running after br boot returned"
 [[ "$HOLDER_PID" != "$$" ]] || fail "the holder pid is this script — the VM is not detached"
@@ -262,12 +395,10 @@ note "Ejecting (ACPI graceful shutdown, then detach)"
 # Eject by cartridge name (no BLADERUNNER_STATE_DIR override): this exercises the
 # real cartridge-scan path and labels the slot by name, rather than treating the
 # overridden state dir as the flat "default" slot.
-"$BIN" eject "$NAME"
+run_interruptible "$BIN" eject "$NAME"
 # The HOLDER powers the guest off, detaches, and exits. (It is not a child of
 # this shell, so it is polled rather than waited on.)
-for _ in $(seq 1 30); do kill -0 "$HOLDER_PID" 2>/dev/null || break; sleep 2; done
-if kill -0 "$HOLDER_PID" 2>/dev/null; then fail "the holder is still running after eject"; fi
-HOLDER_PID=""
+wait_for_holder_exit || fail "the holder is still running after eject"
 ok "guest powered off cleanly and the holder exited"
 
 if hdiutil info 2>/dev/null | grep -q "bladerunner-$NAME"; then

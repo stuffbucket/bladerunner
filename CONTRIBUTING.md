@@ -88,9 +88,37 @@ internal/
   ui/               # Terminal UI theming
   util/             # Utility functions
   vm/               # VM configuration and runtime (VZ framework)
-scripts/            # Build and release scripts
+scripts/            # Build, release and test scripts (see below)
 .github/workflows/  # CI/CD pipelines
 ```
+
+## Scripts
+
+Every script in `scripts/` is supported, or it is not there. A script that
+always fails is not validation. Nor is one you can only judge by eye. Such a
+script is noise, so it is retired rather than kept.
+
+| Script | Make target | Status | Needs |
+|---|---|---|---|
+| `smoke-cartridge.sh` | `make smoke-cartridge` | Supported | Apple Silicon Mac, codesigned binary, network. |
+| `smoke-holder.sh` | `make smoke-holder` | Supported | Apple Silicon Mac, codesigned binary, network. |
+| `test-cleanup-traps.sh` | `make test-traps` | Supported | Nothing. It runs anywhere, in seconds. |
+| `test-isolation.sh` | `make test-isolation` | Supported | Nothing more than the Go toolchain. |
+| `mutation-test.sh` | — | Supported, manual | gremlins. |
+| `govulncheck.sh` | `make vulncheck` | Supported | Nothing more than the Go toolchain. |
+| `diagnose-disk.sh` | — | Supported, manual | A disk image to examine. |
+| `gen-brand-assets.sh` | — | Supported, manual | ImageMagick. |
+
+Retired:
+
+- `test-alpine.sh` and `test-minimal-boot.sh` (removed in #228). Neither one
+  could exercise the current build. The first printed that it needed
+  implementation and exited 1. The second called the removed `bin/bladerunner`
+  path with root flags (`--name`, `--disk-size`, `--log-level`) that no longer
+  exist, so it failed before it booted. Both asked a human to look at a GUI
+  window instead of asserting a result. The gated end-to-end suite covers their
+  scenario: `go test ./test/e2e/` with `BLADERUNNER_E2E=1`, and the `e2e-boot`
+  workflow. It asserts machine-checkable readiness and then tears the VM down.
 
 ## Pull Requests
 
