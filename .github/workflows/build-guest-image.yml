@@ -156,6 +156,12 @@ jobs:
           TAG="guest-image-v${BUILD_DATE}"
           TITLE="Guest image ${BUILD_DATE}"
           MARKER="source-commit: ${SHA}"
+          # Built with printf rather than inline in the --notes argument: a
+          # multi-line string written inside this YAML block scalar carries the
+          # block's indentation into the release body, which then defeats any
+          # anchored match against the marker.
+          NOTES="$(printf 'Pre-baked bladerunner guest image (Debian Trixie + Incus). Built %s.\n%s\n' \
+            "${BUILD_DATE}" "${MARKER}")"
 
           # A dated tag is meant to name one immutable set of images. Same-day
           # rebuilds used to --clobber it unconditionally, so one tag could hold
@@ -182,8 +188,7 @@ jobs:
             gh release create "${TAG}" out/* \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TITLE}" \
-              --notes "Pre-baked bladerunner guest image (Debian Trixie + Incus). Built ${BUILD_DATE}.
-          ${MARKER}"
+              --notes "${NOTES}"
           fi
 
       - name: Update `guest-image-latest` pointer
@@ -195,6 +200,10 @@ jobs:
           TAG="guest-image-latest"
           TITLE="Guest image (latest)"
           MARKER="points-at: ${BUILD_DATE}"
+          # See the note on NOTES above: build it with printf so the YAML block
+          # indentation does not leak into the release body and break the match.
+          NOTES="$(printf 'Moving pointer to the most recent guest image build (%s).\n%s\n' \
+            "${BUILD_DATE}" "${MARKER}")"
 
           # This pointer is what every fresh install downloads, so it must only
           # ever move FORWARD. The concurrency group above keeps runs in order,
@@ -202,7 +211,7 @@ jobs:
           # would silently hand new users an older image.
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             current="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""' \
-              | sed -n 's/^points-at: //p' | head -n1)"
+              | sed -n 's/^[[:space:]]*points-at:[[:space:]]*//p' | head -n1)"
             if [ -n "${current}" ] && [ "${current}" != "${BUILD_DATE}" ]; then
               older="$(printf '%s\n%s\n' "${BUILD_DATE}" "${current}" | sort -V | head -n1)"
               if [ "${older}" = "${BUILD_DATE}" ]; then
@@ -211,13 +220,10 @@ jobs:
               fi
             fi
             gh release upload "${TAG}" out/* --clobber --repo "${GITHUB_REPOSITORY}"
-            gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" \
-              --notes "Moving pointer to the most recent guest image build (${BUILD_DATE}).
-          ${MARKER}"
+            gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --notes "${NOTES}"
           else
             gh release create "${TAG}" out/* \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TITLE}" \
-              --notes "Moving pointer to the most recent guest image build (${BUILD_DATE}).
-          ${MARKER}"
+              --notes "${NOTES}"
           fi
