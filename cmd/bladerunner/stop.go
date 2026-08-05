@@ -153,12 +153,25 @@ func runStop(_ *cobra.Command, _ []string) error {
 //     --force escalates straight to the signal ladder and a plain stop reports
 //     the state and names --force as the way out.
 //
-// The socket file has to still be there for the process to count: a holder that
-// exited cleanly removed it, so a live PID with no socket is a recycled PID, not
-// a wedged holder. Signaling that would kill an unrelated process.
+// A wedged holder is one whose socket is BOUND AND ACCEPTING while its handler
+// never answers. That is the discriminator, and stat'ing the socket file is not
+// it: a holder killed with SIGKILL, or lost to a panic or a reboot, leaves the
+// socket inode AND the lock file behind. Once its PID is recycled, "file present
+// and PID alive" becomes true of an innocent process, and --force would
+// terminate it.
+//
+// The dial separates them. A live wedged holder accepts the connection — the
+// kernel completes it from the listen backlog even when nothing ever reads —
+// while a dead holder's leftover inode has no listener, so connect fails with
+// ECONNREFUSED. This is the same probe bindListener uses to decide whether a
+// socket it found is somebody's live claim.
+//
+// Getting this wrong is worse than it looks, because the surrounding behavior
+// funnels users into it: acquireStartLock sees the same recycled PID and refuses
+// `br start` with ErrInstanceLocked, which sends them straight to --force.
 func stopUnreachable(target resolvedInstance, socketPath string) error {
 	pid := holderPID(target)
-	if socketGone(socketPath) || !instance.ProcessAlive(pid) {
+	if !socketAccepting(socketPath) || !instance.ProcessAlive(pid) {
 		return jsonOrError(fmt.Errorf("VM is not running"))
 	}
 	if !stopFlags.force {
@@ -334,4 +347,19 @@ func cleanupSocket(socketPath string) {
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) && !jsonOutput {
 		fmt.Printf("note: could not remove stale control socket %s: %v\n", socketPath, err)
 	}
+}
+
+// socketAccepting reports whether something is listening on socketPath.
+//
+// A successful connect is the only evidence separating a wedged holder from a
+// dead one's leftover inode. It is deliberately not followed by a request: a
+// wedged holder accepts and never answers, and that is exactly the state this
+// has to report as live.
+func socketAccepting(socketPath string) bool {
+	conn, err := control.DefaultTransport.Dial(socketPath, control.SocketCheckTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }

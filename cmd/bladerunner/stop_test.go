@@ -307,3 +307,49 @@ func TestWaitForStop(t *testing.T) {
 		}
 	})
 }
+
+// A stale socket plus a RECYCLED PID must not be mistaken for a wedged holder.
+//
+// A holder killed with SIGKILL leaves the socket inode and the lock file behind.
+// Once the OS reuses its PID, "socket file present and PID alive" becomes true
+// of an innocent process -- so a guard built on os.Stat hands --force somebody
+// else's process to terminate. Only a successful connect distinguishes a live
+// wedged holder from a dead one's litter.
+//
+// TestRunStopReportsNotRunningForADeadHolder covers the easier half, where the
+// recorded PID has exited. This is the half where it has not.
+func TestRunStopDoesNotSignalARecycledPID(t *testing.T) {
+	dir := shortStateDir(t)
+	t.Setenv("BLADERUNNER_STATE_DIR", dir)
+	useStopFlags(t, true)
+
+	// A crashed holder's leavings: a socket FILE with nothing listening.
+	if err := os.WriteFile(control.SocketPath(dir), nil, 0o600); err != nil {
+		t.Fatalf("write stale socket: %v", err)
+	}
+
+	// An unrelated live process standing where the holder's PID used to be.
+	innocent := exec.Command("/bin/sleep", "60")
+	if err := innocent.Start(); err != nil {
+		t.Fatalf("start innocent process: %v", err)
+	}
+	reaped := make(chan struct{})
+	go func() { _ = innocent.Wait(); close(reaped) }()
+	t.Cleanup(func() {
+		_ = innocent.Process.Kill()
+		<-reaped
+	})
+	pid := innocent.Process.Pid
+
+	if err := os.WriteFile(control.LockPath(dir), fmt.Appendf(nil, "%d\n", pid), 0o600); err != nil {
+		t.Fatalf("write control lock: %v", err)
+	}
+
+	err := runStop(nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Errorf("runStop --force = %v, want it to report the instance is not running", err)
+	}
+	if !instance.ProcessAlive(pid) {
+		t.Errorf("br stop --force terminated pid %d, which is not a bladerunner holder", pid)
+	}
+}
