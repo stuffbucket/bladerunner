@@ -254,6 +254,10 @@ func TestOpenBrowsableNeedsNoMountpoint(t *testing.T) {
 // TestOpenBrowsableUnwindsARejectedCartridge keeps the browsable path honest
 // about the invariant the private one already had: a volume we refuse to boot
 // is never left mounted — and now it would be left mounted somewhere VISIBLE.
+//
+// The unwind addresses the volume by its BSD DEVICE NODE, not by the mountpoint
+// macOS chose: a path can be occupied by an unrelated volume, a device node
+// cannot.
 func TestOpenBrowsableUnwindsARejectedCartridge(t *testing.T) {
 	tmp := t.TempDir()
 	mounted := filepath.Join(tmp, "Volumes", "bladerunner-demo")
@@ -266,8 +270,8 @@ func TestOpenBrowsableUnwindsARejectedCartridge(t *testing.T) {
 	if !errors.Is(err, ErrNotCartridge) {
 		t.Fatalf("err = %v, want ErrNotCartridge", err)
 	}
-	if len(f.calls) != 2 || f.calls[1][1] != cmdDetach || f.calls[1][2] != resolvePath(mounted) {
-		t.Fatalf("hdiutil calls = %v, want a detach of the real mountpoint", f.calls)
+	if len(f.calls) != 2 || f.calls[1][1] != cmdDetach || f.calls[1][2] != openTestDevNode {
+		t.Fatalf("hdiutil calls = %v, want a detach of the device node %s", f.calls, openTestDevNode)
 	}
 }
 
@@ -578,6 +582,195 @@ func TestCanonicalImagePath(t *testing.T) {
 	}
 }
 
+// TestOpenRefusesAWorkingCopyWhoseAttachmentCannotBeRead is the OTHER door into
+// the same data loss, and the one the flock claim and the attachment guard both
+// let through: the guard asked hdiutil and hdiutil answered in a shape this
+// build could not read.
+//
+// clearStaleWorkingCopy promises that "a lookup that cannot be completed is
+// treated as do-not-touch-it". The parser used to hand it a false NEGATIVE for
+// every malformed-but-parseable document — a wrong-typed images key, an entry
+// that is not a dictionary, an entry with no image-path, an unreadable
+// system-entities array — so the guard was never given the chance to apply and
+// unlinked the backing store of whatever was attached.
+func TestOpenRefusesAWorkingCopyWhoseAttachmentCannotBeRead(t *testing.T) {
+	for name, plist := range malformedInfoPlists {
+		t.Run(name, func(t *testing.T) {
+			tmp := t.TempDir()
+			mp := filepath.Join(tmp, "mnt", "demo")
+			openFixture(t, mp)
+			dmg := filepath.Join(tmp, "demo"+DMGExt)
+			work := filepath.Join(tmp, "demo"+SparseExt)
+			writeFixtureFile(t, work, "live-guest-bytes")
+
+			f := &fakeRunner{results: []fakeResult{{stdout: plist}}}
+			o, err := open(context.Background(), f, dmg, privateOpen(mp))
+			if o != nil {
+				o.releaseClaim()
+			}
+			data, readErr := os.ReadFile(work)
+			if readErr != nil || string(data) != "live-guest-bytes" {
+				t.Fatalf("a working copy of unknown attachment state was unlinked: %q, %v", data, readErr)
+			}
+			if err == nil {
+				t.Fatal("open proceeded over an attachment state it could not establish")
+			}
+			// The refusal has to name the file, or the user cannot act on it.
+			if !strings.Contains(err.Error(), work) {
+				t.Errorf("error %q does not name %s", err, work)
+			}
+			// Only the probe ran: nothing was converted over the image and
+			// nothing was attached from it.
+			if len(f.calls) != 1 || f.calls[0][1] != cmdInfo {
+				t.Fatalf("hdiutil calls = %v, want the info probe alone", f.calls)
+			}
+			// And the refusal released the claim, so a retry after the user
+			// clears the mount works.
+			if holder, busy := Busy(dmg); busy {
+				t.Fatalf("a refused open left the cartridge claimed by %s", holder)
+			}
+		})
+	}
+}
+
+// TestCloseNeverUnlinksAWorkingCopyItCannotConfirmDetached is the P0 teardown
+// regression, on the DEFAULT (non-persist) path and with no flag required.
+//
+// Three individually correct pieces used to compose into an unlink of a live
+// mount's backing store: Mount.DevNode is documented best-effort, so an empty
+// one is ordinary rather than exceptional; IsAttachedFrom answers false for an
+// empty dev node because it can assert nothing; and closeWith read that false as
+// "the volume is gone" and settled the working copy — which for a non-persist
+// open is os.Remove of the sparse image the guest's disk is served from.
+//
+// Unknown is now attached. The detach is addressed by the device hdiutil says is
+// serving the image, and everything after it is gated on that detach SUCCEEDING.
+func TestCloseNeverUnlinksAWorkingCopyItCannotConfirmDetached(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []fakeResult
+	}{
+		{
+			// The chain the issue traced: the detach fails outright, and
+			// nothing after it may run.
+			name: "the volume will not detach",
+			results: []fakeResult{
+				attachedImageResult("", openTestDevNode, "/Volumes/bladerunner-demo"),
+				{stderr: "hdiutil: detach failed - Permission denied", err: errors.New("exit 1")},
+			},
+		},
+		{
+			// The weaker case, and the commoner one: nothing failed loudly, we
+			// simply cannot establish what is attached. Unknown is attached.
+			name: "hdiutil cannot say what is attached",
+			results: []fakeResult{
+				{stderr: "hdiutil: info failed", err: errors.New("exit 1")},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			dmg := filepath.Join(tmp, "demo"+DMGExt)
+			work := filepath.Join(tmp, "demo"+SparseExt)
+			writeFixtureFile(t, dmg, "the-shipped-cartridge")
+			writeFixtureFile(t, work, "live-guest-bytes")
+
+			o := &Opened{
+				Name:        "demo",
+				SourcePath:  dmg,
+				WorkingCopy: work,
+				// The mount macOS chose, with NO dev node: hdiutil's plist was
+				// not parseable and the kernel could not be asked either.
+				Mount: Mount{Path: work, Mountpoint: "/Volumes/bladerunner-demo"},
+			}
+			if err := o.claim(); err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+			t.Cleanup(func() { o.releaseClaim() })
+
+			results := make([]fakeResult, len(tc.results))
+			copy(results, tc.results)
+			if results[0].stdout != "" {
+				// Rewrite the scripted info plist for this run's temp paths.
+				results[0] = attachedImageResult(work, openTestDevNode, "/Volumes/bladerunner-demo")
+			}
+			f := &fakeRunner{results: results}
+
+			err := o.closeWith(context.Background(), f)
+			data, readErr := os.ReadFile(work)
+			if readErr != nil || string(data) != "live-guest-bytes" {
+				t.Fatalf("the live guest's disk was unlinked by a close that never detached it: %q, %v", data, readErr)
+			}
+			if err == nil {
+				t.Fatal("an unconfirmed detach must be reported, not swallowed")
+			}
+			if o.Mount.Mountpoint == "" {
+				t.Error("the Mount was dropped, so a later Close cannot retry the detach")
+			}
+			if _, busy := Busy(dmg); !busy {
+				t.Error("the claim was released while the volume may still be mounted, so a second boot could convert a fresh image over it")
+			}
+		})
+	}
+}
+
+// TestCloseDetachesTheDeviceNodeNotTheRememberedPath is the identity half of the
+// same issue: a mountpoint is a PATH, and the cartridge that was mounted there
+// may have been force-ejected and the path taken by an unrelated volume. The
+// device node is what this cartridge actually is, so it is what teardown names.
+func TestCloseDetachesTheDeviceNodeNotTheRememberedPath(t *testing.T) {
+	const stalePath = "/Volumes/bladerunner-demo"
+	o := &Opened{
+		Name:  "demo",
+		Mount: Mount{Path: "/images/demo" + SparseExt, Mountpoint: stalePath, DevNode: openTestDevNode},
+	}
+	f := &fakeRunner{}
+
+	if err := o.closeWith(context.Background(), f); err != nil {
+		t.Fatalf("closeWith: %v", err)
+	}
+	if len(f.calls) != 1 || f.calls[0][1] != cmdDetach {
+		t.Fatalf("hdiutil calls = %v, want a single detach", f.calls)
+	}
+	if got := f.calls[0][2]; got != openTestDevNode {
+		t.Fatalf("detached %q; teardown must address the device node %s, never the remembered path", got, openTestDevNode)
+	}
+	if strings.Contains(strings.Join(f.calls[0], " "), stalePath) {
+		t.Errorf("the remembered mountpoint reached hdiutil: %v", f.calls[0])
+	}
+}
+
+// A close that could not remove the working copy must SAY so. Reporting success
+// while leaving a multi-gigabyte sparse image behind tells the user the
+// throwaway run was cleaned up when it was not, and nothing goes looking later.
+func TestCloseReportsAWorkingCopyItCouldNotRemove(t *testing.T) {
+	tmp := t.TempDir()
+	// A directory in place of the image file: os.Remove refuses a non-empty one,
+	// which is the portable way to make the removal fail.
+	work := filepath.Join(tmp, "demo"+SparseExt)
+	if err := os.MkdirAll(filepath.Join(work, "occupied"), layoutDirPerm); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	o := &Opened{
+		Name:        "demo",
+		SourcePath:  filepath.Join(tmp, "demo"+DMGExt),
+		WorkingCopy: work,
+		Mount:       Mount{Path: work, Mountpoint: filepath.Join(tmp, "mnt"), DevNode: openTestDevNode},
+	}
+
+	err := o.closeWith(context.Background(), &fakeRunner{})
+	if err == nil {
+		t.Fatal("a working copy that could not be removed must be reported")
+	}
+	if !strings.Contains(err.Error(), work) {
+		t.Errorf("error %q does not name the file left behind", err)
+	}
+	if o.WorkingCopy == "" {
+		t.Error("the path was cleared, so nothing records what is still on disk")
+	}
+}
+
 // TestOpenedCloseDetachesThenRemovesTheWorkingCopy pins the teardown ORDER: the
 // working copy is the mount's backing store, so it can only go once the volume
 // is detached.
@@ -685,9 +878,11 @@ func TestOpenedAccessors(t *testing.T) {
 	if !o.GUI() {
 		t.Error("GUI() should follow the manifest boot mode")
 	}
-	// No dev node was captured, so identity cannot be asserted.
-	if o.StillAttached() {
-		t.Error("StillAttached must be false without a dev node")
+	// No dev node was captured, so identity cannot be asserted — and an
+	// unanswerable question about a MOUNTED cartridge is answered "attached",
+	// because the other answer is the one that authorizes an unlink.
+	if !o.StillAttached() {
+		t.Error("StillAttached must not report absence it cannot establish")
 	}
 }
 

@@ -171,19 +171,59 @@ func packCartridgeName(outPath string) (string, error) {
 	return name, nil
 }
 
+// runDiskPack renders whatever packCartridge reported. The body returns a plain
+// error so its deferred cleanup can JOIN a cleanup failure onto it; the one
+// combined error is emitted here, which is also what puts the cleanup diagnosis
+// in front of a --json consumer. It used to be printed only in text mode, so a
+// scripted pack was told nothing at all when the image could not be released.
 func runDiskPack(cmd *cobra.Command, args []string) error {
+	if err := packCartridge(cmd, args); err != nil {
+		return jsonOrError(err)
+	}
+	return nil
+}
+
+// cleanUpPack releases the cartridge mount and, ONLY once that release is
+// confirmed, removes the partial image a failed pack left behind.
+//
+// The order is the whole point. Unlinking an image whose volume the kernel is
+// still serving is the data loss AGENTS.md section 8 names, and a detach whose
+// result was ignored says nothing about whether the volume is gone. So a failed
+// or unconfirmed release KEEPS the image and reports the path and the mountpoint
+// the user has to act on; only a confirmed release authorizes the removal.
+//
+// release is injected so the rule is testable without hdiutil; the caller passes
+// cartridge.DetachMount, which is the owner package's identity-addressed detach.
+func cleanUpPack(release func() error, imgPath, mountpoint string, packed bool) error {
+	if err := release(); err != nil {
+		if packed {
+			return fmt.Errorf("detach cartridge %s mounted at %s: %w", imgPath, mountpoint, err)
+		}
+		return fmt.Errorf("detach cartridge %s mounted at %s: %w; the partial image was KEPT because it may still be attached — release it and delete it by hand before retrying", imgPath, mountpoint, err)
+	}
+	if packed {
+		return nil
+	}
+	// A failed pack leaves a partial image; remove it so a retry is clean.
+	if err := os.Remove(imgPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove the partial cartridge image %s: %w", imgPath, err)
+	}
+	return nil
+}
+
+func packCartridge(cmd *cobra.Command, args []string) (err error) {
 	name := args[0]
 	if !disk.ValidName(name) {
-		return jsonOrError(fmt.Errorf("invalid disk name %q: must be lowercase letters, digits, and dashes (start alphanumeric)", name))
+		return fmt.Errorf("invalid disk name %q: must be lowercase letters, digits, and dashes (start alphanumeric)", name)
 	}
 
 	cat, err := disk.LoadCatalog()
 	if err != nil {
-		return jsonOrError(fmt.Errorf("load disk catalog: %w", err))
+		return fmt.Errorf("load disk catalog: %w", err)
 	}
 	entry, ok := cat.Lookup(name)
 	if !ok {
-		return jsonOrError(fmt.Errorf("unknown disk %q; %s", name, availableDisksHint(cat)))
+		return fmt.Errorf("unknown disk %q; %s", name, availableDisksHint(cat))
 	}
 	m := entry.Manifest
 
@@ -194,14 +234,14 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 
 	outPath, err := packOutPath(diskPackFlags.out, name)
 	if err != nil {
-		return jsonOrError(err)
+		return err
 	}
 	// From here on the CARTRIDGE's own name is the identity: the volume name,
 	// the on-image metadata, the private mount slot and the report all take it,
 	// so a boot of this file and a detection of its volume name agree.
 	cartName, err := packCartridgeName(outPath)
 	if err != nil {
-		return jsonOrError(err)
+		return err
 	}
 
 	if !jsonOutput {
@@ -212,29 +252,27 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 	// 1) Create the sparse image.
 	imgPath, err := cartridge.Create(outPath, sizeGiB)
 	if err != nil {
-		return jsonOrError(fmt.Errorf("create cartridge image: %w", err))
+		return fmt.Errorf("create cartridge image: %w", err)
 	}
 
 	// 2) Attach to a private mountpoint and lay out the cartridge.
 	mountpoint := cartridgeMountpoint(cartName)
 	mount, err := cartridge.Attach(imgPath, mountpoint)
 	if err != nil {
-		return jsonOrError(fmt.Errorf("attach cartridge: %w", err))
+		return fmt.Errorf("attach cartridge: %w", err)
 	}
-	// Always detach when done (success or failure), so we never strand the image.
+	// Always release the image when done (success or failure), so we never
+	// strand it — and never unlink it while it may still be attached.
 	packed := false
+	mountedAt := mount.Mountpoint
 	defer func() {
-		if derr := cartridge.Detach(mount.Mountpoint); derr != nil && !jsonOutput {
-			fmt.Printf("%s detach cartridge: %v\n", warning("⚠"), derr)
-		}
-		if !packed {
-			// A failed pack leaves a partial image; remove it so a retry is clean.
-			_ = os.Remove(imgPath)
-		}
+		err = errors.Join(err, cleanUpPack(
+			func() error { return cartridge.DetachMount(*mount) },
+			imgPath, mountedAt, packed))
 	}()
 
 	if err := layoutCartridge(cmd, mount.Mountpoint, m, cartName); err != nil {
-		return jsonOrError(err)
+		return err
 	}
 
 	packed = true
@@ -252,15 +290,17 @@ func runDiskPack(cmd *cobra.Command, args []string) error {
 	}
 
 	// 3) Optionally ship: compress to a read-only DMG (the AirDrop artifact). The
-	// image must be detached before convert reads it, so run the detach now.
+	// image must be detached before convert reads it, so run the release now and
+	// clear the Mount, which is what makes the deferred cleanup a no-op.
 	if diskPackFlags.ship {
-		if derr := cartridge.Detach(mount.Mountpoint); derr != nil {
-			return jsonOrError(fmt.Errorf("detach before ship: %w", derr))
+		if derr := cartridge.DetachMount(*mount); derr != nil {
+			return fmt.Errorf("detach before ship: %w", derr)
 		}
+		*mount = cartridge.Mount{}
 		dmgStem := cartridge.TrimExt(imgPath)
 		dmgPath, derr := cartridge.ConvertToDMG(imgPath, dmgStem)
 		if derr != nil {
-			return jsonOrError(fmt.Errorf("convert cartridge to dmg: %w", derr))
+			return fmt.Errorf("convert cartridge to dmg: %w", derr)
 		}
 		report.DMG = dmgPath
 		report.Compressed = true

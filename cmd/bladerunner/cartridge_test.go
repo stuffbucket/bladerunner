@@ -445,3 +445,73 @@ func TestBootHelpDocumentsTheCartridgeFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanUpPackKeepsAnImageItCouldNotRelease is the pack-side half of the
+// unlink-safety invariant.
+//
+// `br disk pack` attaches the image it is building, so a failed pack has to
+// release the volume before it may delete the partial file. The cleanup used to
+// ignore the detach result entirely and unlink unconditionally, which is an
+// unlink of a live mount's backing store whenever the detach failed — the same
+// data loss the cartridge package refuses on the boot path.
+func TestCleanUpPackKeepsAnImageItCouldNotRelease(t *testing.T) {
+	const mountpoint = "/state/mnt/demo"
+	img := filepath.Join(t.TempDir(), "demo"+cartridge.SparseExt)
+	if err := os.WriteFile(img, []byte("partial-cartridge"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	release := func() error { return errors.New(`hdiutil: couldn't unmount "disk9" - Resource busy`) }
+
+	err := cleanUpPack(release, img, mountpoint, false)
+	if _, statErr := os.Stat(img); statErr != nil {
+		t.Fatalf("the partial image was unlinked while it may still be attached: %v", statErr)
+	}
+	if err == nil {
+		t.Fatal("a release that failed must be reported, not discarded")
+	}
+	// A cleanup failure the user cannot act on is its own bug: name the file
+	// that was kept and the volume they have to eject.
+	for _, want := range []string{img, mountpoint} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// The guard must not break the case it guards: once the release is CONFIRMED,
+// the partial image is removed so a retry starts clean.
+func TestCleanUpPackRemovesAPartialImageOnceReleased(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "demo"+cartridge.SparseExt)
+	if err := os.WriteFile(img, []byte("partial-cartridge"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := cleanUpPack(func() error { return nil }, img, "/state/mnt/demo", false); err != nil {
+		t.Fatalf("cleanUpPack: %v", err)
+	}
+	if _, err := os.Stat(img); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the partial image survived a confirmed release: %v", err)
+	}
+}
+
+// A pack that SUCCEEDED keeps its output, and a release failure after it is
+// still reported — the cartridge is written, but a volume is still attached.
+func TestCleanUpPackKeepsAPackedCartridge(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "demo"+cartridge.SparseExt)
+	if err := os.WriteFile(img, []byte("packed-cartridge"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := cleanUpPack(func() error { return nil }, img, "/state/mnt/demo", true); err != nil {
+		t.Fatalf("cleanUpPack: %v", err)
+	}
+	if _, err := os.Stat(img); err != nil {
+		t.Fatalf("a packed cartridge was removed: %v", err)
+	}
+
+	err := cleanUpPack(func() error { return errors.New("detach failed") }, img, "/state/mnt/demo", true)
+	if err == nil {
+		t.Fatal("a release failure after a successful pack must still be reported")
+	}
+	if _, statErr := os.Stat(img); statErr != nil {
+		t.Fatalf("the packed cartridge was removed by the cleanup: %v", statErr)
+	}
+}

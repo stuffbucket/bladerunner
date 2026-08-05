@@ -155,19 +155,26 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 		policy:     opts.Policy,
 	})
 	if err != nil {
-		o.removeWorkingCopy()
+		// Nothing attached, so the working copy backs no volume and the
+		// conversion's output is pure waste — but a removal that FAILED is still
+		// reported rather than swallowed, or the caller is told a gigabyte was
+		// cleaned up that is still on the disk.
+		attachErr := fmt.Errorf("attach cartridge: %w", err)
+		removeErr := o.removeWorkingCopy()
 		o.releaseClaim()
-		return nil, fmt.Errorf("attach cartridge: %w", err)
+		return nil, errors.Join(attachErr, removeErr)
 	}
 	o.Mount = *mount
 	o.Layout = NewLayout(mount.Mountpoint)
 
 	if err := o.inspect(); err != nil {
-		// Unwind the attach so a rejected cartridge never stays mounted.
-		detachCtx, cancelDetach := context.WithTimeout(parent, detachTimeout)
+		// Unwind the attach so a rejected cartridge never stays mounted. A
+		// failed unwind is JOINED rather than dropped: no *Opened is returned
+		// for the caller to retry Close on, so this message is the only record
+		// that a volume is still mounted and still claimed by this process.
+		detachCtx, cancelDetach := context.WithTimeout(parent, detachTimeout+infoTimeout)
 		defer cancelDetach()
-		_ = o.closeWith(detachCtx, r)
-		return nil, err
+		return nil, errors.Join(err, o.closeWith(detachCtx, r))
 	}
 	return o, nil
 }
@@ -307,38 +314,62 @@ func (o *Opened) Close() error {
 // closeWith is the platform-neutral worker behind Close, taking the runner so
 // the unwind path (and tests) can drive detach without a real hdiutil.
 //
-// A FAILED detach keeps the working copy: it is the backing store of a volume
-// the kernel is still serving, so removing it would be the same data loss
-// clearStaleWorkingCopy refuses at the other end, and reading it to build a new
-// cartridge would compress a disk mid-write. The Mount is kept too, so a later
-// Close retries the detach rather than pretending the volume is gone.
+// Everything after the detach is gated on a POSITIVE release: releaseMount
+// returns nil only once nothing is attached from this cartridge's image any
+// more. A failed — or merely unconfirmed — detach therefore keeps all three
+// pieces of state and returns:
 //
-// The claim on the working copy is released LAST, after the volume is gone and
-// the working copy has been settled: until then another process must still be
-// refused, or it would convert a fresh image over one this VMM is using — and
-// with Persist it would do so while this process is still reading that image to
-// build the cartridge it replaces.
+//   - the Mount, so a later Close retries the detach rather than pretending the
+//     volume is gone;
+//   - the working copy, because it is the backing store of a volume the kernel
+//     may still be serving, and removing it would be the same data loss
+//     clearStaleWorkingCopy refuses at the other end;
+//   - the CLAIM, because releasing it would let a second boot convert a fresh
+//     image over one this VMM may still be using.
+//
+// The claim is therefore released LAST and only on the confirmed path. Holding
+// it after a failed Close is deliberate: an unlink is unrecoverable, and a
+// second boot that is refused with a reason is not.
 func (o *Opened) closeWith(ctx context.Context, r commandRunner) error {
-	var err error
-	if o.Mount.Mountpoint != "" {
-		if err = detach(ctx, r, o.Mount.Mountpoint); err == nil {
-			o.Mount = Mount{}
-		}
+	if err := releaseMount(ctx, r, o.Mount, o.attachedImage()); err != nil {
+		return err
 	}
-	if o.Mount.Mountpoint == "" || !o.StillAttached() {
-		err = errors.Join(err, o.settleWorkingCopy(ctx, r))
-	}
+	o.Mount = Mount{}
+	err := o.settleWorkingCopy(ctx, r)
 	o.releaseClaim()
 	return err
 }
 
-// removeWorkingCopy deletes the .dmg-derived working image, if any.
-func (o *Opened) removeWorkingCopy() {
-	if o.WorkingCopy == "" {
-		return
+// attachedImage names the file the cartridge volume is served from — the
+// identity hdiutil can look an attachment up by when no device node was
+// captured. Mount.Path is what attach recorded; the fallbacks cover an *Opened
+// whose attach never got that far.
+func (o *Opened) attachedImage() string {
+	switch {
+	case o.Mount.Path != "":
+		return o.Mount.Path
+	case o.WorkingCopy != "":
+		return o.WorkingCopy
+	default:
+		return o.SourcePath
 	}
-	_ = os.Remove(o.WorkingCopy)
+}
+
+// removeWorkingCopy deletes the .dmg-derived working image, if any.
+//
+// It reports a removal it could not perform. A Close that returned success
+// having left a multi-gigabyte sparse image behind tells the user the cartridge
+// was discarded when it was not, and nothing later goes looking.
+func (o *Opened) removeWorkingCopy() error {
+	if o.WorkingCopy == "" {
+		return nil
+	}
+	work := o.WorkingCopy
+	if err := os.Remove(work); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove the cartridge working copy %s: %w", work, err)
+	}
 	o.WorkingCopy = ""
+	return nil
 }
 
 // Mountpoint returns where the cartridge is mounted, or "" if it is not.
@@ -357,12 +388,24 @@ func (o *Opened) Browsable() bool {
 	return o != nil && o.Mount.Mountpoint != "" && o.Mount.Policy.Browsable()
 }
 
-// StillAttached reports whether this exact cartridge is still mounted where
-// Open put it — device-node precise, so an unrelated volume mounted over the
-// same path cannot be mistaken for it.
+// StillAttached reports whether this cartridge's volume may still be mounted.
+//
+// It is deliberately ASYMMETRIC. A recorded device node makes the question
+// answerable exactly — device-node precise, so an unrelated volume mounted over
+// the same path cannot be mistaken for it — and the answer is then whatever the
+// kernel says. Without one, nothing has been established, and "I cannot tell"
+// is reported as ATTACHED: an empty DevNode is normal (see Mount.DevNode), so
+// reading it as "the volume is gone" would turn the commonest uncertainty into
+// the one answer that authorizes an unlink.
+//
+// Only a cartridge with no mount at all — never opened, or already released —
+// is false without asking.
 func (o *Opened) StillAttached() bool {
-	if o == nil {
+	if o == nil || (o.Mount.Mountpoint == "" && o.Mount.DevNode == "") {
 		return false
+	}
+	if o.Mount.DevNode == "" {
+		return true
 	}
 	return IsAttachedFrom(o.Mount.Mountpoint, o.Mount.DevNode)
 }

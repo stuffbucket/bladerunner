@@ -198,8 +198,10 @@ func attachPrivate(ctx context.Context, r commandRunner, req attachRequest) (*Mo
 // hdiutil's plist.
 //
 // The plist is load-bearing rather than additive on this path, so an attach we
-// cannot locate is unwound (any device node the image did produce is detached)
-// and reported, instead of leaving a stranded volume nobody knows the path of.
+// cannot locate is unwound and reported, instead of leaving a stranded volume
+// nobody knows the path of. That covers the UNPARSEABLE plist too: the attach
+// still succeeded, so something is attached whether or not its description
+// arrived.
 func attachBrowsable(ctx context.Context, r commandRunner, req attachRequest) (*Mount, error) {
 	out, errOut, err := r.run(ctx, hdiutil, attachArgs(req)...)
 	if err != nil {
@@ -207,12 +209,11 @@ func attachBrowsable(ctx context.Context, r commandRunner, req attachRequest) (*
 	}
 	entities, parseErr := parseAttachEntities(out)
 	if parseErr != nil {
-		return nil, fmt.Errorf("%w: %w", ErrMountpointUnknown, parseErr)
+		return nil, unwindUnlocatableAttach(ctx, r, req, nil, fmt.Errorf("%w: %w", ErrMountpointUnknown, parseErr))
 	}
 	entity, ok := selectMountedEntity(entities)
 	if !ok {
-		unwindAttach(ctx, r, entities)
-		return nil, ErrMountpointUnknown
+		return nil, unwindUnlocatableAttach(ctx, r, req, entities, ErrMountpointUnknown)
 	}
 
 	resolved := resolvePath(entity.MountPoint)
@@ -244,18 +245,45 @@ func selectMountedEntity(entities []systemEntity) (systemEntity, bool) {
 	return systemEntity{}, false
 }
 
+// unwindUnlocatableAttach releases an attach that SUCCEEDED but cannot be
+// described as a Mount, and returns cause — joined with the cleanup failure when
+// the release did not finish.
+//
+// Both halves are kept because they are different problems for the user: cause
+// says why the cartridge cannot be used, and the second says a volume is
+// attached that nothing in this process owns, which only they can now clear.
+func unwindUnlocatableAttach(ctx context.Context, r commandRunner, req attachRequest, entities []systemEntity, cause error) error {
+	if err := unwindAttach(ctx, r, req.path, entities); err != nil {
+		return errors.Join(cause, fmt.Errorf("the attach of %s could not be unwound and may still be attached; release it with 'hdiutil detach' before booting again: %w", req.path, err))
+	}
+	return cause
+}
+
 // unwindAttach detaches whatever an unlocatable attach did produce, so a
-// browsable attach we could not make sense of never strands a device. Every
-// step is best-effort: we are already returning an error, and a detach that
-// also fails must not mask it.
-func unwindAttach(ctx context.Context, r commandRunner, entities []systemEntity) {
+// browsable attach we could not make sense of never strands a device.
+//
+// The attach plist is tried first, but it is exactly the document that failed
+// us, so it may be absent, empty, or carry no dev-entry at all. Recovery
+// therefore does not depend on it: hdiutil info is asked which device is served
+// from the image FILE, which is the one handle a malformed attach cannot take
+// away. Only a conclusive "nothing is attached from it" counts as unwound —
+// a probe that could not be completed is an error, because reporting an
+// unconfirmed cleanup as done is how a volume gets stranded silently.
+func unwindAttach(ctx context.Context, r commandRunner, image string, entities []systemEntity) error {
 	for _, e := range entities {
 		if e.DevEntry == "" {
 			continue
 		}
 		// The first dev-entry is the whole disk; detaching it releases every
 		// entity the image produced.
-		_ = detachWithBackoff(ctx, r, e.DevEntry, 0)
-		return
+		return detachWithBackoff(ctx, r, e.DevEntry, 0)
 	}
+	device, err := attachedDeviceFor(ctx, r, image)
+	switch {
+	case errors.Is(err, errNothingAttached):
+		return nil
+	case err != nil:
+		return err
+	}
+	return detachWithBackoff(ctx, r, device, 0)
 }

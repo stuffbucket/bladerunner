@@ -271,6 +271,157 @@ func TestParseInfoImagesFromRealCapture(t *testing.T) {
 	}
 }
 
+// The malformed `hdiutil info -plist` documents below are each a different way
+// for the images list to be unreadable while the XML itself parses. Every one
+// used to decode as "no disk image is attached", which is the single answer that
+// authorizes unlinking a working copy.
+const (
+	// wrongTypeImagesPlist has the images key, but it is a string.
+	wrongTypeImagesPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>images</key>
+	<string>unexpected</string>
+</dict>
+</plist>
+`
+	// nonDictImagePlist has a proper array whose entry is not a dictionary.
+	nonDictImagePlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>images</key>
+	<array>
+		<string>/private/tmp/demo.sparseimage</string>
+	</array>
+</dict>
+</plist>
+`
+	// noImagePathPlist describes an attached image without naming the file it is
+	// attached from — the one key every reverse lookup matches on.
+	noImagePathPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>images</key>
+	<array>
+		<dict>
+			<key>image-type</key>
+			<string>sparse disk image</string>
+			<key>system-entities</key>
+			<array>
+				<dict><key>dev-entry</key><string>/dev/disk9s1</string></dict>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
+`
+	// badEntitiesPlist names the image but describes its devices with a
+	// system-entities value that is not an array of dictionaries.
+	badEntitiesPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>images</key>
+	<array>
+		<dict>
+			<key>image-path</key>
+			<string>/private/tmp/demo.sparseimage</string>
+			<key>system-entities</key>
+			<array>
+				<string>/dev/disk9s1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
+`
+)
+
+// malformedInfoPlists names each unreadable document for the tests that must
+// cover all of them: the parser, the stale-working-copy guard, and the
+// write-back's detach confirmation all read the same output.
+var malformedInfoPlists = map[string]string{
+	"images key is not an array":          wrongTypeImagesPlist,
+	"an image entry is not a dictionary":  nonDictImagePlist,
+	"an image entry names no image-path":  noImagePathPlist,
+	"system-entities is not a dict array": badEntitiesPlist,
+}
+
+// TestParseInfoImagesRefusesMalformedSchema is the parser half of the
+// stale-cleanup regression.
+//
+// Only an omitted images key means "nothing is attached". Every other shape the
+// parser cannot read is an ERROR, because the caller downstream
+// (clearStaleWorkingCopy) unlinks a file on the strength of a conclusive "no",
+// and a silently skipped record is indistinguishable from an absent one.
+func TestParseInfoImagesRefusesMalformedSchema(t *testing.T) {
+	for name, plist := range malformedInfoPlists {
+		t.Run(name, func(t *testing.T) {
+			images, err := parseInfoImages(plist)
+			if err == nil {
+				t.Fatalf("parseInfoImages read %d images and no error; malformed output must not read as an empty attach list", len(images))
+			}
+			if !errors.Is(err, errMalformedInfo) {
+				t.Errorf("err = %v, want it to wrap errMalformedInfo", err)
+			}
+			if errors.Is(err, ErrNoBackingImage) {
+				t.Error("a lookup that could not be completed must never report the conclusive 'not attached' answer")
+			}
+		})
+	}
+}
+
+// A malformed record must not be distinguishable from a conclusive answer only
+// by luck of ordering: an unreadable entry ANYWHERE in the list poisons the
+// whole reply, because the entry we could not read may be the one asked about.
+func TestAttachedImageAtRefusesMalformedInfo(t *testing.T) {
+	for name, plist := range malformedInfoPlists {
+		t.Run(name, func(t *testing.T) {
+			_, err := attachedImageAt(context.Background(), infoRunner(plist), "/private/tmp/demo"+SparseExt)
+			if err == nil {
+				t.Fatal("attachedImageAt accepted malformed output")
+			}
+			if errors.Is(err, ErrNoBackingImage) {
+				t.Fatalf("err = %v, want an unreadable-output error rather than 'not attached'", err)
+			}
+		})
+	}
+}
+
+// attachedDeviceFor is the recovery handle every unwind falls back on, so its
+// three answers have to stay distinguishable.
+func TestAttachedDeviceForDistinguishesNothingFromUnknown(t *testing.T) {
+	const image = sampleSparseImage
+	dev, err := attachedDeviceFor(context.Background(), infoRunner(sampleInfoPlist), image)
+	if err != nil {
+		t.Fatalf("attachedDeviceFor: %v", err)
+	}
+	if dev != "/dev/disk10" {
+		t.Errorf("device = %q, want the -nomount image's whole disk /dev/disk10", dev)
+	}
+
+	if _, err := attachedDeviceFor(context.Background(), infoRunner(emptyInfoPlist), image); !errors.Is(err, errNothingAttached) {
+		t.Errorf("nothing attached = %v, want errNothingAttached", err)
+	}
+	unknown := &fakeRunner{results: []fakeResult{{stderr: "hdiutil: info failed", err: errors.New("exit 1")}}}
+	err = attachedDeviceForErr(t, unknown, image)
+	if errors.Is(err, errNothingAttached) {
+		t.Error("a probe that failed must never report the conclusive 'nothing attached' answer")
+	}
+	if _, err := attachedDeviceFor(context.Background(), infoRunner(sampleInfoPlist), ""); err == nil {
+		t.Error("an empty image path cannot identify an attachment")
+	}
+}
+
+// attachedDeviceForErr keeps the error of a lookup whose device is irrelevant.
+func attachedDeviceForErr(t *testing.T, r commandRunner, image string) error {
+	t.Helper()
+	_, err := attachedDeviceFor(context.Background(), r, image)
+	if err == nil {
+		t.Fatal("expected the failed probe to be reported")
+	}
+	return err
+}
+
 func TestParseInfoImagesWithNothingAttached(t *testing.T) {
 	images, err := parseInfoImages(emptyInfoPlist)
 	if err != nil {
