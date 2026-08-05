@@ -29,6 +29,15 @@ on:
 permissions:
   contents: write
 
+# Serialize runs. Two runs racing can otherwise both reach the release job, and
+# an older one finishing late would clobber a newer one's images onto the
+# `guest-image-latest` pointer that every fresh install downloads.
+# cancel-in-progress stays false: a half-published release is worse than a
+# redundant build.
+concurrency:
+  group: build-guest-image
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build (${{ matrix.arch }})
@@ -43,6 +52,7 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     outputs:
       build_date: ${{ steps.meta.outputs.build_date }}
+      sha: ${{ steps.meta.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
 
@@ -61,9 +71,23 @@ jobs:
       - name: Resolve build metadata
         id: meta
         run: |
-          BUILD_DATE="$(date -u +%Y.%m.%d)"
-          echo "build_date=${BUILD_DATE}" >> "${GITHUB_OUTPUT}"
-          echo "tag=guest-image-v${BUILD_DATE}" >> "${GITHUB_OUTPUT}"
+          set -euo pipefail
+          # Derive the identity from the COMMIT, not from the wall clock.
+          #
+          # `date -u` runs independently in each matrix leg, so a run straddling
+          # UTC midnight gives amd64 and arm64 different dates — and since both
+          # legs write this job output, the release job then receives whichever
+          # finished last. That is a tag naming one day holding an image stamped
+          # with another.
+          #
+          # The commit date is identical in both legs and identical on a re-run,
+          # so the same commit always produces the same identity.
+          BUILD_DATE="$(git show -s --format=%cd --date=format:'%Y.%m.%d' HEAD)"
+          {
+            echo "build_date=${BUILD_DATE}"
+            echo "tag=guest-image-v${BUILD_DATE}"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Build image
         id: build
@@ -126,32 +150,74 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           BUILD_DATE="${{ needs.build.outputs.build_date }}"
+          SHA="${{ needs.build.outputs.sha }}"
           TAG="guest-image-v${BUILD_DATE}"
           TITLE="Guest image ${BUILD_DATE}"
+          MARKER="source-commit: ${SHA}"
 
-          # Collapse same-day rebuilds onto the same tag: delete + recreate.
+          # A dated tag is meant to name one immutable set of images. Same-day
+          # rebuilds used to --clobber it unconditionally, so one tag could hold
+          # images from two different commits over its lifetime and anyone who
+          # downloaded it earlier had bytes nobody could reproduce.
+          #
+          # Re-running the SAME commit is still fine (it is a retry, and the
+          # identity is now commit-derived so it lands on the same tag). A
+          # DIFFERENT commit on the same day is refused: it needs its own
+          # identity, not someone else's.
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "release ${TAG} exists; updating assets"
-            gh release upload "${TAG}" out/* --clobber --repo "${GITHUB_REPOSITORY}"
+            existing="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""')"
+            if echo "${existing}" | grep -qF "${MARKER}"; then
+              echo "release ${TAG} is the same commit; refreshing assets"
+              gh release upload "${TAG}" out/* --clobber --repo "${GITHUB_REPOSITORY}"
+            else
+              echo "::error::${TAG} already exists and was built from a different commit." >&2
+              echo "Existing release notes:" >&2
+              echo "${existing}" >&2
+              echo "Refusing to overwrite an immutable dated release." >&2
+              exit 1
+            fi
           else
             gh release create "${TAG}" out/* \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TITLE}" \
-              --notes "Pre-baked bladerunner guest image (Debian Trixie + Incus). Built ${BUILD_DATE}."
+              --notes "Pre-baked bladerunner guest image (Debian Trixie + Incus). Built ${BUILD_DATE}.
+          ${MARKER}"
           fi
 
       - name: Update `guest-image-latest` pointer
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          BUILD_DATE="${{ needs.build.outputs.build_date }}"
           TAG="guest-image-latest"
           TITLE="Guest image (latest)"
+          MARKER="points-at: ${BUILD_DATE}"
+
+          # This pointer is what every fresh install downloads, so it must only
+          # ever move FORWARD. The concurrency group above keeps runs in order,
+          # but a re-dispatch of an older commit is still an ordinary mistake and
+          # would silently hand new users an older image.
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            current="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""' \
+              | sed -n 's/^points-at: //p' | head -n1)"
+            if [ -n "${current}" ] && [ "${current}" != "${BUILD_DATE}" ]; then
+              older="$(printf '%s\n%s\n' "${BUILD_DATE}" "${current}" | sort -V | head -n1)"
+              if [ "${older}" = "${BUILD_DATE}" ]; then
+                echo "::error::Refusing to move ${TAG} back from ${current} to ${BUILD_DATE}." >&2
+                exit 1
+              fi
+            fi
             gh release upload "${TAG}" out/* --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --notes "Moving pointer to the most recent guest image build (${BUILD_DATE}).
+          ${MARKER}"
           else
             gh release create "${TAG}" out/* \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TITLE}" \
-              --notes "Moving pointer to the most recent guest image build (${{ needs.build.outputs.build_date }})."
+              --notes "Moving pointer to the most recent guest image build (${BUILD_DATE}).
+          ${MARKER}"
           fi
