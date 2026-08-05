@@ -136,13 +136,15 @@ func WorkingCopyPath(path string) string {
 }
 
 // CanonicalImagePath returns the comparable form of a cartridge image path:
-// absolute, with its DIRECTORY symlink-resolved (macOS spells /tmp as
-// /private/tmp) and its base name left alone.
+// absolute and symlink-resolved, so every spelling of one image reduces to one
+// string (macOS spells /tmp as /private/tmp).
 //
-// The directory rather than the whole path is resolved on purpose: the working
-// copy of a shipped .dmg does not exist yet when its identity has to be
-// computed, and filepath.EvalSymlinks of a missing file yields nothing. An
-// unresolvable path is returned cleaned, which is still stable.
+// An image that EXISTS is resolved whole, final component included: a symlink
+// and the file it points at are one image, and a claim keyed on the spelling
+// would let both be booted at once. An image that does NOT exist yet — the
+// working copy of a shipped .dmg has to have an identity before the conversion
+// creates it — keeps its base name and gets its DIRECTORY resolved, which is
+// still stable and still agrees with the resolved form once the file appears.
 func CanonicalImagePath(p string) string {
 	if p == "" {
 		return ""
@@ -150,6 +152,9 @@ func CanonicalImagePath(p string) string {
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		abs = filepath.Clean(p)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
 	}
 	return filepath.Join(resolvePath(filepath.Dir(abs)), filepath.Base(abs))
 }

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -343,8 +344,8 @@ func TestOpenRemovesTheWorkingCopyWhenAttachFails(t *testing.T) {
 		t.Fatalf("working copy %s should have been removed: %v", work, statErr)
 	}
 	// The failed open released its claim, so the cartridge is bootable again.
-	if holder, busy := Busy(dmg); busy {
-		t.Fatalf("a failed open left the cartridge claimed by %s", holder)
+	if c := Busy(dmg); !c.Free() {
+		t.Fatalf("a failed open left the cartridge claimed by %s", c.Holder)
 	}
 }
 
@@ -427,8 +428,8 @@ func TestOpenRefusesAWorkingCopyLeftAttachedByADeadHolder(t *testing.T) {
 		t.Fatalf("hdiutil calls = %v, want a single info probe", f.calls)
 	}
 	// And the refusal released the claim, so fixing the mount and retrying works.
-	if holder, busy := Busy(dmg); busy {
-		t.Fatalf("a refused open left the cartridge claimed by %s", holder)
+	if c := Busy(dmg); !c.Free() {
+		t.Fatalf("a refused open left the cartridge claimed by %s", c.Holder)
 	}
 }
 
@@ -484,9 +485,9 @@ func TestOpenBusyErrorNamesTheHolder(t *testing.T) {
 		}
 	}
 
-	holder, busy := Busy(image)
-	if !busy || holder.PID != os.Getpid() || holder.Name != "demo" {
-		t.Fatalf("Busy() = %+v, %v; want the running holder", holder, busy)
+	claim := Busy(image)
+	if claim.State != ClaimHeld || claim.Holder.PID != os.Getpid() || claim.Holder.Name != "demo" {
+		t.Fatalf("Busy() = %+v; want the running holder", claim)
 	}
 }
 
@@ -502,14 +503,14 @@ func TestOpenedCloseReleasesTheClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, busy := Busy(image); !busy {
-		t.Fatal("an open cartridge must read as busy")
+	if c := Busy(image); c.State != ClaimHeld {
+		t.Fatalf("an open cartridge must read as held, got %q", c.State)
 	}
 	if err := o.closeWith(context.Background(), &fakeRunner{}); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if holder, busy := Busy(image); busy {
-		t.Fatalf("close left the cartridge claimed by %s", holder)
+	if c := Busy(image); !c.Free() {
+		t.Fatalf("close left the cartridge claimed by %s", c.Holder)
 	}
 
 	// And a fresh boot of it succeeds.
@@ -526,10 +527,10 @@ func TestOpenedCloseReleasesTheClaim(t *testing.T) {
 func TestBusyIsSideEffectFree(t *testing.T) {
 	tmp := t.TempDir()
 	image := filepath.Join(tmp, "demo"+SparseExt)
-	if holder, busy := Busy(image); busy {
-		t.Fatalf("an unbooted cartridge reported busy: %+v", holder)
+	if c := Busy(image); !c.Free() {
+		t.Fatalf("an unbooted cartridge reported %q: %+v", c.State, c.Holder)
 	}
-	if _, busy := Busy(""); busy {
+	if !Busy("").Free() {
 		t.Fatal("an empty path cannot be busy")
 	}
 	entries, err := os.ReadDir(tmp)
@@ -538,6 +539,194 @@ func TestBusyIsSideEffectFree(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("Busy() left files behind: %v", entries)
+	}
+}
+
+// TestOpenRefusesAnAliasOfABootedCartridge is the #196 regression.
+//
+// The claim used to be keyed on the SPELLING of the working copy: the directory
+// was symlink-resolved and the final component deliberately left alone. So two
+// names for one file — a symlink to it, or a second hard link — produced two
+// different lock files, both processes took their own claim, and both booted
+// the same disk. The second boot then converts a fresh image over the first
+// VM's live root disk, which is the exact data loss the claim exists to stop.
+//
+// A cartridge is a file people copy around; `ln -s` and `ln` are how they do it.
+func TestOpenRefusesAnAliasOfABootedCartridge(t *testing.T) {
+	tests := []struct {
+		name string
+		link func(t *testing.T, target, alias string)
+	}{
+		{"a symlink to the working copy", func(t *testing.T, target, alias string) {
+			if err := os.Symlink(target, alias); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+		}},
+		{"a second hard link to the working copy", func(t *testing.T, target, alias string) {
+			if err := os.Link(target, alias); err != nil {
+				t.Fatalf("link: %v", err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			mp := filepath.Join(tmp, "mnt", "demo")
+			openFixture(t, mp)
+			image := filepath.Join(tmp, "demo"+SparseExt)
+			writeFixtureFile(t, image, "live-guest-bytes")
+			alias := filepath.Join(tmp, "alias"+SparseExt)
+			tt.link(t, image, alias)
+
+			running, err := open(context.Background(), &fakeRunner{results: []fakeResult{attachResult(mp)}}, image, privateOpen(mp))
+			if err != nil {
+				t.Fatalf("first open: %v", err)
+			}
+			t.Cleanup(func() { running.releaseClaim() })
+
+			second := &fakeRunner{results: []fakeResult{attachResult(mp)}}
+			if _, err := open(context.Background(), second, alias, privateOpen(mp)); !errors.Is(err, ErrCartridgeBusy) {
+				t.Fatalf("open of %s = %v, want ErrCartridgeBusy: it is the same disk", tt.name, err)
+			}
+			if len(second.calls) != 0 {
+				t.Errorf("a refused boot must not run hdiutil: %v", second.calls)
+			}
+			// And the probe agrees with the claim, so the CLI refuses first.
+			if c := Busy(alias); c.State != ClaimHeld {
+				t.Errorf("Busy(alias) = %q, want %q", c.State, ClaimHeld)
+			}
+		})
+	}
+}
+
+// The other half of #196: a hard link made AFTER the boot began. A .dmg is
+// claimed before its working copy exists, so there is no inode to key on yet —
+// the claim has to be taken again once the conversion has created the file, or
+// the window stays open for as long as the VM runs.
+func TestOpenRefusesAHardLinkMadeAfterTheWorkingCopyWasConverted(t *testing.T) {
+	tmp := t.TempDir()
+	mp := filepath.Join(tmp, "mnt", "demo")
+	openFixture(t, mp)
+	dmg := filepath.Join(tmp, "demo"+DMGExt)
+	writeFixtureFile(t, dmg, "the-shipped-cartridge")
+	work := WorkingCopyPath(dmg)
+
+	f := &fakeRunner{results: []fakeResult{{}, attachResult(mp)}}
+	f.onCall = func(argv []string) {
+		if len(argv) > 1 && argv[1] == cmdConvert {
+			writeFixtureFile(t, work, "live-guest-bytes")
+		}
+	}
+	running, err := open(context.Background(), f, dmg, privateOpen(mp))
+	if err != nil {
+		t.Fatalf("open the shipped dmg: %v", err)
+	}
+	t.Cleanup(func() { running.releaseClaim() })
+
+	// The user hard-links the running VM's disk and boots that.
+	alias := filepath.Join(tmp, "copy"+SparseExt)
+	if err := os.Link(work, alias); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	second := &fakeRunner{results: []fakeResult{attachResult(mp)}}
+	if _, err := open(context.Background(), second, alias, privateOpen(mp)); !errors.Is(err, ErrCartridgeBusy) {
+		t.Fatalf("open of the hard link = %v, want ErrCartridgeBusy", err)
+	}
+	if data, err := os.ReadFile(work); err != nil || string(data) != "live-guest-bytes" {
+		t.Fatalf("the running VM's disk was destroyed: %q, %v", data, err)
+	}
+}
+
+// --- lock failures versus contention (#205) --------------------------------
+
+// withFlockError makes every flock in the test return err. No portable
+// filesystem produces EOPNOTSUPP or EIO on demand, and the whole point of the
+// fix is that those errnos must NOT be read as a holder, so injection is the
+// only way to hold the distinction.
+func withFlockError(t *testing.T, err error) {
+	t.Helper()
+	original := flockFile
+	flockFile = func(*os.File, int) error { return err }
+	t.Cleanup(func() { flockFile = original })
+}
+
+// TestClaimDistinguishesContentionFromLockFailure is the #205 regression.
+//
+// The claim deliberately lives beside a cartridge that travels, so the lock
+// file can land on a network share that does not implement flock or on failing
+// external hardware. Every non-nil flock error used to become ErrCartridgeBusy,
+// which told the user another process held their cartridge — a process that
+// does not exist, cannot be found, and cannot be ejected — while the real cause
+// was discarded.
+func TestClaimDistinguishesContentionFromLockFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		flockErr error
+		want     error
+		// unavailable marks the cases where no holder was identified, so the
+		// cause has to survive and the busy sentinel must not appear.
+		unavailable bool
+	}{
+		{name: "contention is the only proof of a holder", flockErr: syscall.EWOULDBLOCK, want: ErrCartridgeBusy},
+		{name: "a filesystem with no flock support", flockErr: syscall.EOPNOTSUPP, want: ErrClaimUnavailable, unavailable: true},
+		{name: "an I/O failure on the lock file", flockErr: syscall.EIO, want: ErrClaimUnavailable, unavailable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			mp := filepath.Join(tmp, "mnt", "demo")
+			openFixture(t, mp)
+			image := filepath.Join(tmp, "demo"+SparseExt)
+			writeFixtureFile(t, image, "guest-bytes")
+			withFlockError(t, tt.flockErr)
+
+			f := &fakeRunner{results: []fakeResult{attachResult(mp)}}
+			_, err := open(context.Background(), f, image, privateOpen(mp))
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("open = %v, want %v", err, tt.want)
+			}
+			if tt.unavailable {
+				// The cause the user can act on must survive the wrap, and the
+				// fictitious holder must not appear.
+				if !errors.Is(err, tt.flockErr) {
+					t.Errorf("error %v drops the underlying cause %v", err, tt.flockErr)
+				}
+				if errors.Is(err, ErrCartridgeBusy) {
+					t.Errorf("error %v reports a holder that was never identified", err)
+				}
+			}
+			// Either way the boot is refused before anything touches the image.
+			if len(f.calls) != 0 {
+				t.Errorf("a boot with no claim ran hdiutil: %v", f.calls)
+			}
+		})
+	}
+}
+
+// The probe has to make the same distinction, because its callers turn the
+// answer into a sentence: "held by X; eject it first" is wrong when nothing was
+// established, and "free" is worse — it clears the way for a second boot.
+func TestBusyReportsAnUnansweredProbeAsIndeterminate(t *testing.T) {
+	tmp := t.TempDir()
+	image := filepath.Join(tmp, "demo"+SparseExt)
+	writeFixtureFile(t, image, "guest-bytes")
+	// A lock file must exist for the probe to reach flock at all.
+	o := &Opened{Name: "demo", SourcePath: image}
+	if err := o.claim(); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	o.releaseClaim()
+
+	withFlockError(t, syscall.EOPNOTSUPP)
+	c := Busy(image)
+	if c.State != ClaimIndeterminate {
+		t.Fatalf("Busy() = %q, want %q", c.State, ClaimIndeterminate)
+	}
+	if !errors.Is(c.Err, syscall.EOPNOTSUPP) {
+		t.Errorf("Claim.Err = %v, want the flock failure", c.Err)
+	}
+	if c.Free() {
+		t.Error("an unanswered probe must not read as free: that is what lets a second boot through")
 	}
 }
 
@@ -626,8 +815,8 @@ func TestOpenRefusesAWorkingCopyWhoseAttachmentCannotBeRead(t *testing.T) {
 			}
 			// And the refusal released the claim, so a retry after the user
 			// clears the mount works.
-			if holder, busy := Busy(dmg); busy {
-				t.Fatalf("a refused open left the cartridge claimed by %s", holder)
+			if c := Busy(dmg); !c.Free() {
+				t.Fatalf("a refused open left the cartridge claimed by %s", c.Holder)
 			}
 		})
 	}
@@ -708,7 +897,7 @@ func TestCloseNeverUnlinksAWorkingCopyItCannotConfirmDetached(t *testing.T) {
 			if o.Mount.Mountpoint == "" {
 				t.Error("the Mount was dropped, so a later Close cannot retry the detach")
 			}
-			if _, busy := Busy(dmg); !busy {
+			if c := Busy(dmg); c.State != ClaimHeld {
 				t.Error("the claim was released while the volume may still be mounted, so a second boot could convert a fresh image over it")
 			}
 		})

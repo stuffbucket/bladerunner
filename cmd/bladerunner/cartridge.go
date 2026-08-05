@@ -468,14 +468,22 @@ var errCartridgeAlreadyBooted = errors.New("cartridge is already booted")
 // does not publish at all). Neither is the protection — cartridge.Open takes an
 // exclusive claim, and that is what actually makes the race safe — they exist
 // so the common case reads as a sentence instead of a lock error.
+//
+// A claim that could not be PROBED is refused too, and separately: it names no
+// holder, so telling the user to eject one would send them after a process that
+// does not exist. The cause is theirs to act on instead.
 func ensureCartridgeBootable(path, name string) error {
 	if e, ok := bootedCartridgeInstance(path); ok {
 		return fmt.Errorf("%w: %q is running as instance %q (pid %d); eject it with 'br eject %s'",
 			errCartridgeAlreadyBooted, name, e.Name, e.PID, e.Name)
 	}
-	if holder, busy := cartridge.Busy(path); busy {
+	switch claim := cartridge.Busy(path); claim.State {
+	case cartridge.ClaimHeld:
 		return fmt.Errorf("%w: %q is held by %s; eject it first",
-			errCartridgeAlreadyBooted, name, holder)
+			errCartridgeAlreadyBooted, name, claim.Holder)
+	case cartridge.ClaimIndeterminate:
+		return fmt.Errorf("cannot tell whether %q is already booted: %w", name, claim.Err)
+	case cartridge.ClaimFree:
 	}
 	return nil
 }
