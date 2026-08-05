@@ -719,7 +719,10 @@ func listAttachedCartridges() []cartridgeStatus {
 		out = append(out, cartridgeStatus{
 			Name:       name,
 			Mountpoint: mountpoint,
-			Booted:     control.NewClient(mountpoint).IsRunning(),
+			// Held, not pinged: a wedged holder replies to nothing and still owns
+			// this cartridge, and reporting it as free invites a second boot of
+			// the same image.
+			Booted: instanceHeld(mountpoint),
 		})
 	}
 

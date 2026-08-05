@@ -163,8 +163,12 @@ func ensureResetSupported(target resolvedInstance) error {
 // an inode nothing can reach. --force is offered because the same situation is
 // also how a wedged instance is recovered, and it follows `br stop --force`:
 // same flag, same shorthand, same "I know, do it anyway" meaning.
+//
+// The guard asks isLive, not "is it answering". A wedged holder answers
+// nothing and still has the disk image open, so a ping-shaped guard would wave
+// through exactly the deletion this exists to stop.
 func ensureResetSafe(target resolvedInstance, force bool) error {
-	if !target.Running {
+	if !target.isLive() {
 		return nil
 	}
 	name := resetTargetName(target)

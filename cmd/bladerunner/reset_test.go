@@ -37,11 +37,15 @@ func withResetFlags(t *testing.T) {
 
 // runningTarget describes a live instance rooted at stateDir.
 func runningTarget(stateDir string, running bool) resolvedInstance {
+	rung := instance.Dead
+	if running {
+		rung = instance.Serving
+	}
 	return resolvedInstance{
 		Name:     "demo",
 		Kind:     instance.KindFlat,
 		StateDir: stateDir,
-		Running:  running,
+		Liveness: rung,
 		Explicit: true,
 	}
 }

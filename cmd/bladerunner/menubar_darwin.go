@@ -485,9 +485,18 @@ func setEnabled(m *systray.MenuItem, enabled bool) {
 func vmHealth() vmState { return readVM().state }
 
 // vmHealthAt probes one instance by its state dir.
+//
+// A ping that fails is not the same as a stopped VM. vmWedged is defined here
+// as "host alive but unresponsive", and a HOST that is alive and wedged answers
+// no ping at all — so reporting vmStopped on ping failure showed a stopped icon
+// and an enabled "Start VM" item over a VM that still held everything it had.
+// The liveness ladder separates the two without needing a reply.
 func vmHealthAt(stateDir string) vmState {
 	c := control.NewClient(stateDir)
 	if !c.IsRunning() {
+		if instanceHeld(stateDir) {
+			return vmWedged
+		}
 		return vmStopped
 	}
 	status, err := c.GetStatus()

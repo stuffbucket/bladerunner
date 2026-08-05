@@ -43,10 +43,23 @@ func shortStateDir(t *testing.T) string {
 
 // startWedgedHolder binds a control socket that accepts and never answers, and
 // starts a real child process to stand in for the holder, recording its PID in
-// the start lock exactly as a holder does.
+// the start lock exactly as a holder does. The wedged instance is the flat
+// default: BLADERUNNER_STATE_DIR is pointed at its state dir.
 func startWedgedHolder(t *testing.T) wedgedHolder {
 	t.Helper()
 	dir := shortStateDir(t)
+	t.Setenv("BLADERUNNER_STATE_DIR", dir)
+	return wedgeHolderAt(t, dir)
+}
+
+// wedgeHolderAt wedges the instance rooted at stateDir without touching the
+// state-dir environment, so a caller can wedge a NAMED instance inside a root
+// that is itself empty.
+func wedgeHolderAt(t *testing.T, dir string) wedgedHolder {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
 
 	socketPath := control.SocketPath(dir)
 	ln, err := net.Listen("unix", socketPath)
@@ -71,8 +84,18 @@ func startWedgedHolder(t *testing.T) wedgedHolder {
 		}
 	}()
 
-	// A process that outlives the test and dies on SIGTERM, so the escalation
-	// ladder has something real to signal.
+	pid := startStandInHolder(t)
+	if err := os.WriteFile(control.LockPath(dir), fmt.Appendf(nil, "%d\n", pid), 0o600); err != nil {
+		t.Fatalf("write control lock: %v", err)
+	}
+	return wedgedHolder{stateDir: dir, socketPath: socketPath, pid: pid}
+}
+
+// startStandInHolder starts a process that outlives the test and dies on
+// SIGTERM, so the escalation ladder has something real to signal, and returns
+// its PID.
+func startStandInHolder(t *testing.T) int {
+	t.Helper()
 	holder := exec.Command("/bin/sleep", "60")
 	if err := holder.Start(); err != nil {
 		t.Fatalf("start stand-in holder: %v", err)
@@ -89,14 +112,7 @@ func startWedgedHolder(t *testing.T) wedgedHolder {
 		_ = holder.Process.Kill()
 		<-reaped
 	})
-
-	pid := holder.Process.Pid
-	if err := os.WriteFile(control.LockPath(dir), []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
-		t.Fatalf("write control lock: %v", err)
-	}
-
-	t.Setenv("BLADERUNNER_STATE_DIR", dir)
-	return wedgedHolder{stateDir: dir, socketPath: socketPath, pid: pid}
+	return holder.Process.Pid
 }
 
 // useStopFlags sets the `br stop` flags for one test and restores them after.
