@@ -277,6 +277,22 @@ func printBakeResult(w io.Writer, rep diskActionReport) {
 	}
 }
 
+// printSkippedBakeSteps reports optional steps a bake did not complete.
+//
+// It is separate from printBakeResult because the failure path needs it too:
+// Bake returns the skipped list ALONGSIDE an error, since a step skipped before
+// an unrelated later failure still happened, and this is the only frame that
+// can put it in front of an operator.
+func printSkippedBakeSteps(w io.Writer, skipped []imagebuild.Skipped) {
+	for _, s := range skipped {
+		reason := ""
+		if s.Err != nil {
+			reason = s.Err.Error()
+		}
+		fmt.Fprintf(w, "%s Skipped (non-fatal): %s: %s\n", warning("!"), value(s.Step.Desc), reason)
+	}
+}
+
 // writeManifest marshals m and publishes it to path.
 //
 // The write goes through internal/util, the owner of atomic file writes: a
@@ -495,6 +511,12 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	}
 	skipped, err := imagebuild.Bake(ctx, plan, imagebuild.NewBakeDeps(mechanic, logf))
 	if err != nil {
+		// Report what was skipped BEFORE the failure. Bake returns the list
+		// alongside the error precisely because a step skipped earlier still
+		// happened, and this is the frame that has to say so -- nothing below
+		// it reaches the operator. Dropping it here would leave someone
+		// debugging the failure with no idea the web UI never went in.
+		printSkippedBakeSteps(os.Stderr, skipped)
 		return jsonOrError(fmt.Errorf("bake %s: %w", name, err))
 	}
 

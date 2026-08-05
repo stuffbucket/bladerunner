@@ -105,3 +105,26 @@ func TestBakeReportOmitsSkippedWhenNothingWasSkipped(t *testing.T) {
 		t.Errorf("a clean bake printed a skipped line:\n%s", out.String())
 	}
 }
+
+// A FAILED bake must still report what it skipped on the way.
+//
+// Bake returns the skipped list alongside an error precisely because a step
+// skipped before an unrelated later failure still happened, and the CLI is the
+// only frame that can put it in front of an operator. The first pass of this
+// change threaded the list through the library and then dropped it here --
+// leaving someone debugging the failure with no idea the web UI never went in.
+func TestBakeFailurePathStillReportsSkippedSteps(t *testing.T) {
+	var buf bytes.Buffer
+	printSkippedBakeSteps(&buf, []imagebuild.Skipped{{
+		Step: imagebuild.Step{Desc: "install the Incus web UI"},
+		Err:  errors.New("archive unreachable"),
+	}})
+
+	got := buf.String()
+	if !strings.Contains(got, "install the Incus web UI") {
+		t.Errorf("failure path did not name the skipped step; got %q", got)
+	}
+	if !strings.Contains(got, "archive unreachable") {
+		t.Errorf("failure path did not give the reason; got %q", got)
+	}
+}
