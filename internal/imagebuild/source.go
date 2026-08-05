@@ -45,6 +45,12 @@ const (
 	manifestScanMax     = 1024 * 1024
 )
 
+// basePinsFileName is the reviewed-digest file, named once so the shell build
+// and the tests that hold the two paths together refer to the same thing. The
+// //go:embed directive below needs a literal, so this constant cannot feed it;
+// TestBasePinsFileNameMatchesTheEmbed keeps the two honest.
+const basePinsFileName = "basepins.sha512"
+
 //go:embed basepins.sha512
 var basePinsRaw string
 
@@ -67,13 +73,18 @@ type Release struct {
 }
 
 // BaseRelease returns the pinned Debian release for a target architecture.
+//
+// An architecture is supported when — and only when — basepins.sha512 carries a
+// digest for it. The set is derived rather than listed, so adding one is a
+// single edit to the pin file: a hardcoded list beside the pins is a check that
+// can only cover what existed when it was written, and the failure it misses is
+// always an addition.
 func BaseRelease(arch string) (Release, error) {
-	switch arch {
-	case "arm64", "amd64":
-		return Release{Suite: debianSuite, Stamp: debianStamp, Arch: arch}, nil
-	default:
-		return Release{}, fmt.Errorf("unsupported architecture %q (expected arm64 or amd64)", arch)
+	r := Release{Suite: debianSuite, Stamp: debianStamp, Arch: arch}
+	if _, err := r.PinnedDigest(); err != nil {
+		return Release{}, fmt.Errorf("unsupported architecture %q: %w", arch, err)
 	}
+	return r, nil
 }
 
 // FileName is the image's name inside its dated directory.

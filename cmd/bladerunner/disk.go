@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,13 +14,13 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/imagebuild"
-	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/util"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
 
 const (
-	// defaultBakeSizeGiB is the working image size passed to build-guest-image.sh.
+	// defaultBakeSizeGiB is the size the working image is grown to before the
+	// recipe is applied.
 	defaultBakeSizeGiB = 8
 	// defaultBakeTimeoutMin caps how long a bake build may run.
 	defaultBakeTimeoutMin = 60
@@ -175,12 +172,14 @@ alone. Use --from <disk> to fork an existing catalog disk's image and sizing;
 var diskBakeCmd = &cobra.Command{
 	Use:   "bake <name>",
 	Short: "Build a disk's qcow2 and record its SHA-256",
-	Long: `Build a disk's guest qcow2 via scripts/build-guest-image.sh, then record the
-resulting SHA-256 and image path back into the user manifest.
+	Long: `Build a disk's guest qcow2, then record the resulting SHA-256 and image
+path back into the user manifest.
 
-This is a host-side developer action: it requires bash, qemu-img, and the build
-script's dependencies (libguestfs-tools, likely sudo). Builtin disks are
-read-only; fork one first with 'br disk new <name> --from <builtin>'.`,
+This is a host-side developer action. It needs qemu-img, and the mechanic it
+selects decides the rest: the native path wants Linux, root and an nbd device;
+the libguestfs path wants neither root nor a device but does want a working
+appliance. Builtin disks are read-only; fork one first with
+'br disk new <name> --from <builtin>'.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDiskBake,
 }
@@ -198,7 +197,6 @@ var diskBakeFlags struct {
 	arch       string
 	size       int
 	release    string
-	method     string
 	timeoutMin int
 }
 
@@ -211,11 +209,8 @@ func init() {
 
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.output, "output", "", "Output qcow2 path (default: <disks-dir>/<name>-<arch>.qcow2)")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.arch, "arch", runtime.GOARCH, "Target architecture to build")
-	diskBakeCmd.Flags().IntVar(&diskBakeFlags.size, "size", defaultBakeSizeGiB, "Working image size in GiB passed to the build script")
+	diskBakeCmd.Flags().IntVar(&diskBakeFlags.size, "size", defaultBakeSizeGiB, "Working image size the base is grown to before customizing")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.release, "debian-release", "trixie", "Debian release to build from")
-	diskBakeCmd.Flags().StringVar(&diskBakeFlags.method, "method", string(imagebuild.MethodAuto),
-		fmt.Sprintf("Customize method: %s|%s|%s|%s (%s prefers the fastest mechanic that will actually work here)",
-			imagebuild.MethodAuto, imagebuild.MethodNative, imagebuild.MethodAppliance, imagebuild.MethodVM, imagebuild.MethodAuto))
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.timeoutMin, "timeout", defaultBakeTimeoutMin, "Build timeout in minutes")
 
 	diskCmd.AddCommand(diskNewCmd, diskBakeCmd)
@@ -281,12 +276,7 @@ func narrowToArch(m *disk.Manifest, arch, from string) error {
 	}
 	img, ok := m.Image.Arches[arch]
 	if !ok {
-		have := make([]string, 0, len(m.Image.Arches))
-		for a := range m.Image.Arches {
-			have = append(have, a)
-		}
-		sort.Strings(have)
-		return fmt.Errorf("--arch %s is not published by %q (it has %s)", arch, from, strings.Join(have, ", "))
+		return fmt.Errorf("--arch %s is not published by %q (it has %s)", arch, from, strings.Join(sortedArches(m), ", "))
 	}
 	m.Image.Arches = map[string]disk.ArchImage{arch: img}
 	return nil
@@ -365,57 +355,7 @@ func runDiskNew(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// Script method names, as understood by scripts/build-guest-image.sh.
-//
-// The names differ from the Go ones because the script names each path after
-// the tool it reaches for, while internal/imagebuild names it after what it
-// does. Mapping here keeps that vocabulary mismatch in one place until the
-// mechanics move into Go and the script goes away.
-const (
-	// scriptMethodNative is the script's qemu-nbd + chroot path.
-	scriptMethodNative = "nbd"
-	// scriptMethodAppliance is the script's libguestfs path.
-	scriptMethodAppliance = "guestfish"
-)
-
-// scriptMethodFor translates a selected mechanic into the build script's own
-// --method vocabulary.
-//
-// It is deliberately total and returns an error for anything unmapped: passing
-// an empty --method through would let the script silently apply its own default,
-// which is how a deliberate selection could turn into a different build than the
-// one the probe chose.
-func scriptMethodFor(m imagebuild.Method) (string, error) {
-	switch m {
-	case imagebuild.MethodNative:
-		return scriptMethodNative, nil
-	case imagebuild.MethodAppliance:
-		return scriptMethodAppliance, nil
-	case imagebuild.MethodVM:
-		return "", fmt.Errorf("building inside a bladerunner VM is not implemented yet, so %q cannot be baked on macOS; "+
-			"build on a Linux host (or in WSL2), or use the published guest image from the guest-image-latest release", imagebuild.MethodVM)
-	default:
-		return "", fmt.Errorf("no build script equivalent for method %q", m)
-	}
-}
-
-// buildEnv returns the environment for the build subprocess.
-//
-// The appliance mechanic needs the same libguestfs settings the capability
-// probe used. Without them the two disagree: the probe boots an appliance
-// successfully, then the build fails on the aarch64 defect those settings
-// exist to work around. The native path boots no appliance, so it is left
-// alone rather than being loaded with settings that would mislead anyone
-// reading a build log.
-func buildEnv(base []string, m imagebuild.Method) []string {
-	if m == imagebuild.MethodAppliance {
-		return imagebuild.ApplianceEnv(base)
-	}
-	return base
-}
-
-// runDiskBake builds the disk's qcow2 and records its SHA-256. The branches are
-// sequential preflight + shell-out + manifest rewrite, not nested logic.
+// runDiskBake builds the disk's qcow2 and records its SHA-256.
 func runDiskBake(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	if !disk.ValidName(name) {
@@ -438,35 +378,26 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 		return jsonOrError(err)
 	}
 
-	// Decide HOW to build before checking any one mechanic's tools. The probe
-	// establishes what this host can actually do — root, a loop device, a
-	// matching architecture, a libguestfs that really launches — so an
-	// unusable fast path is reported up front with the specific blocking
-	// condition, instead of failing halfway through a build.
-	want := imagebuild.Method(diskBakeFlags.method)
-	caps := imagebuild.Probe(cmd.Context(), want, arch)
-	sel, err := imagebuild.Select(want, arch, caps)
-	if err != nil {
-		return jsonOrError(err)
-	}
-	for _, w := range sel.Warnings {
-		logging.L().Warn("guest image build: falling back", "reason", w)
-	}
-	scriptMethod, err := scriptMethodFor(sel.Method)
-	if err != nil {
+	// Refuse a disk bake cannot record into BEFORE anything is built. The
+	// manifest shape is known the moment it is loaded, and this check used to
+	// sit after the build had already downloaded, customized, compressed and
+	// renamed a qcow2 into --output — so the user paid a full build for a
+	// guaranteed refusal, and any file already at that path was replaced by an
+	// image the command then declined to reference.
+	if err := bakePreflight(m, name, arch); err != nil {
 		return jsonOrError(err)
 	}
 
-	// Preflight tools.
-	if _, err := exec.LookPath("bash"); err != nil {
-		return jsonOrError(fmt.Errorf("bash not found in PATH (required to run the build script): %w", err))
+	// Establish that this host can build before doing any of the work. The
+	// probe reports what it can actually do — root, an nbd device, a matching
+	// architecture — so a host that cannot is refused up front with the
+	// specific blocking conditions, instead of failing part-way through.
+	if err := imagebuild.CheckHost(arch, imagebuild.Probe(arch)); err != nil {
+		return jsonOrError(err)
 	}
+	// Preflight the host tool the bake shells out to. Everything else it needs
+	// is inside the mechanic, which the probe above has already vetted.
 	if err := vm.RequireQemuImg(); err != nil {
-		return jsonOrError(err)
-	}
-
-	scriptPath, err := resolveBuildScript()
-	if err != nil {
 		return jsonOrError(err)
 	}
 
@@ -484,33 +415,45 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 
 	if !jsonOutput {
 		fmt.Printf("Baking %s (%s) -> %s\n", value(name), arch, subtle(absOut))
-		fmt.Println(subtle("This is a host-side dev build; it needs libguestfs-tools and likely sudo."))
 	}
 
-	build := exec.CommandContext(ctx, "bash", scriptPath,
-		"--arch", arch,
-		"--output", absOut,
-		"--method", scriptMethod,
-		"--size", strconv.Itoa(diskBakeFlags.size),
-		"--debian-release", diskBakeFlags.release)
-	build.Stderr = os.Stderr // script logs go to stderr; stdout is the bare digest
-	build.Env = buildEnv(os.Environ(), sel.Method)
-	out, err := build.Output()
+	work, err := os.MkdirTemp("", "bladerunner-bake-")
 	if err != nil {
-		return jsonOrError(fmt.Errorf("build-guest-image.sh failed: %w", err))
+		return jsonOrError(fmt.Errorf("create a work directory for the bake: %w", err))
 	}
+	defer func() { _ = os.RemoveAll(work) }()
 
-	digest, err := buildDigest(out)
+	release, err := imagebuild.BaseRelease(arch)
+	if err != nil {
+		return jsonOrError(err)
+	}
+	recipe := imagebuild.DefaultRecipe(imagebuild.BuildVersion(time.Now()))
+	plan, err := imagebuild.NewBakePlan(release, recipe, work, absOut, diskBakeFlags.size)
 	if err != nil {
 		return jsonOrError(err)
 	}
 
-	// Record the result back into the manifest. If the disk uses per-arch
-	// images, point this arch at the freshly built file + digest. If it is a
-	// hosted/path disk, only stamp the digest is not meaningful, so refuse.
-	if m.Image.Arches == nil {
-		return jsonOrError(fmt.Errorf("disk %q is not a per-arch image disk; bake only supports image.arches disks", name))
+	logf := func(line string) {
+		if !jsonOutput {
+			fmt.Println(subtle("  " + line))
+		}
 	}
+	mechanic, err := imagebuild.HostMechanic(work, logf)
+	if err != nil {
+		return jsonOrError(err)
+	}
+	if err := imagebuild.Bake(ctx, plan, imagebuild.NewBakeDeps(mechanic, logf)); err != nil {
+		return jsonOrError(fmt.Errorf("bake %s: %w", name, err))
+	}
+
+	digest, err := util.FileSHA256(absOut)
+	if err != nil {
+		return jsonOrError(err)
+	}
+
+	// Record the result back into the manifest. bakePreflight has already
+	// established that this disk has a slot for this architecture, so the only
+	// failures left here are ones the build itself produced.
 	m.Image.Arches[arch] = disk.ArchImage{URL: "file://" + absOut, SHA256: digest}
 	m.Version = time.Now().Format("2006.01.02")
 	if err := m.Validate(); err != nil {
@@ -528,52 +471,27 @@ func runDiskBake(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// buildDigest reads the image digest the build reported on stdout.
-//
-// Stdout is the only source. An earlier version fell back to reading the
-// <output>.sha256 sidecar when stdout was empty, which could not happen on a
-// successful build — the build runs under `set -euo pipefail` and prints the
-// digest unconditionally once it has computed it, so exit 0 implies a digest on
-// stdout. Had it ever fired it would have read a sidecar with no evidence that
-// this build wrote it, pairing a fresh image with a digest left by an earlier
-// bake at the same path.
-//
-// Nothing is lost by removing it. The build assembles the image in its work
-// directory and renames it into place last, so the output and its sidecar are
-// either both fresh or the output was never written; there is no partial state
-// to recover from. A missing digest now fails loudly instead.
-func buildDigest(stdout []byte) (string, error) {
-	digest := strings.TrimSpace(string(stdout))
-	if digest == "" {
-		return "", errors.New("the build reported no digest on stdout")
+// bakePreflight reports whether a bake could record its result into this disk,
+// using only what the manifest already says. The caller runs it before the
+// build; see the call site for why that ordering matters.
+func bakePreflight(m *disk.Manifest, name, arch string) error {
+	if m.Image.Arches == nil {
+		return fmt.Errorf("disk %q is not a per-arch image disk; bake only supports image.arches disks", name)
 	}
-	if !disk.ValidSHA256(digest) {
-		return "", fmt.Errorf("the build reported %q, which is not a valid sha256", digest)
+	if _, ok := m.Image.Arches[arch]; !ok {
+		return fmt.Errorf("disk %q has no image.arches entry for %s (it has %s)",
+			name, arch, strings.Join(sortedArches(m), ", "))
 	}
-	return digest, nil
+	return nil
 }
 
-// resolveBuildScript locates scripts/build-guest-image.sh relative to the
-// executable or the current working directory (it is a dev-time host script).
-func resolveBuildScript() (string, error) {
-	const rel = "scripts/build-guest-image.sh"
-	candidates := []string{}
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(dir, rel),
-			filepath.Join(dir, "..", rel),
-			filepath.Join(dir, "..", "..", rel),
-		)
+// sortedArches lists the architectures a manifest carries an image for, in a
+// stable order so an error naming them reads the same way twice.
+func sortedArches(m *disk.Manifest) []string {
+	out := make([]string, 0, len(m.Image.Arches))
+	for a := range m.Image.Arches {
+		out = append(out, a)
 	}
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(wd, rel))
-	}
-	candidates = append(candidates, rel)
-	for _, c := range candidates {
-		if util.FileExists(c) {
-			return c, nil
-		}
-	}
-	return "", fmt.Errorf("could not find %s near the executable or cwd; run 'br disk bake' from the bladerunner repo (it needs the build script and libguestfs-tools)", rel)
+	slices.Sort(out)
+	return out
 }

@@ -17,6 +17,13 @@ const (
 	Ejecting Stage = "ejecting" // unmounting the cartridge volume
 	Stopped  Stage = "stopped"  // guest powered itself off cleanly
 	Forced   Stage = "forced"   // the VMM was force-stopped (a power cut)
+	// Stuck is the terminal for a spin-down that could not release the volume:
+	// the guest is down but the cartridge image is STILL ATTACHED because the
+	// detach failed. It is the highest-consequence state in this vocabulary —
+	// the user is standing over a physical object they are about to pull out —
+	// so it is published rather than left to silence. An eject that goes quiet
+	// reads as finished, which invites exactly the pull that must not happen.
+	Stuck Stage = "stuck"
 )
 
 // shuttingDownMessage is the fallback line for a shutdown-phase stage this
@@ -38,7 +45,14 @@ const (
 // shutdownOrder lists the rankable shutdown stages earliest-to-latest; rank is
 // derived from the index so the ordering lives in one place (Forced is a
 // terminal that can be reached from anywhere, so it is unranked).
-var shutdownOrder = []Stage{Draining, Stopping, Flushing, Ejecting, Stopped}
+//
+// Stuck sits LAST, above Stopped, although the two are alternatives rather than
+// a sequence — a detach either releases the volume or it does not. Both are
+// terminal, so advancesShutdown already refuses to move between them and the
+// relative rank should never be consulted. It is ordered this way so that if
+// that guard is ever weakened, the move that stays possible is the one towards
+// the safety warning, not away from it.
+var shutdownOrder = []Stage{Draining, Stopping, Flushing, Ejecting, Stopped, Stuck}
 
 // shutdownMessage maps the shutdown stages to their friendly line, reporting
 // ok=false for anything outside this phase so Message keeps its own fallbacks.
@@ -56,6 +70,13 @@ func shutdownMessage(s Stage) (string, bool) {
 		return "Stopped", true
 	case Forced:
 		return "Force-stopped — the disk may need a check", true
+	case Stuck:
+		// Message is the ENTIRE user-visible text: the menubar and the splash
+		// both render Message(Stage) and neither renders Detail, so the
+		// instruction has to be here. It says what to DO — do not pull it, and
+		// what will release it — rather than reporting that a detach failed,
+		// which tells the user nothing they can act on.
+		return "Do not remove the cartridge — try ejecting it again", true
 	default:
 		return "", false
 	}
@@ -132,6 +153,11 @@ func (r *Reporter) Stopped(detail string) error { return r.report(Stopped, detai
 // empty to use the canned message; callers that want to warn about a dirty
 // guest filesystem pass DetailForced.
 func (r *Reporter) Forced(detail string) error { return r.report(Forced, detail) }
+
+// Stuck records that the guest is down but the cartridge could NOT be released:
+// the volume is still attached and must not be pulled. detail may be empty to
+// use the canned message, which is what both consumers render.
+func (r *Reporter) Stuck(detail string) error { return r.report(Stuck, detail) }
 
 // Finish records the terminal stage matching a drain outcome (the string form
 // of an internal/vm.StopOutcome), attaching DetailForced to a power cut.

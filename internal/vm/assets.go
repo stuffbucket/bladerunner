@@ -65,20 +65,6 @@ func fetchSidecarSHA256(ctx context.Context, imageURL string) (string, error) {
 }
 
 // fileSHA256 returns the hex-encoded SHA-256 digest of the file at path.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open for sha256: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", fmt.Errorf("hash file: %w", err)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 func fileSHA512(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -143,7 +129,7 @@ func verifyImageChecksum(ctx context.Context, imageURL, expectedSHA512 string, s
 			"url", imageURL+".sha256")
 		return nil
 	}
-	got, err := fileSHA256(path)
+	got, err := util.FileSHA256(path)
 	if err != nil {
 		return err
 	}
@@ -370,7 +356,7 @@ func ensureCachedBaseImage(ctx context.Context, cfg *config.Config) (string, err
 
 	// Verify the downloaded artifact against the manifest's pinned digest BEFORE
 	// converting, so the comparison matches the published qcow2 SHA-256.
-	got, err := fileSHA256(dlPath)
+	got, err := util.FileSHA256(dlPath)
 	if err != nil {
 		_ = os.Remove(dlPath)
 		return "", err

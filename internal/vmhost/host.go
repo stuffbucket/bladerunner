@@ -321,10 +321,10 @@ type Host struct {
 	runner *vm.Runner
 	cancel context.CancelFunc
 
-	// stepsFn and waitReady are TEST SEAMS. Neither is ever set outside a test
-	// — New leaves both nil and every production path resolves to h.steps and
-	// h.waitForGuestReady — so do not delete them as unused (CLAUDE.md section
-	// 9 point 4: a name only a test needs).
+	// stepsFn, waitReady and stopVM are TEST SEAMS. None is ever set outside a
+	// test — New leaves all three nil and every production path resolves to
+	// h.steps, h.waitForGuestReady and the live runner — so do not delete them
+	// as unused (AGENTS.md section 9 point 4: a name only a test needs).
 	//
 	// They exist because Run and block are the two functions in this package
 	// that no unit test could reach: every one of the fourteen real steps
@@ -336,8 +336,16 @@ type Host struct {
 	// running a VM by hand. Substituting the step list and the readiness wait
 	// makes those guarantees testable without booting anything; nothing else
 	// about Run is faked.
+	//
+	// stopVM is the same idea for the teardown side: the drain budget stopRunner
+	// hands the guest is only observable through a live *vm.Runner, so without
+	// this seam "the Spec's DrainTimeout is the budget the guest actually gets"
+	// could not be asserted without booting a VM. It substitutes the stop call
+	// alone; the budget it receives is resolved by production code.
 	stepsFn   func() []step
 	waitReady func(context.Context) error
+	stopVM    func(context.Context, time.Duration) error
+	waitVM    func(context.Context) error
 }
 
 // lifecycleSteps resolves the ordered lifecycle Run drives: the real one from
@@ -356,6 +364,23 @@ func (h *Host) guestReady(ctx context.Context) error {
 		return h.waitReady(ctx)
 	}
 	return h.waitForGuestReady(ctx)
+}
+
+// stopGuest resolves the guest teardown stopRunner performs: the live runner,
+// unless a test installed a substitute. A Host with no runner has nothing to
+// stop, which is not an error — a boot can fail before the VM is constructed.
+//
+// The runner's own stop error is deliberately dropped rather than returned:
+// teardown must continue to the cartridge detach whatever the VMM did, and the
+// runner has already logged the outcome.
+func (h *Host) stopGuest(ctx context.Context, budget time.Duration) error {
+	if h.stopVM != nil {
+		return h.stopVM(ctx, budget)
+	}
+	if r := h.activeRunner(); r != nil {
+		_ = r.StopWithTimeout(ctx, budget)
+	}
+	return nil
 }
 
 // New validates spec and returns a Host ready to Run. It performs no I/O and
@@ -495,9 +520,70 @@ func (h *Host) Run(ctx context.Context) error {
 // teardown unwinds every started step. It marks the guest stopped first, so an
 // unmount-approval callback that fires while the steps are unwinding approves
 // (there is nothing left to protect) instead of vetoing our own detach.
+//
+// It also publishes the clean end of a spin-down, but only once the steps have
+// finished — see publishShutdownTerminal for why that cannot happen earlier,
+// and why this lives here rather than as a step of its own.
 func (h *Host) teardown() {
 	h.guestStopped.Store(true)
-	h.stack.teardown(h.onStopErr)
+
+	// Read the published stage BEFORE unwinding: stopBootStage clears a
+	// non-terminal shutdown stage on its way out, so by the time the stack has
+	// drained there is nothing left to tell us a spin-down was in progress.
+	spinningDown := h.shutdownInProgress()
+
+	detachFailed := false
+	h.stack.teardown(func(name string, err error) {
+		if name == StepCartridge {
+			detachFailed = true
+		}
+		h.onStopErr(name, err)
+	})
+
+	h.publishShutdownTerminal(spinningDown, detachFailed)
+}
+
+// shutdownInProgress reports whether a drain had published a non-terminal
+// shutdown stage when teardown began. A terminal one (Forced) is excluded: it
+// is already the final answer and must not be moved off.
+func (h *Host) shutdownInProgress() bool {
+	if h.cfg == nil || h.cfg.VMDir == "" {
+		return false
+	}
+	s, ok := bootstage.Read(h.cfg.VMDir)
+	return ok && s.Stage.IsShutdown() && !s.Stage.IsTerminal()
+}
+
+// publishShutdownTerminal records that the spin-down finished cleanly.
+//
+// It runs here rather than on the drain's success branch because the drain
+// returns while the cartridge is STILL ATTACHED — stopCartridge is the first
+// step and so unwinds last. Stopped is terminal and transitions are monotonic,
+// so publishing it early is not merely premature, it is unrecoverable: the
+// Ejecting stage can never be shown again. For a cartridge, which is a physical
+// object the user is about to pull out of a slot, a "safe now" signal that
+// fires before the volume is released is worse than no signal at all.
+//
+// It is deliberately NOT a lifecycle step. The step list owns resources — each
+// entry acquires something and gives it back — and a step whose only purpose is
+// to report would be the one thing that list has stayed free of.
+//
+// A failed detach publishes Stuck instead. The cartridge is still attached, so
+// claiming Stopped there is the same defect this function exists to prevent —
+// but staying silent is not neutral either: an eject that goes quiet reads as
+// finished, which invites exactly the pull that must not happen.
+func (h *Host) publishShutdownTerminal(spinningDown, detachFailed bool) {
+	if !spinningDown {
+		return
+	}
+	if detachFailed {
+		_ = h.shutdownReporter().Stuck("")
+		return
+	}
+	// The empty outcome means "not a forced power cut": a forced stop is
+	// decided by the drain and has already published its own terminal, which
+	// shutdownInProgress excluded above.
+	_ = h.shutdownReporter().Finish("")
 }
 
 // Drain performs the orderly spin-down: an ACPI power request, a genuine wait
@@ -840,11 +926,49 @@ func (h *Host) block(ctx context.Context) error {
 		h.publishBootOutcome(bootErr)
 		h.obs.Ready(h.cfg, h.endpoint, bootErr)
 		h.obs.Waiting(false)
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case err := <-h.guestGone(ctx):
+			if err != nil {
+				h.obs.Stopping()
+				return fmt.Errorf("the guest left the running state: %w", err)
+			}
+			logging.L().Info("the guest powered itself off; releasing the holder")
+		}
 	}
 
 	h.obs.Stopping()
 	return nil
+}
+
+// guestGone delivers when the guest leaves the running state: nil if it powered
+// itself off (an ordinary end, including a shutdown from inside the guest), or
+// the reason it stopped being usable.
+//
+// It returns a NIL CHANNEL when there is no runner to watch. A receive on a nil
+// channel blocks forever, so the arm removes itself from block's select instead
+// of firing at once — which is what returning a value would do, and is exactly
+// the trap in Runner.Wait, whose first line answers nil immediately for a
+// Runner whose VM was never started. That is on darwin, not only in the stub.
+//
+// Why this exists: without it the headless branch parks on ctx.Done() alone, so
+// a guest that panicked left the holder up and serving its control socket. The
+// liveness ladder in internal/instance then reported the instance as RUNNING —
+// the socket answered, because the holder was alive — while the guest inside it
+// was dead. Nothing else had to change to fix that: once the holder exits, the
+// socket goes with it and the existing ladder falls through to Dead on its own.
+func (h *Host) guestGone(ctx context.Context) <-chan error {
+	wait := h.waitVM
+	if wait == nil {
+		r := h.activeRunner()
+		if r == nil {
+			return nil
+		}
+		wait = r.Wait
+	}
+	ch := make(chan error, 1)
+	go func() { ch <- wait(ctx) }()
+	return ch
 }
 
 // publishBootOutcome records how the readiness wait ended in the boot-stage
@@ -1235,12 +1359,12 @@ func (h *Host) startRunner() error {
 	return nil
 }
 
-// stopRunner tears the VMM down, draining the guest first.
+// stopRunner tears the VMM down, draining the guest first. The budget is the
+// one the caller asked for — drainTimeout resolves the Spec's DrainTimeout,
+// falling back to DefaultDrainTimeout — so a guest given a longer drain on the
+// command line actually gets it here, not only on the unmount-eject path.
 func (h *Host) stopRunner() error {
-	if r := h.activeRunner(); r != nil {
-		_ = r.Stop()
-	}
-	return nil
+	return h.stopGuest(context.Background(), h.drainTimeout())
 }
 
 // startBootStage publishes coarse, human-friendly boot phase to the bootstage
@@ -1254,8 +1378,30 @@ func (h *Host) startBootStage() error {
 	return nil
 }
 
-// stopBootStage clears the published boot phase on the way out.
+// stopBootStage clears the published boot phase on the way out — unless what is
+// published is a TERMINAL SHUTDOWN stage, which teardown must leave alone.
+//
+// A shutdown terminal is the record of how this instance went down, and its
+// only readers are separate processes (the menubar, the splash) polling the
+// file after this one has exited. Forced carries DetailForced — the warning
+// that a power cut may have left the guest filesystem dirty, which AGENTS.md
+// section 8 governs — so clearing it here deletes the warning before anyone can
+// act on it. The stage is published by drainForUnmount moments before teardown
+// runs, so this is the ordinary path for a vetoed eject, not a rare one.
+//
+// Leaving it is safe on all three counts that matter. The file is per-instance
+// (bootstage.Path joins cfg.VMDir), so it cannot leak onto another instance.
+// Both consumers ignore it once it ages out, so it cannot become a permanent
+// wrong answer. And the next boot's publisher writes Boot immediately, so it
+// cannot outlive the next start.
+//
+// A boot-phase stage is still cleared, terminal or not: Ready or Failed
+// describes a VM that no longer exists once teardown has run, and leaving it
+// would show a stale "Ready" for an instance that is gone.
 func (h *Host) stopBootStage() error {
+	if s, ok := bootstage.Read(h.cfg.VMDir); ok && s.Stage.IsShutdown() && s.Stage.IsTerminal() {
+		return nil
+	}
 	bootstage.Clear(h.cfg.VMDir)
 	return nil
 }

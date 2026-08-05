@@ -103,7 +103,7 @@ func TestFetchSidecarSHA256_BadHex(t *testing.T) {
 func TestFileSHA256(t *testing.T) {
 	data := []byte("hello bladerunner")
 	path := writeTempFile(t, data)
-	got, err := fileSHA256(path)
+	got, err := util.FileSHA256(path)
 	if err != nil {
 		t.Fatalf("fileSHA256 error = %v", err)
 	}

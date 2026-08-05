@@ -147,7 +147,7 @@ lint-linux: ## Run golangci-lint against the Linux build
 # DOC_SOURCES is the prose the STE gate applies to. CHANGELOG.md is excluded:
 # release-please generates it from commit subjects, so it is not hand-written
 # prose and rewriting it would be overwritten on the next release.
-DOC_SOURCES = README.md CLAUDE.md CONTRIBUTING.md RELEASE.md docs/
+DOC_SOURCES = README.md AGENTS.md CLAUDE.md CONTRIBUTING.md RELEASE.md docs/
 
 lint-docs: ## Check docs against ASD-STE100 Simplified Technical English (errors only)
 	@command -v vale >/dev/null 2>&1 || { echo "Install: brew install vale"; exit 1; }

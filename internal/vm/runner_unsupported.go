@@ -15,11 +15,15 @@ import (
 // runner_darwin.go. Bladerunner drives VMs through Virtualization.framework,
 // which exists on macOS only, so no VM can be run here; the type exists so that
 // packages depending on internal/vm still compile and test on Linux (CI runs
-// the suite there). NewRunner therefore never returns a Runner, and every
-// method reports the unsupported error rather than pretending to work. The
-// exceptions are the ones a caller runs on a cleanup or reporting path, where
-// an error would be noise: Stop and the two setters do nothing, and
-// NestedVirtState answers "unsupported".
+// the suite there). NewRunner therefore never returns a Runner.
+//
+// The rule for each method, rather than a list of exceptions that goes stale:
+// a method that DOES something reports the unsupported error, and a method a
+// caller runs on a cleanup or reporting path answers truthfully for a Runner
+// that was never started, because an error there would be noise a caller cannot
+// act on. Parity with darwin is held by TestEveryDarwinRunnerMethodHasANonDarwinStub,
+// which derives both method sets from the source; a new darwin method fails that
+// test until it is stubbed here.
 type Runner struct{}
 
 // StartVMResult mirrors the darwin StartVMResult so callers compile off darwin.
@@ -65,6 +69,28 @@ func (r *Runner) Wait(context.Context) error { return errors.New("unsupported pl
 // disk image. Nothing was started here, so it succeeds and lets a deferred
 // Stop stay harmless.
 func (r *Runner) Stop() error { return nil }
+
+// StopWithTimeout is the non-darwin stub; on darwin it drains the guest under
+// the given budget before escalating to a forced stop. It matches Stop rather
+// than reporting the unsupported error, for Stop's reason: it runs on a cleanup
+// path, nothing was started here, and an error would be noise. The budget is
+// discarded because there is no guest to give it to.
+func (r *Runner) StopWithTimeout(context.Context, time.Duration) error { return nil }
+
+// StopOutcome is the non-darwin counterpart of the darwin StopOutcome in
+// runner_darwin.go. Nothing here can stop a guest, so the only value this build
+// ever produces is StopOutcomeNotStarted.
+type StopOutcome string
+
+// StopOutcomeNotStarted reports that there was no guest to stop.
+const StopOutcomeNotStarted StopOutcome = "not-started"
+
+// LastStopOutcome is the non-darwin stub; on darwin it reports how the most
+// recent Stop or Eject left the guest. It answers "not-started" rather than the
+// unsupported error, for the reason Stop and StopWithTimeout do the same: it is
+// read on a reporting path where an error would be noise, and nothing was ever
+// started here, so "not-started" is the truthful answer rather than a placeholder.
+func (r *Runner) LastStopOutcome() StopOutcome { return StopOutcomeNotStarted }
 
 // SetProgress is the non-darwin stub; on darwin it attaches the boot-progress
 // reporter. There is no boot to report on, so it discards p.

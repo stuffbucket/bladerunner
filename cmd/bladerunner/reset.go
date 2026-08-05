@@ -140,7 +140,7 @@ func resetInstance(target resolvedInstance, force bool) error {
 //
 // The fix is a refusal, not a second file list: those files live INSIDE the
 // user's cartridge image, and deleting the wrong ones there destroys the
-// artifact they would have AirDropped (CLAUDE.md section 8). A cartridge has a
+// artifact they would have AirDropped (AGENTS.md section 8). A cartridge has a
 // baseline of its own — the shipped .dmg, which every boot re-converts into a
 // fresh working copy — so the message points at that instead.
 func ensureResetSupported(target resolvedInstance) error {

@@ -2,23 +2,24 @@
 //
 // It is the single owner of two things that were previously split between
 // scripts/build-guest-image.sh and cmd/bladerunner: the build RECIPE (what goes
-// into the image) and the build POLICY (which mechanic customizes it, and what
-// happens when the preferred one cannot run).
+// into the image) and the question of whether a host can build at all.
 //
-// Two mechanics exist because they trade against each other:
+// There is ONE mechanic. It mounts the image on the host and chroots into it,
+// which needs Linux, root, an nbd device, and a target architecture matching the
+// host's. That is a narrow set of requirements, and the package used to advertise
+// two more mechanics to soften it — a libguestfs appliance and a bladerunner VM.
+// Neither was ever written. Policy could select either one and the bake then ran
+// the chroot regardless, so `--method appliance` quietly did the opposite of what
+// it said. Both are gone; what remains is what runs.
 //
-//   - MethodNative mounts the image on the host and chroots into it. It runs at
-//     native speed but needs a Linux host, root, a loop device, and a target
-//     architecture matching the host's.
-//   - MethodAppliance drives libguestfs, which boots an unprivileged microVM.
-//     It needs none of the above and works in a plain container, but on a host
-//     without KVM it runs under emulation — roughly an order of magnitude
-//     slower on a measured install-and-regenerate-initramfs workload.
-//   - MethodVM boots a short-lived bladerunner VM. It is how macOS builds, since
-//     a macOS host can neither chroot into a Linux root nor run libguestfs.
+// Every other way to build is a way to get a Linux box, not a way to build. On a
+// Mac, colima, lima, UTM and Docker Desktop all supply one, and the bake inside
+// it is this ordinary Linux bake. Building a disk from NOTHING — booting an
+// installer against a blank disk — is a genuinely different capability and is
+// tracked separately rather than stubbed here.
 //
-// Policy is deliberately free of I/O so it can be tested exhaustively without
-// root, a loop device, or a hypervisor. Capabilities are gathered by the
+// The host check is deliberately free of I/O so it can be tested exhaustively
+// without root or an nbd device. Capabilities are gathered by the
 // platform-specific probe and passed in.
 package imagebuild
 
@@ -28,33 +29,15 @@ import (
 	"strings"
 )
 
-// Method identifies the mechanic used to customize the image.
-type Method string
+// osLinux is the only platform with a build mechanic, compared against
+// Capabilities.GOOS.
+const osLinux = "linux"
 
-const (
-	// MethodAuto asks Select to choose, preferring the fastest mechanic that
-	// will actually work on this host.
-	MethodAuto Method = "auto"
-	// MethodNative mounts the image and chroots into it. Linux, root, loop
-	// device, same architecture.
-	MethodNative Method = "native"
-	// MethodAppliance drives libguestfs, which boots an unprivileged microVM.
-	MethodAppliance Method = "appliance"
-	// MethodVM boots a short-lived bladerunner VM to build inside.
-	MethodVM Method = "vm"
-)
-
-// Platform names, compared against Capabilities.GOOS.
-const (
-	osLinux  = "linux"
-	osDarwin = "darwin"
-)
-
-// ErrUnsupportedPlatform reports a host that has no build mechanic at all.
-var ErrUnsupportedPlatform = errors.New("guest image builds are not supported on this platform")
+// ErrUnsupportedHost reports a host that cannot run a bake.
+var ErrUnsupportedHost = errors.New("this host cannot build a guest image")
 
 // Capabilities describes what a host can actually do, as established by the
-// platform probe. It is a plain value so policy stays testable.
+// platform probe. It is a plain value so the host check stays testable.
 type Capabilities struct {
 	// GOOS is the host operating system, as runtime.GOOS reports it.
 	GOOS string
@@ -64,124 +47,43 @@ type Capabilities struct {
 	// Elevated reports an effective uid of 0.
 	Elevated bool
 	// NativeAttach reports that the host can attach a guest image as a block
-	// device by the means the native mechanic actually uses. That is the nbd
-	// path today, not a loop device: probing the wrong one accepts hosts the
-	// build then fails on.
+	// device by the means the mechanic actually uses. That is the nbd path,
+	// not a loop device: probing the wrong one accepts hosts the build then
+	// fails on.
 	NativeAttach bool
-	// ApplianceUsable reports that libguestfs actually launched its appliance,
-	// not merely that its binaries are installed. Presence is not function:
-	// an installed-but-broken libguestfs is the failure this distinction
-	// exists to catch.
-	ApplianceUsable bool
-	// VMUsable reports a usable bladerunner VM runtime.
-	VMUsable bool
 }
 
-// Selection is the outcome of policy: the chosen mechanic, plus every reason a
-// faster one was rejected. Warnings are returned as data rather than logged
-// here so the caller owns presentation and tests can assert on them.
-type Selection struct {
-	// Method is the mechanic to use.
-	Method Method
-	// Warnings explains, in order, why any preferred mechanic was skipped.
-	// Empty when the fastest mechanic was chosen.
-	Warnings []string
-}
-
-// Select resolves want into a usable mechanic for targetArch on the host
-// described by caps.
+// CheckHost reports whether caps can build targetArch, naming every blocking
+// condition at once.
 //
-// An explicit want is never silently substituted: if it cannot run, Select
-// returns an error naming every blocking condition. Only MethodAuto falls back,
-// and a fallback always carries a reason — a silent degrade would hide a
-// misconfigured host behind a build that merely got slower.
-func Select(want Method, targetArch string, caps Capabilities) (Selection, error) {
-	if err := supportedHost(caps); err != nil {
-		return Selection{}, err
-	}
-
-	switch want {
-	case MethodAuto:
-		return selectAuto(targetArch, caps)
-	case MethodNative, MethodAppliance, MethodVM:
-		if blockers := blockersFor(want, targetArch, caps); len(blockers) > 0 {
-			return Selection{}, fmt.Errorf("--method %s was requested but cannot run here: %s",
-				want, strings.Join(blockers, "; "))
-		}
-		return Selection{Method: want}, nil
-	default:
-		return Selection{}, fmt.Errorf("unknown method %q (expected %s, %s, %s or %s)",
-			want, MethodAuto, MethodNative, MethodAppliance, MethodVM)
-	}
-}
-
-// supportedHost rejects hosts with no mechanic at all. Windows is called out
-// explicitly because WSL2 makes it a solved problem rather than a dead end.
-func supportedHost(caps Capabilities) error {
-	switch caps.GOOS {
-	case osLinux, osDarwin:
+// All blockers are reported together rather than one at a time so an operator
+// fixes them in a single pass instead of rediscovering the next one on each
+// attempt. The message names what to do instead, because the most common reader
+// of this error is on a Mac, where the answer is a Linux VM they probably
+// already have.
+func CheckHost(targetArch string, caps Capabilities) error {
+	blockers := hostBlockers(targetArch, caps)
+	if len(blockers) == 0 {
 		return nil
-	default:
-		return fmt.Errorf("%w: %s has no build mechanic; on Windows build inside WSL2, which is Linux and takes the native path: %w",
-			ErrUnsupportedPlatform, caps.GOOS, ErrUnsupportedPlatform)
 	}
+	return fmt.Errorf("%w: %s; build on a Linux host — a VM (colima, lima, UTM) or WSL2 counts — or use the published image from the guest-image-latest release",
+		ErrUnsupportedHost, strings.Join(blockers, "; "))
 }
 
-// selectAuto walks the platform's mechanics fastest-first and takes the first
-// that is unblocked, carrying forward why the faster ones were skipped.
-func selectAuto(targetArch string, caps Capabilities) (Selection, error) {
-	var warnings []string
-	var refused []string
-
-	for _, m := range preferenceOrder(caps.GOOS) {
-		blockers := blockersFor(m, targetArch, caps)
-		if len(blockers) == 0 {
-			return Selection{Method: m, Warnings: warnings}, nil
-		}
-		for _, b := range blockers {
-			warnings = append(warnings, fmt.Sprintf("%s method unavailable: %s", m, b))
-			refused = append(refused, fmt.Sprintf("%s: %s", m, b))
-		}
-	}
-
-	return Selection{}, fmt.Errorf("no usable build method on this host: %s", strings.Join(refused, "; "))
-}
-
-// preferenceOrder lists a platform's mechanics fastest-first.
+// hostBlockers returns every reason this host cannot bake, in a stable order.
+// An empty result means it can.
 //
-// Linux prefers native because it is roughly an order of magnitude quicker than
-// the appliance, and falls back to the appliance because it needs neither root
-// nor a loop device. macOS has only the VM: it can neither chroot into a Linux
-// root nor run libguestfs.
-func preferenceOrder(goos string) []Method {
-	if goos == osDarwin {
-		return []Method{MethodVM}
-	}
-	return []Method{MethodNative, MethodAppliance}
-}
-
-// blockersFor returns every reason m cannot run, in a stable order. An empty
-// result means m is usable.
-func blockersFor(m Method, targetArch string, caps Capabilities) []string {
-	switch m {
-	case MethodNative:
-		return nativeBlockers(targetArch, caps)
-	case MethodAppliance:
-		return applianceBlockers(caps)
-	case MethodVM:
-		return vmBlockers(caps)
-	default:
-		return []string{fmt.Sprintf("unknown method %q", m)}
-	}
-}
-
-// nativeBlockers checks the four conditions the chroot mechanic needs. All are
-// reported together so an operator can fix them in one pass.
-func nativeBlockers(targetArch string, caps Capabilities) []string {
-	var blockers []string
+// Off Linux the platform is the ONLY blocker reported. The other three would all
+// be true as well, but they are consequences rather than causes: telling a Mac
+// user they need root invites them to try sudo, which cannot help. On Linux the
+// remaining conditions are each independently fixable, so they are reported
+// together and the operator fixes them in one pass.
+func hostBlockers(targetArch string, caps Capabilities) []string {
 	if caps.GOOS != osLinux {
-		blockers = append(blockers, fmt.Sprintf("needs a Linux host to chroot into the guest root, but this host is %s", caps.GOOS))
+		return []string{fmt.Sprintf("needs a Linux host to mount the guest root and chroot into it, but this host is %s", caps.GOOS)}
 	}
+
+	var blockers []string
 	if !caps.Elevated {
 		blockers = append(blockers, "needs root (euid 0) to mount the image and chroot")
 	}
@@ -193,39 +95,4 @@ func nativeBlockers(targetArch string, caps Capabilities) []string {
 			caps.HostArch, targetArch))
 	}
 	return blockers
-}
-
-// applianceBlockers reports whether libguestfs actually works here.
-func applianceBlockers(caps Capabilities) []string {
-	if !caps.ApplianceUsable {
-		return []string{"libguestfs could not launch its appliance (install libguestfs-tools, and check it starts)"}
-	}
-	return nil
-}
-
-// vmBlockers reports whether a short-lived bladerunner VM can be booted.
-func vmBlockers(caps Capabilities) []string {
-	// Returning early rather than accumulating avoids a redundant second
-	// GOOS test: off macOS the platform is the only blocker worth reporting,
-	// and asking about the VM runtime there is meaningless.
-	if caps.GOOS != osDarwin {
-		return []string{fmt.Sprintf("needs macOS to boot a bladerunner VM, but this host is %s", caps.GOOS)}
-	}
-	if !caps.VMUsable {
-		return []string{"the bladerunner VM mechanic is not implemented yet, so macOS cannot bake locally; " +
-			"build on a Linux host (or in WSL2), or use the published image from the guest-image-latest release"}
-	}
-	return nil
-}
-
-// shouldProbeAppliance reports whether running the libguestfs launch check can
-// still change the outcome.
-//
-// The check boots a real appliance and costs seconds, so it is worth skipping
-// when native is already viable. It is a separate predicate rather than an
-// inline condition so it can be tested on any platform: inside Probe its effect
-// is invisible off Linux, where applianceUsable always reports false and both
-// branches therefore produce the same capabilities.
-func shouldProbeAppliance(want Method, targetArch string, caps Capabilities) bool {
-	return want == MethodAppliance || len(nativeBlockers(targetArch, caps)) > 0
 }

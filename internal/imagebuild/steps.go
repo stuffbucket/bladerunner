@@ -70,6 +70,12 @@ type Step struct {
 	Mode fs.FileMode
 	// Content is the file body, for the file kinds.
 	Content string
+	// Optional marks a step whose failure must not fail the build.
+	//
+	// It is for work that depends on something outside the distribution's own
+	// archive, where an outage is an inconvenience rather than a defect in the
+	// image. A skipped step is reported, never swallowed.
+	Optional bool
 }
 
 // Steps lowers the recipe into the ordered sequence of actions that produces the
@@ -125,6 +131,7 @@ func (r Recipe) Steps() []Step {
 	}
 
 	steps = append(steps, maskTimeSyncSteps(r)...)
+	steps = append(steps, webUISteps()...)
 
 	steps = append(steps,
 		Step{

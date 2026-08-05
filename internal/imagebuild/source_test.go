@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha512"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,9 +41,19 @@ func newFakeMirror(t *testing.T, body []byte, manifestDigest string) *fakeMirror
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
 
-	name := filepath.Base(mustRelease(t, "arm64").FileName())
+	// The mirror only needs the release's NAME. It must not go through
+	// BaseRelease, which validates against the pins — callers install a
+	// synthetic pin first, so validation here would fail on the very setup the
+	// test is constructing.
+	name := filepath.Base(testRelease().FileName())
 	m.manifest = manifestDigest + "  " + name + "\n"
 	return m
+}
+
+// testRelease is the arm64 release value without the pin check BaseRelease
+// performs. Tests that swap the pins need the name, not the validation.
+func testRelease() Release {
+	return Release{Suite: debianSuite, Stamp: debianStamp, Arch: "arm64"}
 }
 
 func mustRelease(t *testing.T, arch string) Release {
@@ -71,13 +82,40 @@ func pinFor(t *testing.T, name, digest string) {
 // The repository must pin every architecture it can build for. A stamp bump
 // that forgets a digest would otherwise fail at build time on a machine that
 // has already started work.
+//
+// The architectures come from the pins rather than from a list written here. A
+// list can only ever cover what existed when it was written, so it would go
+// blind to the third architecture on the day it is added — which is the one
+// moment this check is for.
 func TestEveryBuildableArchIsPinned(t *testing.T) {
-	for _, arch := range []string{"arm64", "amd64"} {
-		r := mustRelease(t, arch)
-		if _, ok := basePins[r.FileName()]; !ok {
-			t.Errorf("no pinned digest for %s; add it from %s", r.FileName(), r.ManifestURL())
+	if len(basePins) == 0 {
+		t.Fatal("nothing is pinned; the build cannot start from anything")
+	}
+	for name := range basePins {
+		arch, ok := archOfPinnedFile(name)
+		if !ok {
+			t.Errorf("pinned file %q is not named for the stamp this build uses (%s)", name, debianStamp)
+			continue
+		}
+		r, err := BaseRelease(arch)
+		if err != nil {
+			t.Errorf("BaseRelease(%q): %v", arch, err)
+			continue
+		}
+		if r.FileName() != name {
+			t.Errorf("release for %s resolves to %q, but the pin is for %q", arch, r.FileName(), name)
 		}
 	}
+}
+
+// archOfPinnedFile reads the architecture out of a pinned filename, which
+// carries it between the variant and the stamp.
+func archOfPinnedFile(name string) (string, bool) {
+	arch, ok := strings.CutPrefix(name, fmt.Sprintf("debian-%s-%s-", debianRelease, debianVariant))
+	if !ok {
+		return "", false
+	}
+	return strings.CutSuffix(arch, "-"+debianStamp+".qcow2")
 }
 
 // The URL must address the immutable dated directory, not "latest". A rebuild
@@ -98,7 +136,7 @@ func TestReleaseURLIsImmutable(t *testing.T) {
 func TestFetchAcceptsAnImageMatchingItsPin(t *testing.T) {
 	body := []byte("a pretend qcow2")
 	digest := sha512Hex(body)
-	r := mustRelease(t, "arm64")
+	r := testRelease()
 	pinFor(t, r.FileName(), digest)
 
 	mirror := newFakeMirror(t, body, digest)
@@ -120,7 +158,7 @@ func TestFetchAcceptsAnImageMatchingItsPin(t *testing.T) {
 // destination where a later step would consume it.
 func TestFetchRejectsAnImageThatDoesNotMatchItsPin(t *testing.T) {
 	body := []byte("a pretend qcow2")
-	r := mustRelease(t, "arm64")
+	r := testRelease()
 	pinFor(t, r.FileName(), sha512Hex([]byte("what we expected instead")))
 
 	mirror := newFakeMirror(t, body, sha512Hex(body))
@@ -141,7 +179,10 @@ func TestFetchRejectsAnImageThatDoesNotMatchItsPin(t *testing.T) {
 // An architecture with no pin must fail before anything is downloaded, rather
 // than fetching hundreds of megabytes and then discovering it cannot be checked.
 func TestFetchRefusesAnUnpinnedRelease(t *testing.T) {
-	r := mustRelease(t, "arm64")
+	// Built directly rather than through BaseRelease, which now refuses an
+	// unpinned architecture outright. This test is about FetchBase's own guard,
+	// so it needs the value the constructor will no longer hand out.
+	r := testRelease()
 	pinFor(t, "some-other-image.qcow2", sha512Hex([]byte("x")))
 
 	mirror := newFakeMirror(t, []byte("body"), sha512Hex([]byte("body")))
@@ -163,7 +204,7 @@ func TestFetchRefusesAnUnpinnedRelease(t *testing.T) {
 func TestFetchReusesAVerifiedLocalImage(t *testing.T) {
 	body := []byte("a pretend qcow2")
 	digest := sha512Hex(body)
-	r := mustRelease(t, "arm64")
+	r := testRelease()
 	pinFor(t, r.FileName(), digest)
 
 	mirror := newFakeMirror(t, body, digest)
@@ -184,7 +225,7 @@ func TestFetchReusesAVerifiedLocalImage(t *testing.T) {
 func TestFetchReplacesAMismatchedLocalImage(t *testing.T) {
 	body := []byte("a pretend qcow2")
 	digest := sha512Hex(body)
-	r := mustRelease(t, "arm64")
+	r := testRelease()
 	pinFor(t, r.FileName(), digest)
 
 	mirror := newFakeMirror(t, body, digest)
@@ -207,7 +248,7 @@ func TestFetchReplacesAMismatchedLocalImage(t *testing.T) {
 // respin a dated directory.
 func TestVerifyAgainstUpstreamDetectsAStalePin(t *testing.T) {
 	body := []byte("a pretend qcow2")
-	r := mustRelease(t, "arm64")
+	r := testRelease()
 	pinFor(t, r.FileName(), sha512Hex(body))
 
 	// The mirror now advertises a different digest than the repository pins.
@@ -225,7 +266,7 @@ func TestVerifyAgainstUpstreamDetectsAStalePin(t *testing.T) {
 func TestVerifyAgainstUpstreamAcceptsAMatchingPin(t *testing.T) {
 	body := []byte("a pretend qcow2")
 	digest := sha512Hex(body)
-	r := mustRelease(t, "arm64")
+	r := testRelease()
 	pinFor(t, r.FileName(), digest)
 
 	mirror := newFakeMirror(t, body, digest)

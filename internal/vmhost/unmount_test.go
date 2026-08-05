@@ -253,6 +253,53 @@ func TestDrainTimeoutFallsBackToTheDefault(t *testing.T) {
 	}
 }
 
+// stopRunner must hand the guest the budget the Spec asked for, not a
+// hardcoded default: a user who raises --drain-timeout for a guest that needs
+// longer to flush is otherwise force-stopped at DefaultDrainTimeout anyway,
+// which AGENTS.md section 8 calls out as able to lose the user's work.
+//
+// The pair is asserted on purpose. Honoring the Spec is the correction; still
+// falling back to DefaultDrainTimeout when the Spec is silent is the behavior
+// the correction must not trade away.
+//
+// The budget is only observable through the stopVM seam: the production call
+// runs against a live *vm.Runner, which exists only once
+// Virtualization.framework has booted a guest from a signed binary.
+func TestStopRunnerHandsTheGuestTheSpecDrainBudget(t *testing.T) {
+	cases := []struct {
+		name string
+		spec time.Duration
+		want time.Duration
+	}{
+		{name: "spec budget is honored", spec: 5 * time.Second, want: 5 * time.Second},
+		{name: "silent spec falls back to the default", spec: 0, want: DefaultDrainTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := New(Spec{Kind: instance.KindFlat, DrainTimeout: tc.spec})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			var got time.Duration
+			calls := 0
+			h.stopVM = func(_ context.Context, budget time.Duration) error {
+				calls++
+				got = budget
+				return nil
+			}
+			if err := h.stopRunner(); err != nil {
+				t.Fatalf("stopRunner: %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("stopVM called %d times, want exactly 1", calls)
+			}
+			if got != tc.want {
+				t.Fatalf("stopRunner drain budget = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // waitFor bounds a WaitGroup so a hung callback fails the test instead of
 // hanging the suite.
 func waitFor(t *testing.T, wg *sync.WaitGroup, budget time.Duration, msg string) {

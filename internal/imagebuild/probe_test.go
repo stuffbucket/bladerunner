@@ -1,14 +1,13 @@
 package imagebuild
 
 import (
-	"context"
 	"os"
 	"runtime"
 	"testing"
 )
 
 func TestProbeReportsTheRealHost(t *testing.T) {
-	caps := Probe(context.Background(), MethodAuto, runtime.GOARCH)
+	caps := Probe(runtime.GOARCH)
 
 	if caps.GOOS != runtime.GOOS {
 		t.Errorf("GOOS = %q, want %q", caps.GOOS, runtime.GOOS)
@@ -21,59 +20,32 @@ func TestProbeReportsTheRealHost(t *testing.T) {
 	}
 }
 
-// The native mechanic mounts and chroots, which cannot work off Linux. The probe
-// must say so rather than letting policy discover it later.
+// The mechanic mounts and chroots, which cannot work off Linux. The probe must
+// say so rather than letting the host check discover it later.
 func TestProbeNeverClaimsANativeAttachOffLinux(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("meaningful only off Linux")
 	}
-	if caps := Probe(context.Background(), MethodAuto, runtime.GOARCH); caps.NativeAttach {
+	if caps := Probe(runtime.GOARCH); caps.NativeAttach {
 		t.Errorf("NativeAttach = true on %s, want false", runtime.GOOS)
 	}
 }
 
-// Launching the libguestfs appliance costs seconds, so it must not be probed
-// when the native path is already viable. This keeps the common case fast.
-func TestProbeSkipsTheApplianceCheckWhenNativeIsViable(t *testing.T) {
-	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
-		t.Skip("needs a Linux host running as root for native to be viable")
-	}
-	caps := Probe(context.Background(), MethodAuto, runtime.GOARCH)
-	if !caps.NativeAttach {
-		t.Skip("no loop device, so native is not viable here")
-	}
-	if caps.ApplianceUsable {
-		t.Error("ApplianceUsable = true, want the expensive check skipped when native wins")
-	}
-}
+// Probe must feed CheckHost for the real host without either of them panicking
+// or disagreeing. This is the seam where a platform probe bug would hide.
+func TestProbeFeedsTheHostCheck(t *testing.T) {
+	caps := Probe(runtime.GOARCH)
+	err := CheckHost(runtime.GOARCH, caps)
 
-// A canceled context must not leave the caller waiting on a microVM boot.
-func TestProbeHonoursContextCanceled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	caps := Probe(ctx, MethodAppliance, runtime.GOARCH)
-	if caps.ApplianceUsable {
-		t.Error("ApplianceUsable = true with a canceled context, want false")
+	// On an arbitrary developer or CI machine either answer is legitimate: a
+	// Linux box with root and an nbd device can bake, and nothing else can. The
+	// assertion is that the two agree about which.
+	canBake := runtime.GOOS == "linux" && caps.Elevated && caps.NativeAttach
+	if canBake && err != nil {
+		t.Errorf("host looks capable but CheckHost refused: %v", err)
 	}
-}
-
-// Probe must select the same mechanic policy would, for the real host. This is
-// the seam where a platform probe bug would otherwise hide.
-func TestProbeFeedsPolicyWithoutPanicking(t *testing.T) {
-	caps := Probe(context.Background(), MethodAuto, runtime.GOARCH)
-
-	sel, err := Select(MethodAuto, runtime.GOARCH, caps)
-	switch runtime.GOOS {
-	case "linux", "darwin":
-		// Either a method is chosen, or the error explains every blocker. Both
-		// are acceptable on an arbitrary developer or CI machine.
-		if err != nil && sel.Method != "" {
-			t.Errorf("got both an error (%v) and a method (%q)", err, sel.Method)
-		}
-	default:
-		if err == nil {
-			t.Errorf("Select() error = nil on %s, want unsupported", runtime.GOOS)
-		}
+	if !canBake && err == nil {
+		t.Errorf("host cannot bake (GOOS=%s elevated=%v attach=%v) but CheckHost accepted it",
+			runtime.GOOS, caps.Elevated, caps.NativeAttach)
 	}
 }
