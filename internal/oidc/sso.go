@@ -277,6 +277,41 @@ func (s *ssoState) redeemCode(code string) (authzCode, bool) {
 	return ac, time.Now().Before(ac.expiry)
 }
 
+// peekCode reads an authorization code WITHOUT consuming it, so every check a
+// redemption has to pass can run before the code is spent. It reports false for
+// an unknown or expired code, exactly as redeemCode does.
+func (s *ssoState) peekCode(code string) (authzCode, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ac, ok := s.codes[code]
+	if !ok {
+		return authzCode{}, false
+	}
+	return ac, time.Now().Before(ac.expiry)
+}
+
+// tokenRequestClientID resolves the client identity of a token request.
+//
+// RFC 6749 section 2.3.1 lets a client authenticate either in the request body
+// or with HTTP Basic, and says a server "MUST support" the Basic scheme. The
+// body is checked first because that is what this provider advertises in its
+// discovery document (client_secret_post), but golang.org/x/oauth2 -- the base
+// of the client Incus uses -- probes the header form FIRST when its AuthStyle
+// is unset, so refusing it would reject a spec-legal relying party that has
+// been working.
+//
+// Only the username is taken. This provider issues no client secrets, so the
+// password half carries nothing to verify.
+func tokenRequestClientID(r *http.Request) string {
+	if id := r.PostForm.Get("client_id"); id != "" {
+		return id
+	}
+	if user, _, ok := r.BasicAuth(); ok {
+		return user
+	}
+	return ""
+}
+
 func (s *ssoState) newPending(clientID, redirectURI, state, scope, challenge, method string) (string, error) {
 	id, err := randToken(reqIDBytes)
 	if err != nil {
@@ -642,12 +677,17 @@ func (p *Provider) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 	code := r.PostForm.Get(responseTypeCode)
 	redirectURI := r.PostForm.Get("redirect_uri")
 	verifier := r.PostForm.Get("code_verifier")
-	clientID := r.PostForm.Get("client_id")
+	clientID := tokenRequestClientID(r)
 	if code == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "code is required")
 		return
 	}
-	ac, ok := p.sso.redeemCode(code)
+	// Peek before redeeming. redeemCode CONSUMES the code, so checking the
+	// binding afterwards makes a rejection unrecoverable: golang.org/x/oauth2
+	// probes auth styles by sending the client in the Authorization header first
+	// and retrying in the body on failure, and that retry would find the code
+	// already burned. One wrong guess would end the login.
+	ac, ok := p.sso.peekCode(code)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid_grant", "invalid or expired code")
 		return
@@ -671,6 +711,12 @@ func (p *Provider) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := verifyPKCE(ac.codeChallenge, ac.codeMethod, verifier); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_grant", err.Error())
+		return
+	}
+	// Everything about this request checks out, so consume the code now. A
+	// single-use code must not survive a successful redemption.
+	if _, ok := p.sso.redeemCode(code); !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "invalid or expired code")
 		return
 	}
 	ident := Identity{Fingerprint: ac.fingerprint, Comment: ac.comment}

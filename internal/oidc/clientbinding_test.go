@@ -7,6 +7,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -334,4 +335,89 @@ func TestConfigClientIDsRegistry(t *testing.T) {
 	if tokStatus, body := postToken(t, srv.URL, code, secondClientID); tokStatus == http.StatusOK {
 		t.Fatalf("sibling client redeemed another client's code: %s", body)
 	}
+}
+
+// A client that authenticates with HTTP Basic must be accepted, and a wrong
+// guess at the auth style must not burn the code.
+//
+// RFC 6749 section 2.3.1 lets a client send its identity either in the body or
+// with HTTP Basic, and golang.org/x/oauth2 -- the base of the client Incus uses
+// -- probes the HEADER form first when its AuthStyle is unset, retrying in the
+// body on failure. Two things follow, and the first version of this binding got
+// both wrong: reading only the body rejected a spec-legal relying party that had
+// been working, and consuming the code before the check made the retry
+// impossible, so one wrong guess ended the login.
+func TestTokenAcceptsBasicAuthClientAndSurvivesARetry(t *testing.T) {
+	p := newTestProvider(t)
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	browser := authorizedBrowser(t, p, srv.URL, "alice@host")
+
+	t.Run("basic auth is accepted", func(t *testing.T) {
+		status, code := authorizeFor(t, browser, srv.URL, oidcClientID)
+		if status != http.StatusFound || code == "" {
+			t.Fatalf("authorize status=%d code=%q", status, code)
+		}
+		tokStatus, body := postTokenBasicAuth(t, srv.URL, code, oidcClientID)
+		if tokStatus != http.StatusOK {
+			t.Errorf("a client authenticating with HTTP Basic was refused: %d %s", tokStatus, body)
+		}
+	})
+
+	t.Run("a refused attempt leaves the code redeemable", func(t *testing.T) {
+		status, code := authorizeFor(t, browser, srv.URL, oidcClientID)
+		if status != http.StatusFound || code == "" {
+			t.Fatalf("authorize status=%d code=%q", status, code)
+		}
+		// A wrong client is refused...
+		if tokStatus, body := postToken(t, srv.URL, code, attackerClientID); tokStatus == http.StatusOK {
+			t.Fatalf("a foreign client redeemed the code: %s", body)
+		}
+		// ...and the legitimate client can still redeem it.
+		tokStatus, body := postToken(t, srv.URL, code, oidcClientID)
+		if tokStatus != http.StatusOK {
+			t.Errorf("a refused attempt burned the code; the real client got %d %s", tokStatus, body)
+		}
+	})
+
+	t.Run("a redeemed code is single use", func(t *testing.T) {
+		status, code := authorizeFor(t, browser, srv.URL, oidcClientID)
+		if status != http.StatusFound || code == "" {
+			t.Fatalf("authorize status=%d code=%q", status, code)
+		}
+		if tokStatus, body := postToken(t, srv.URL, code, oidcClientID); tokStatus != http.StatusOK {
+			t.Fatalf("first redemption failed: %d %s", tokStatus, body)
+		}
+		if tokStatus, body := postToken(t, srv.URL, code, oidcClientID); tokStatus == http.StatusOK {
+			t.Errorf("the code was redeemable twice: %s", body)
+		}
+	})
+}
+
+// postTokenBasicAuth redeems a code with the client identity in the
+// Authorization header rather than the body, which is what x/oauth2 tries first.
+func postTokenBasicAuth(t *testing.T, base, code, clientID string) (int, string) {
+	t.Helper()
+	form := url.Values{
+		formFieldGrantType: {grantTypeAuthCode},
+		responseTypeCode:   {code},
+		"redirect_uri":     {testRedirectURI},
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		base+pathToken, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("build token request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(clientID, "")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post token: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }
