@@ -11,7 +11,14 @@ import (
 var shellCmd = &cobra.Command{
 	Use:   "shell [-- command...]",
 	Short: "Open an interactive shell in the VM",
-	Long:  `Open an interactive shell in the running Bladerunner VM. Any arguments after -- are run as a command.`,
+	Long: `Open an interactive shell in the running Bladerunner VM. Any arguments after -- are run as a command.
+
+Also answers to 'br ssh', which is what the same verb is called in colima,
+multipass and vagrant. 'br ssh-config' prints the connection details instead.`,
+	// ssh is an alias rather than a second command so the two cannot drift.
+	// It used to be its own verb that PRINTED connection details, which is why
+	// `br ssh --json` now points at `br ssh-config --json`.
+	Aliases: []string{"ssh"},
 	// The trailing command belongs to the guest, so cobra must not read it.
 	// passthroughSetup recovers the bladerunner flags cobra therefore skips.
 	DisableFlagParsing: true,
@@ -23,7 +30,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 	if handled || err != nil {
 		return err
 	}
-	if err := rejectJSONForInteractive("shell"); err != nil {
+	if err := rejectJSONForInteractive("shell", "br ssh-config --json", "br status --json"); err != nil {
 		return err
 	}
 

@@ -91,7 +91,7 @@ func init() {
 		saveCmd, restoreCmd, resetCmd, upgradeCmd, selfUpdateCmd, reconnectCmd,
 	)
 	addToGroup(groupAccess,
-		sshCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd, eventsCmd,
+		shellCmd, sshConfigCmd, execCmd, incusCmd, lsCmd, logsCmd, eventsCmd,
 	)
 	addToGroup(groupMedia,
 		diskCmd, disksCmd,
@@ -116,7 +116,7 @@ func init() {
 	// A subcommand inherits its parent unless it declares its own.
 	declareInstancePolicy(instanceHonored,
 		statusCmd, stopCmd, restartCmd, resetCmd, ejectCmd, saveCmd, restoreCmd, upgradeCmd,
-		reconnectCmd, sshCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd,
+		reconnectCmd, sshConfigCmd, shellCmd, execCmd, incusCmd, lsCmd, logsCmd,
 		eventsCmd, webCmd, configCmd,
 	)
 	// `br instances` lists every instance; selecting one would mean nothing.

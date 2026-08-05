@@ -30,14 +30,23 @@ func sshArgvFor(alias, configPath string, opts []string, tail ...string) (sshPat
 	return sshPath, argv, nil
 }
 
-var sshCmd = &cobra.Command{
-	Use:   "ssh",
-	Short: "Show SSH connection details",
-	Long:  `Display the SSH command and configuration needed to connect to the Bladerunner VM.`,
-	RunE:  runSSH,
+// sshConfigCmd prints how to reach the VM over SSH.
+//
+// This verb was called `br ssh` and did exactly this. It was renamed because
+// every comparable tool spells the CONNECTING verb `ssh` — colima, multipass,
+// vagrant — so `br ssh` printing text and leaving you where you started was a
+// surprise every new user paid for once. `ssh-config` is the name colima gives
+// the same output, so the pair reads the way people already expect.
+var sshConfigCmd = &cobra.Command{
+	Use:     "ssh-config",
+	Short:   "Show SSH connection details",
+	Long:    `Display the SSH command and configuration needed to connect to the Bladerunner VM.`,
+	Aliases: []string{"ssh-info"},
+	Args:    cobra.NoArgs,
+	RunE:    runSSHConfig,
 }
 
-func runSSH(_ *cobra.Command, _ []string) error {
+func runSSHConfig(_ *cobra.Command, _ []string) error {
 	configPath, instanceName, err := sshTarget()
 	if err != nil {
 		if jsonOutput {

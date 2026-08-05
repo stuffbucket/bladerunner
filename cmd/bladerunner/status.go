@@ -148,7 +148,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	fmt.Println(renderPanels(left, right))
 	fmt.Printf("  %s %s    %s %s\n",
 		subtle("Shell:"), command("br shell"),
-		subtle("SSH:"), command("br ssh"))
+		subtle("SSH:"), command("br ssh-config"))
 	fmt.Println()
 
 	return nil

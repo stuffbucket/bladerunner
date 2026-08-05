@@ -50,7 +50,7 @@ func TestVerbsActOnTheSelectedInstance(t *testing.T) {
 	}{
 		{verb: "shell", run: func() error { return runShell(shellCmd, nil) }},
 		{verb: "incus", run: func() error { return runIncus(incusCmd, []string{"list"}) }},
-		{verb: "ssh", run: func() error { return runSSH(sshCmd, nil) }},
+		{verb: "ssh", run: func() error { return runSSHConfig(sshConfigCmd, nil) }},
 		{verb: "ls", run: func() error { return runLs(lsCmd, nil) }},
 		{verb: "logs", run: func() error { return runLogs(logsCmd, []string{"box"}) }},
 		{verb: "events", run: func() error { return runEvents(eventsCmd, nil) }},

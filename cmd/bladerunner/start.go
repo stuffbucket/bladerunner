@@ -549,7 +549,7 @@ func printRunningSummary(cfg *config.Config, endpoint string, bootErr error) {
 		fmt.Printf("  %s %s\n", key("Console:"), value(cfg.ConsoleLogPath))
 		fmt.Printf("  %s %s\n", key("Hint:"), subtle(bootSummaryHint(bootErr)))
 	}
-	fmt.Printf("  %s %s\n", key("SSH:"), command("br ssh"))
+	fmt.Printf("  %s %s\n", key("SSH:"), command("br ssh-config"))
 	fmt.Printf("  %s %s\n", key("Shell:"), command("br shell"))
 	fmt.Printf("  %s %s\n", key("API:"), value(endpoint))
 	fmt.Println()
