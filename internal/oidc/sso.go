@@ -37,6 +37,11 @@ import (
 // All proofs are an SSH signature over a server-issued single-use nonce, verified
 // against the registered identity's public key. Tokens, tickets, codes, sessions
 // and pending requests are short-lived and held in memory only.
+//
+// Both paths bind an authorization code to exactly one registered client_id at
+// /authorize, and /token redeems a code only for that same client_id. The
+// binding is what stops one local client from redeeming another's code, so an
+// unbound or unregistered client is refused rather than accommodated.
 
 const (
 	// PathAuthnNonce serves the single-use nonce a client signs to prove it
@@ -270,6 +275,41 @@ func (s *ssoState) redeemCode(code string) (authzCode, bool) {
 	}
 	delete(s.codes, code)
 	return ac, time.Now().Before(ac.expiry)
+}
+
+// peekCode reads an authorization code WITHOUT consuming it, so every check a
+// redemption has to pass can run before the code is spent. It reports false for
+// an unknown or expired code, exactly as redeemCode does.
+func (s *ssoState) peekCode(code string) (authzCode, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ac, ok := s.codes[code]
+	if !ok {
+		return authzCode{}, false
+	}
+	return ac, time.Now().Before(ac.expiry)
+}
+
+// tokenRequestClientID resolves the client identity of a token request.
+//
+// RFC 6749 section 2.3.1 lets a client authenticate either in the request body
+// or with HTTP Basic, and says a server "MUST support" the Basic scheme. The
+// body is checked first because that is what this provider advertises in its
+// discovery document (client_secret_post), but golang.org/x/oauth2 -- the base
+// of the client Incus uses -- probes the header form FIRST when its AuthStyle
+// is unset, so refusing it would reject a spec-legal relying party that has
+// been working.
+//
+// Only the username is taken. This provider issues no client secrets, so the
+// password half carries nothing to verify.
+func tokenRequestClientID(r *http.Request) string {
+	if id := r.PostForm.Get("client_id"); id != "" {
+		return id
+	}
+	if user, _, ok := r.BasicAuth(); ok {
+		return user
+	}
+	return ""
 }
 
 func (s *ssoState) newPending(clientID, redirectURI, state, scope, challenge, method string) (string, error) {
@@ -551,6 +591,19 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "redirect_uri must be loopback")
 		return
 	}
+	// The client binding of an authorization code is established here and
+	// nowhere else. A request that names no client, or names one this provider
+	// does not serve, has nothing to bind a code to, so it is refused before any
+	// code exists — not redirected, because an unverified client_id makes the
+	// redirect target itself untrustworthy as an error sink.
+	if clientID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+		return
+	}
+	if !p.knownClient(clientID) {
+		writeError(w, http.StatusBadRequest, "unauthorized_client", "client_id is not registered with this provider")
+		return
+	}
 	if respType != "" && respType != responseTypeCode {
 		// redirectURI was rejected above unless it is loopback or relative, and
 		// buildErrorRedirect only appends query params without touching the host.
@@ -624,12 +677,17 @@ func (p *Provider) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 	code := r.PostForm.Get(responseTypeCode)
 	redirectURI := r.PostForm.Get("redirect_uri")
 	verifier := r.PostForm.Get("code_verifier")
-	clientID := r.PostForm.Get("client_id")
+	clientID := tokenRequestClientID(r)
 	if code == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "code is required")
 		return
 	}
-	ac, ok := p.sso.redeemCode(code)
+	// Peek before redeeming. redeemCode CONSUMES the code, so checking the
+	// binding afterwards makes a rejection unrecoverable: golang.org/x/oauth2
+	// probes auth styles by sending the client in the Authorization header first
+	// and retrying in the body on failure, and that retry would find the code
+	// already burned. One wrong guess would end the login.
+	ac, ok := p.sso.peekCode(code)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid_grant", "invalid or expired code")
 		return
@@ -638,20 +696,33 @@ func (p *Provider) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
 		return
 	}
-	if ac.clientID != "" && clientID != "" && ac.clientID != clientID {
-		writeError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
+	// Exact client binding. The stored value is the only authority: an empty one
+	// means the code was minted without a binding, which no endpoint can produce
+	// any more, so it is refused instead of adopting whatever the caller sent.
+	if ac.clientID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_grant",
+			"refusing to redeem a code that carries no client binding")
+		return
+	}
+	if clientID != ac.clientID {
+		writeError(w, http.StatusBadRequest, "invalid_grant",
+			"refusing to redeem a code issued to a different client_id")
 		return
 	}
 	if err := verifyPKCE(ac.codeChallenge, ac.codeMethod, verifier); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
-	cid := ac.clientID
-	if cid == "" {
-		cid = clientID
+	// Everything about this request checks out, so consume the code now. A
+	// single-use code must not survive a successful redemption.
+	if _, ok := p.sso.redeemCode(code); !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "invalid or expired code")
+		return
 	}
 	ident := Identity{Fingerprint: ac.fingerprint, Comment: ac.comment}
-	tok, claims, err := p.issuer.Issue(ident, cid)
+	// The signed claim carries the client from the authorization grant, never
+	// the value the token request supplied.
+	tok, claims, err := p.issuer.Issue(ident, ac.clientID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return

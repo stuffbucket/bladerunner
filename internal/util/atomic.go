@@ -24,7 +24,7 @@ const tmpSuffix = ".tmp-*"
 //
 // The directory fsync is the part a naive temp+rename omits: without it the
 // rename can still be lost after a power failure even though the file contents
-// were synced. It is best effort — see syncDir.
+// were synced. It is best effort — see SyncDir.
 //
 // A failed write leaves the destination untouched and removes the temp file.
 func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
@@ -42,7 +42,7 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("publish %s: %w", path, err)
 	}
-	syncDir(dir)
+	SyncDir(dir)
 	return nil
 }
 
@@ -79,7 +79,7 @@ func PublishFileAtomic(src, dst string) error {
 	if err := os.Rename(src, dst); err != nil {
 		return fmt.Errorf("publish %s over %s: %w", src, dst, err)
 	}
-	syncDir(filepath.Dir(dst))
+	SyncDir(filepath.Dir(dst))
 	return nil
 }
 
@@ -137,10 +137,17 @@ func writeSyncClose(f *os.File, data []byte, perm fs.FileMode) error {
 	return f.Close()
 }
 
-// syncDir fsyncs a directory so a rename into it is durable. Best effort: some
-// filesystems refuse to open a directory for sync, and a failure here only
-// costs durability across a host crash, never correctness.
-func syncDir(dir string) {
+// SyncDir fsyncs a directory so a rename into it is durable.
+//
+// It is the half of an atomic publish that a naive temp-and-rename omits:
+// without it the rename can still be lost after a power failure even though the
+// file contents were synced. Callers that do their own renames — the updater
+// swaps a whole .app bundle rather than a file — need it directly.
+//
+// Best effort: some filesystems refuse to open a directory for sync, and a
+// failure here only costs durability across a host crash, never correctness.
+// There is therefore nothing for a caller to handle, so nothing is returned.
+func SyncDir(dir string) {
 	d, err := os.Open(dir)
 	if err != nil {
 		return

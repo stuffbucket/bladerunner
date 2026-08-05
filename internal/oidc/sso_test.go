@@ -103,31 +103,19 @@ func pollOnce(t *testing.T, base, reqID string) pollResult {
 	return pr
 }
 
-// redeemCodeForToken posts an authorization_code grant and returns the verified claims.
-func redeemCodeForToken(t *testing.T, p *Provider, base, code, redirectURI, verifier string) *Claims {
+// redeemCodeForToken posts an authorization_code grant as clientID and returns
+// the verified claims. The redirect URI is always testRedirectURI, which is the
+// only one these tests authorize against.
+func redeemCodeForToken(t *testing.T, p *Provider, base, code, clientID, verifier string) *Claims {
 	t.Helper()
-	form := url.Values{
-		formFieldGrantType: {grantTypeAuthCode},
-		responseTypeCode:   {code},
-		"redirect_uri":     {redirectURI},
-		"client_id":        {oidcClientID},
-	}
-	if verifier != "" {
-		form.Set("code_verifier", verifier)
-	}
-	resp, err := http.PostForm(base+pathToken, form)
-	if err != nil {
-		t.Fatalf("token post: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("token status=%d body=%s", resp.StatusCode, body)
+	status, body := postTokenWithVerifier(t, base, code, clientID, verifier)
+	if status != http.StatusOK {
+		t.Fatalf("token status=%d body=%s", status, body)
 	}
 	var tok struct {
 		AccessToken string `json:"access_token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+	if err := json.Unmarshal([]byte(body), &tok); err != nil {
 		t.Fatalf("token decode: %v", err)
 	}
 	if tok.AccessToken == "" {
@@ -209,7 +197,7 @@ func TestSilentSSOFlow(t *testing.T) {
 	}
 
 	// Step 4: redeem the code.
-	claims := redeemCodeForToken(t, p, srv.URL, code, redirectURI, "")
+	claims := redeemCodeForToken(t, p, srv.URL, code, oidcClientID, "")
 	if claims.Subject != ident.Fingerprint {
 		t.Fatalf("sub=%s want %s", claims.Subject, ident.Fingerprint)
 	}
@@ -258,11 +246,13 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 		t.Fatal("no code")
 	}
 
-	// Wrong verifier rejected.
+	// Wrong verifier rejected. client_id is supplied so the request fails on the
+	// PKCE check this test is about, not on the client binding.
 	badForm := url.Values{
 		formFieldGrantType: {grantTypeAuthCode},
 		responseTypeCode:   {code},
 		"redirect_uri":     {redirectURI},
+		"client_id":        {oidcClientID},
 		"code_verifier":    {"wrong-verifier"},
 	}
 	badResp, _ := http.PostForm(srv.URL+pathToken, badForm)
@@ -278,7 +268,7 @@ func TestSilentSSOFlowPKCE(t *testing.T) {
 		"&code_challenge=" + challenge + "&code_challenge_method=S256")
 	_ = aResp2.Body.Close()
 	loc2, _ := url.Parse(aResp2.Header.Get("Location"))
-	claims := redeemCodeForToken(t, p, srv.URL, loc2.Query().Get(responseTypeCode), redirectURI, verifier)
+	claims := redeemCodeForToken(t, p, srv.URL, loc2.Query().Get(responseTypeCode), oidcClientID, verifier)
 	if claims.Subject != fp {
 		t.Fatalf("sub=%s want %s", claims.Subject, fp)
 	}
@@ -300,7 +290,7 @@ func TestChallengeApproveFlow(t *testing.T) {
 
 	redirectURI := testRedirectURI
 	chResp, err := http.Get(srv.URL + pathAuthorize +
-		"?response_type=code&redirect_uri=" + url.QueryEscape(redirectURI) + "&state=foo")
+		"?response_type=code&client_id=" + oidcClientID + "&redirect_uri=" + url.QueryEscape(redirectURI) + "&state=foo")
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
@@ -337,7 +327,7 @@ func TestChallengeApproveFlow(t *testing.T) {
 	if loc.Query().Get("state") != "foo" {
 		t.Fatalf("state not echoed: %s", pr.Redirect)
 	}
-	claims := redeemCodeForToken(t, p, srv.URL, loc.Query().Get(responseTypeCode), redirectURI, "")
+	claims := redeemCodeForToken(t, p, srv.URL, loc.Query().Get(responseTypeCode), oidcClientID, "")
 	if claims.Subject != ident.Fingerprint {
 		t.Fatalf("sub=%s want %s", claims.Subject, ident.Fingerprint)
 	}

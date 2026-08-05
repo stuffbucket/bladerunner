@@ -1588,6 +1588,7 @@ func (h *Host) startOIDCProvider(ctx context.Context) (*oidc.Provider, error) {
 		Listener:   ln,
 		IssuerURL:  cfg.OIDCIssuerURL,
 		Audience:   cfg.OIDCAudience,
+		ClientIDs:  []string{cfg.OIDCClientID},
 		SigningKey: signingKey,
 		Store:      store,
 	})
