@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/control"
@@ -52,11 +51,13 @@ func runSave(_ *cobra.Command, _ []string) error {
 
 	finalPath := savedPath
 	if saveFlags.path != "" && saveFlags.path != savedPath {
-		if err := os.Rename(savedPath, saveFlags.path); err != nil {
+		// State file and metadata sidecar move as one generation, across
+		// filesystems included. A destination that held only the state file
+		// would be refused by 'br restore', so reporting it as saved would be a
+		// lie the operator only discovers when they need the snapshot.
+		if err := vm.MoveSavedState(savedPath, saveFlags.path); err != nil {
 			return jsonOrError(fmt.Errorf("move saved state to %s: %w", saveFlags.path, err))
 		}
-		// Keep the metadata sidecar alongside the save file.
-		_ = os.Rename(vm.SaveMetadataPath(savedPath), vm.SaveMetadataPath(saveFlags.path))
 		finalPath = saveFlags.path
 	}
 
