@@ -49,11 +49,22 @@ func MoveSavedState(src, dst string) error { return moveSavedState(src, dst, os.
 // injected, so a test can exercise the cross-filesystem (EXDEV) branch without
 // mounting a second filesystem.
 func moveSavedState(src, dst string, link linkFunc) error {
-	if src == dst {
-		return nil
-	}
-	if _, err := os.Stat(src); err != nil {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
 		return fmt.Errorf("saved state %s: %w", src, err)
+	}
+	// Identity, not spelling. A string compare misses every other way a path can
+	// name this same file -- an extra slash, a relative form, a symlinked state
+	// directory (on macOS /tmp and /var are symlinks, so this costs nothing to
+	// hit). Falling through with an alias is unrecoverable rather than merely
+	// wrong: the publish renames the staged link onto the source, and the
+	// cleanup then unlinks what it just published, so the snapshot disappears
+	// and the move still reports success.
+	//
+	// os.Rename, which this replaced, was a harmless no-op on an alias. Anything
+	// weaker than SameFile here is a regression against it.
+	if dstInfo, err := os.Stat(dst); err == nil && os.SameFile(srcInfo, dstInfo) {
+		return nil
 	}
 	// Refuse a generation whose sidecar we cannot read. Loading it (rather than
 	// stat-ing it) also rejects a truncated or unparseable sidecar, which is the

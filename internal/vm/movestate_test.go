@@ -187,3 +187,58 @@ func TestPublishMovedGenerationRemovesStateWhenSidecarFails(t *testing.T) {
 		t.Error("the state file remains at the destination without its sidecar")
 	}
 }
+
+// A destination that NAMES THE SAME FILE by a different spelling must be a
+// no-op, not a deletion.
+//
+// The move stages a link, publishes it over the destination, then removes the
+// source generation. When source and destination are the same file, that last
+// step unlinks what was just published -- and the move still returns nil, so
+// `br save` prints a success for a snapshot that no longer exists.
+//
+// os.Rename, which this code replaced, was a harmless no-op on an alias, so
+// anything weaker than an identity check here is a regression against it. The
+// spellings below are not exotic: a trailing-slash path, a relative path from
+// inside the state directory, and a symlinked state directory are all ordinary
+// (on macOS /tmp and /var are themselves symlinks).
+func TestMoveSavedStateTreatsAnAliasAsANoOp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dst  func(dir, src string) string
+	}{
+		{"double slash", func(dir, _ string) string { return dir + "//saved-state.bin" }},
+		{"dot segment", func(dir, _ string) string { return filepath.Join(dir, ".", "saved-state.bin") }},
+		{"symlinked parent", func(dir, _ string) string {
+			link := filepath.Join(filepath.Dir(dir), "aliased")
+			if err := os.Symlink(dir, link); err != nil {
+				return "" // symlinks unavailable; the other rows still cover this
+			}
+			return filepath.Join(link, "saved-state.bin")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "saved-state.bin")
+			writeGeneration(t, src, "PRECIOUS")
+
+			dst := tc.dst(dir, src)
+			if dst == "" {
+				t.Skip("could not construct this alias on this filesystem")
+			}
+			if err := MoveSavedState(src, dst); err != nil {
+				t.Fatalf("MoveSavedState(%s -> alias %s) = %v, want nil", src, dst, err)
+			}
+
+			got, err := os.ReadFile(src)
+			if err != nil {
+				t.Fatalf("the snapshot was destroyed by a move onto its own alias: %v", err)
+			}
+			if string(got) != "PRECIOUS" {
+				t.Errorf("saved state = %q, want it untouched", got)
+			}
+			if _, err := os.Stat(SaveMetadataPath(src)); err != nil {
+				t.Errorf("the sidecar was destroyed by a move onto its own alias: %v", err)
+			}
+		})
+	}
+}
