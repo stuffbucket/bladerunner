@@ -497,9 +497,21 @@ func renderVsockRelays(cfg *config.Config) string {
 	b.WriteString("  systemctl mask \"bladerunner-vsock-$legacy.service\" 2>/dev/null || true\n")
 	b.WriteString("done\n")
 
-	// Enable + start all four instances in one shot.
+	// Enable + start all four instances in one shot, WITHOUT waiting for them.
+	//
+	// --no-block is the whole point. These units spin-wait for their backend in
+	// ExecStartPre (ssh on 22, incus on 8443), and incus is installed by the NEXT
+	// stage of this very script — so a blocking start waits for a port that
+	// cannot appear until after this command returns. systemd breaks the deadlock
+	// with its default 90s TimeoutStartSec and `|| true` swallows the failure, so
+	// it looked like it worked while costing 92 measured seconds of every first
+	// boot: the single largest component of a 194s cold start.
+	//
+	// Queuing the jobs instead is what the spin-wait was designed for. Each unit
+	// comes up on its own the moment its backend appears, which for incus is a
+	// few seconds later in the same boot.
 	b.WriteString("systemctl daemon-reload\n")
-	b.WriteString("systemctl enable --now")
+	b.WriteString("systemctl enable --now --no-block")
 	for _, ch := range relayChannels(cfg) {
 		fmt.Fprintf(&b, " bladerunner-vsock-relay@%s.service", ch.name)
 	}
