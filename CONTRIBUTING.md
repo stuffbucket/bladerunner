@@ -11,7 +11,8 @@ cd bladerunner
 make setup
 
 # Build and test
-make all
+make build
+make check
 ```
 
 ## Development Workflow
@@ -19,15 +20,15 @@ make all
 ### Building
 
 ```bash
-make build      # Build binary to ./bin/runner
+make build      # Build binary to ./bin/br
 make sign       # Build and sign with entitlements
-make run ARGS='--gui=false'  # Build, sign, and run
+make run ARGS='status'  # Build, sign, and run
 ```
 
 ### Testing
 
 ```bash
-make test       # Full test suite with race detector
+make test       # Full test suite
 make check      # Run formatting check, vet, lint, and tests
 ```
 

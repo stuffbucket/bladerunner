@@ -8,6 +8,7 @@
     "check:content": "node scripts/check-content.mjs",
     "prebuild": "npm run check:content",
     "build": "astro build",
+    "test": "node --test src/lib/release.test.js",
     "preview": "astro preview",
     "astro": "astro"
   },

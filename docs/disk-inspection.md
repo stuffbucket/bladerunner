@@ -20,8 +20,8 @@ brew install e2fsprogs        # keg-only; binaries under /opt/homebrew/opt/e2fsp
 `e2fsprogs` is GPL-2.0 (the libraries are LGPL-2.0). Bladerunner is MIT-licensed.
 Invoking `debugfs`/`dumpe2fs` as **separate executables** (as below, or from a
 future `br inspect-disk` subcommand that shells out to them) does **not** create
-a derivative work and imposes no licensing obligation on `runner`. Only *bundling /
-redistributing* the GPL binaries inside a `runner` release would trigger GPL source
+a derivative work and imposes no licensing obligation on `br`. Only *bundling /
+redistributing* the GPL binaries inside a `br` release would trigger GPL source
 obligations — so we shell out to a user-installed copy instead of vendoring it.
 
 ## Procedure
@@ -30,7 +30,7 @@ obligations — so we shell out to a user-installed copy instead of vendoring it
 > and the image file may be held open by the running VZ process.
 
 ```bash
-runner stop                 # or: runner stop --force   (panicked/hung guest)
+br stop                     # or: br stop --force   (panicked/hung guest)
 
 cd ~/.local/state/bladerunner
 

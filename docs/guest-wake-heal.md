@@ -133,7 +133,7 @@ tracking` (refid should show the host source, not a pool). The journal logs
 clock-vs-connectivity inference into a measurement on the next real wedge:
 
 ```bash
-runner shell
+br shell
 journalctl -t bladerunner-watchdog --since '-1h'
 # look for: clock sys_offset=… leap=… rtc_delta=…s ; listen ssh22=… ; heal: …
 ```

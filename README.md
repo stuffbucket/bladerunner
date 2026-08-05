@@ -114,38 +114,45 @@ codesign --entitlements vz.entitlements -s - bin/br
 Default (shared network + localhost forwarding):
 
 ```bash
-runner start
+br start
 ```
 
 With GUI console window:
 
 ```bash
-runner start --gui
+br start --gui
 ```
 
-Bridged network on `en0`:
+Bridged network on `en0`. This is a persisted setting, not a start flag: write
+it into `~/.local/state/bladerunner/settings.json` (the document the menubar's
+Settings screen writes), then start. Absent fields keep their defaults:
+
+```json
+{ "networkMode": "bridged", "bridgeInterface": "en0" }
+```
 
 ```bash
-runner start --network-mode bridged --bridge-interface en0
+br start
 ```
 
 Custom image path (raw disk image):
 
 ```bash
-runner start --image-path /path/to/base.raw
+br start --image-path /path/to/base.raw
 ```
 
-Custom log file path:
+The log file is `<state-dir>/bladerunner.log`. To put it somewhere else, move
+the whole state directory:
 
 ```bash
-runner start --log-path /tmp/bladerunner.log
+br start --state-dir /tmp/bladerunner-scratch   # logs to /tmp/bladerunner-scratch/bladerunner.log
 ```
 
 Optional log level. Accepts `debug`, `info`, `warn` (alias `warning`), or
 `error` (case-insensitive). Unknown or unset values default to `info`:
 
 ```bash
-BLADERUNNER_LOG_LEVEL=debug runner start
+BLADERUNNER_LOG_LEVEL=debug br start
 ```
 
 ## Access
@@ -184,12 +191,12 @@ bake`) is materialized once into a shared content-addressed cache and reused
 across slots; the digest is verified before use.
 
 ```bash
-runner disks                 # list the shelf (builtins + your disks) and attached cartridges
-runner boot <name|url|path>  # power on a disk (restores saved RAM if present)
-runner eject                 # cleanly power off the running VM (ACPI shutdown)
-runner disk new <name>       # scaffold a new user disk manifest
-runner disk bake <name>      # build its qcow2 and record the image SHA-256
-runner disk pack <name>      # pack a disk into an AirDrop-able cartridge
+br disks                 # list the shelf (builtins + your disks) and attached cartridges
+br boot <name|url|path>  # power on a disk (restores saved RAM if present)
+br eject                 # cleanly power off the running VM (ACPI shutdown)
+br disk new <name>       # scaffold a new user disk manifest
+br disk bake <name>      # build its qcow2 and record the image SHA-256
+br disk pack <name>      # pack a disk into an AirDrop-able cartridge
 ```
 
 `br eject` performs a clean ACPI shutdown (it loops the power button and
@@ -235,12 +242,12 @@ same-host **RAM resume** is intentionally out of scope — we shut down cleanly
 instead of carrying a machine-bound memory image around.
 
 ```bash
-runner disk pack incus                 # build ./incus.sparseimage (runnable)
-runner disk pack incus --ship          # also build ./incus.dmg (compressed AirDrop artifact)
-runner boot ./incus.sparseimage        # mount + cold-boot the cartridge
-runner boot ./incus.dmg                # materialize a working copy, then boot it
-runner eject                           # clean ACPI shutdown, then detach the cartridge
-runner disks                           # also lists attached cartridges (booted/ejected)
+br disk pack incus                 # build ./incus.sparseimage (runnable)
+br disk pack incus --ship          # also build ./incus.dmg (compressed AirDrop artifact)
+br boot ./incus.sparseimage        # mount + cold-boot the cartridge
+br boot ./incus.dmg                # materialize a working copy, then boot it
+br eject                           # clean ACPI shutdown, then detach the cartridge
+br disks                           # also lists attached cartridges (booted/ejected)
 ```
 
 `br disk pack <name>` resolves a catalog/user disk, creates an APFS sparse
@@ -289,10 +296,10 @@ it — including a cartridge mounted somewhere the old directory scan never
 looked.
 
 ```bash
-runner instances                  # list running VMs with their ports and holder PIDs
-runner status --instance <name>   # --instance selects the VM (env BLADERUNNER_INSTANCE)
-runner stop --instance <name>     # orderly drain of one specific VM
-runner watch                      # notice inserted cartridges and offer to boot them
+br instances                  # list running VMs with their ports and holder PIDs
+br status --instance <name>   # --instance selects the VM (env BLADERUNNER_INSTANCE)
+br stop --instance <name>     # orderly drain of one specific VM
+br watch                      # notice inserted cartridges and offer to boot them
 ```
 
 `--instance` is a root flag, so it appears in every verb's help — but only
