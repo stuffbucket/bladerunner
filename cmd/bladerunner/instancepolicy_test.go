@@ -39,6 +39,7 @@ func TestEveryCommandDeclaresAnInstancePolicy(t *testing.T) {
 		"br shell":       instanceHonored,
 		"br ssh":         instanceHonored,
 		"br status":      instanceHonored,
+		"br restart":     instanceHonored,
 		"br stop":        instanceHonored,
 		"br upgrade":     instanceHonored,
 		"br web":         instanceHonored,
@@ -52,6 +53,7 @@ func TestEveryCommandDeclaresAnInstancePolicy(t *testing.T) {
 		// touch a VM at all.
 		"br boot":                  instanceRefused,
 		"br completion":            instanceRefused,
+		"br version":               instanceRefused,
 		"br completion bash":       instanceRefused,
 		"br completion fish":       instanceRefused,
 		"br completion powershell": instanceRefused,
