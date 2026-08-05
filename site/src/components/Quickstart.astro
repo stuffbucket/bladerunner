@@ -15,7 +15,7 @@ const steps = [
   {
     n: '02',
     title: 'Start the VM',
-    caption: 'First boot takes a few minutes while cloud-init installs and configures Incus. A startup report is printed and saved to ~/.local/state/bladerunner/startup-report.json.',
+    caption: 'The default guest image ships with Incus already installed, so first boot configures it rather than installing it: about a minute on a cold start, and that minute includes the one-time ~1&nbsp;GB image download. Later starts reuse the cached image and come up in seconds. A startup report is printed and saved to ~/.local/state/bladerunner/startup-report.json.',
     copy: 'br start',
     body: `<span class="tprompt">$ br</span><span class="targ"> start</span>`,
   },

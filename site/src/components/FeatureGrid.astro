@@ -25,10 +25,17 @@ import FeatureCard from './FeatureCard.astro';
         the Virtualization entitlement when you install from Homebrew.
       </FeatureCard>
 
-      <FeatureCard icon="boot" title="Debian 13 guest, Incus bootstrapped for you">
-        Boots a Debian 13 (trixie) genericcloud image and brings up the Incus daemon via cloud-init.
+      <FeatureCard icon="boot" title="Debian 13 guest with Incus already installed">
+        The default is a pre-baked Debian 13 (trixie) image with the Incus daemon baked in, verified
+        against its published checksum before it boots. First boot configures Incus instead of
+        installing it, so it runs no apt: about a minute from cold, including the one-time ~1 GB image
+        download, and seconds once that image is cached.
         <code class="chip">incus</code> and <code class="chip">incus-client</code> ship in trixie main, so
-        there are no third-party apt repos to trust. Ubuntu and other cloud images are reachable with
+        there are no third-party apt repos to trust. If the pre-baked image cannot be fetched or
+        verified, bladerunner warns and falls back to the stock Debian genericcloud image, where
+        cloud-init installs Incus on first boot and that boot takes several minutes;
+        <code class="chip"><span class="cmd">--debian-image</span></code> selects that fallback path on
+        purpose. Ubuntu and other cloud images are reachable with
         <code class="chip"><span class="cmd">--image-url</span></code>.
       </FeatureCard>
 

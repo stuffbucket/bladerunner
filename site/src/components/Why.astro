@@ -13,10 +13,10 @@ import StackDiagram from './StackDiagram.astro';
       bladerunner gives you the core of a <code class="chip"><span class="cmd">colima</span> --runtime incus</code>
       setup without the Lima/Colima orchestration layer underneath. Instead of stacking a VM manager on
       top of QEMU on top of your Mac, it talks to Apple’s Virtualization.framework directly:
-      architecture-aware Debian defaults, Incus bootstrapped via cloud-init, and SSH + the Incus API
-      forwarded to localhost over vsock. The result is fewer moving parts, a faster path to a working
-      Incus, and one extra trick neither tool offers — opening the Incus web dashboard already
-      authenticated with your SSH key.
+      architecture-aware Debian defaults, a pre-baked guest image that already has Incus installed,
+      and SSH + the Incus API forwarded to localhost over vsock. The result is fewer moving parts, a
+      faster path to a working Incus, and one extra trick neither tool offers — opening the Incus web
+      dashboard already authenticated with your SSH key.
     </p>
 
     <div class="reveal"><StackDiagram /></div>
