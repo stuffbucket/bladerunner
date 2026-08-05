@@ -32,18 +32,33 @@ jobs:
     runs-on: [self-hosted, macOS]
     timeout-minutes: 45
     steps:
+      # Guarded like the other macOS jobs. This one cannot protect against the
+      # failure it most needs to: no self-hosted runner is registered on this
+      # repo (the Mac and the signing secrets live in stuffbucket/macos-builder),
+      # so a dispatch QUEUES rather than landing anywhere, and a queued job runs
+      # no steps to warn from. timeout-minutes does not bound queue time either.
+      # Routing this through the builder like macos-build.yml is the real fix.
+      - name: Warn when this is not a macOS host
+        if: runner.os != 'macOS'
+        run: |
+          echo "::warning title=Boot smoke skipped::runner.os=${{ runner.os }}. The real-hardware boot smoke did NOT run; nothing was verified against Virtualization.framework."
+
       - uses: actions/checkout@v7
+        if: runner.os == 'macOS'
 
       - name: Set up Go
+        if: runner.os == 'macOS'
         uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Build + codesign br (Virtualization entitlement)
+        if: runner.os == 'macOS'
         run: make build && make sign
 
       - name: Run gated boot smoke test
+        if: runner.os == 'macOS'
         env:
           BLADERUNNER_E2E: "1"
           BLADERUNNER_E2E_BOOT_TIMEOUT: ${{ inputs.boot_timeout }}

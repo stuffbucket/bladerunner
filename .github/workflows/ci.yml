@@ -58,18 +58,37 @@ jobs:
     name: Build & Test (macOS)
     runs-on: macos-latest
     steps:
+      # Every step below is guarded on actually being on a macOS host, so this
+      # job SKIPS with a warning rather than failing when it is not. The
+      # aggregate `check` job fails only on 'failure' or 'cancelled', so a skip
+      # keeps pull requests unblocked — losing darwin coverage is worse than
+      # nothing, but blocking every merge on a runner that could not be
+      # allocated is worse still. One failed to allocate twice in a day here.
+      #
+      # The warning is the point. A silent skip would let the darwin half go
+      # unbuilt for weeks behind a green tick, which is the failure this repo
+      # keeps finding: a check whose coverage quietly became nothing.
+      - name: Warn when this is not a macOS host
+        if: runner.os != 'macOS'
+        run: |
+          echo "::warning title=macOS job skipped::runner.os=${{ runner.os }}, so the darwin build, unit tests and lint did NOT run. Darwin code is unverified for this commit."
+
       - uses: actions/checkout@v7
+        if: runner.os == 'macOS'
 
       - name: Set up Go
+        if: runner.os == 'macOS'
         uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Build
+        if: runner.os == 'macOS'
         run: go build -v ./...
 
       - name: Test (short - hardware tests need a signed binary and a real VM)
+        if: runner.os == 'macOS'
         run: go test -short -race ./...
 
       # golangci-lint analyses one build at a time, and the Lint job below runs
@@ -79,6 +98,7 @@ jobs:
       # bridges need the macOS SDK to analyse at all. Mirrors `make lint`, whose
       # counterpart `make lint-linux` covers the other half locally.
       - name: golangci-lint (darwin build)
+        if: runner.os == 'macOS'
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4

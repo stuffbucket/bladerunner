@@ -67,21 +67,44 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: macos-14
+    outputs:
+      # Whether the macOS tarball actually reached the release. The job itself
+      # reports success when it skips, so downstream work cannot use its result
+      # to decide — the Homebrew sync would go on to publish a formula pointing
+      # at an asset that was never built.
+      built: ${{ steps.mark.outputs.built }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.release-please.outputs.tag_name }}
     steps:
+      # Guarded like the CI macOS job: skip with a warning rather than fail when
+      # this is not a macOS host, so a runner that could not be allocated does
+      # not fail a release that has already been tagged and published.
+      #
+      # The warning is louder here because the consequence is worse. CI skipping
+      # leaves a commit unverified; this skipping leaves a PUBLISHED release with
+      # no macOS CLI tarball on it, which users hit rather than developers. It is
+      # recoverable — re-run this job against the existing tag — but only if
+      # somebody notices, which is what the annotation is for.
+      - name: Warn when this is not a macOS host
+        if: runner.os != 'macOS'
+        run: |
+          echo "::warning title=macOS release artifact NOT built::runner.os=${{ runner.os }}. Release ${TAG} has been published WITHOUT its macOS CLI tarball. Re-run this job against tag ${TAG} on a macOS host to attach it."
+
       - uses: actions/checkout@v7
+        if: runner.os == 'macOS'
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
           fetch-depth: 0
 
       - uses: actions/setup-go@v7
+        if: runner.os == 'macOS'
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Build release artifacts (goreleaser, no publish)
+        if: runner.os == 'macOS'
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
@@ -91,6 +114,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload tarball + checksums to the release
+        if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           ls -la dist/
@@ -99,10 +123,20 @@ jobs:
             dist/checksums.txt \
             --repo "$GITHUB_REPOSITORY" --clobber
 
+      # Set only after the upload succeeds, so this records that the asset is on
+      # the release rather than that the job reached the end.
+      - name: Mark the tarball as built
+        id: mark
+        if: runner.os == 'macOS'
+        run: echo "built=true" >> "$GITHUB_OUTPUT"
+
   homebrew:
     name: Sync Homebrew formula to the tap
     needs: [release-please, goreleaser]
-    if: needs.release-please.outputs.release_created == 'true'
+    # Also requires the tarball to exist. goreleaser reports success when it
+    # skips on a non-macOS host, so its result alone would let this publish a
+    # formula whose download URL 404s.
+    if: needs.release-please.outputs.release_created == 'true' && needs.goreleaser.outputs.built == 'true'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
