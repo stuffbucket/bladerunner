@@ -76,13 +76,13 @@ jobs:
           # Forking the builtin gives a per-arch disk with nothing else in it.
           sudo ./bin/br disk new ci-guest --from debian-trixie-gui
 
-          # Force the qemu-nbd + chroot mechanic: libguestfs 1.52 on the
-          # GitHub-hosted runners fails its appliance network with
-          # "passt exited with status 1", which broke every prior build (#45).
-          # The chroot path runs apt over the host network and avoids it.
+          # One mechanic exists — qemu-nbd + chroot — so there is nothing to
+          # select. It used to be forced here with --method native, because
+          # libguestfs 1.52 on the GitHub-hosted runners fails its appliance
+          # network with "passt exited with status 1" (#45). That appliance was
+          # never implemented in Go, so the flag has gone with it.
           sudo ./bin/br disk bake ci-guest \
             --arch ${{ matrix.arch }} \
-            --method native \
             --output "${OUT}"
 
           # The sidecar the release publishes. bake reports the same digest on
