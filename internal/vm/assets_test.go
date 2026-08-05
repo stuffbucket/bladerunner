@@ -463,3 +463,130 @@ func TestEnsureBaseImage_HostedMissingSidecarFallsBackToDebian(t *testing.T) {
 		t.Errorf("booted image = %q, want the Debian fallback bytes", string(data))
 	}
 }
+
+// The DEFAULT hosted path must use the shared cache, so a second instance
+// reuses the ~1 GB the first one already downloaded and converted.
+//
+// It did not. Only a disk manifest's pinned digest reached the cache; the
+// default wrote base-image.raw into each instance's own directory, so a machine
+// with two instances held two copies of identical bytes while the shared cache
+// sat empty. Measured on a real first boot, that duplicate cost 43s of download
+// and ~1 GB of disk per instance.
+func TestHostedImageIsSharedAcrossInstances(t *testing.T) {
+	data := []byte("pre-baked guest image, not actually a qcow2")
+	digest := sha256Hex(data)
+	srv := fakeServer(t, data, digest)
+	defer srv.Close()
+
+	state := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", state)
+
+	// Two instances, each with its own VM directory, as `br start --state-dir`
+	// and every disk slot produce.
+	first := &config.Config{
+		VMDir:               t.TempDir(),
+		BaseImageURL:        srv.URL + "/image",
+		UseHostedGuestImage: true,
+	}
+	second := &config.Config{
+		VMDir:               t.TempDir(),
+		BaseImageURL:        srv.URL + "/image",
+		UseHostedGuestImage: true,
+	}
+
+	got, err := ensureBaseImage(context.Background(), first)
+	if err != nil {
+		t.Fatalf("first instance: %v", err)
+	}
+	want := config.ImageCachePath(digest)
+	if got != want {
+		t.Fatalf("first instance resolved %q, want the shared cache %q", got, want)
+	}
+	if util.FileExists(filepath.Join(first.VMDir, "base-image.raw")) {
+		t.Error("the first instance still wrote a private base-image.raw beside the shared copy")
+	}
+
+	// The server is gone. A second instance can only succeed from the cache,
+	// which is the whole point.
+	srv.Close()
+	got2, err := ensureBaseImage(context.Background(), second)
+	if err != nil {
+		t.Fatalf("second instance could not reuse the cached image: %v", err)
+	}
+	if got2 != want {
+		t.Errorf("second instance resolved %q, want the shared cache %q", got2, want)
+	}
+	if util.FileExists(filepath.Join(second.VMDir, "base-image.raw")) {
+		t.Error("the second instance downloaded its own copy despite a populated cache")
+	}
+}
+
+// An unverifiable hosted image must still fall back rather than boot.
+//
+// Fetching the sidecar earlier changes WHEN the digest is learned, not whether
+// it is required. A missing sidecar has to reach the same Debian fallback it
+// always did, or this change would have quietly turned a fail-closed path into
+// a fail-open one.
+func TestHostedCacheStillFailsClosedWithoutASidecar(t *testing.T) {
+	data := []byte("hosted image with no sidecar")
+	debian := []byte("debian genericcloud fallback")
+	srv := hostedDebianServer(t, data, nil, debian)
+	defer srv.Close()
+
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
+
+	cfg := &config.Config{
+		VMDir:               t.TempDir(),
+		BaseImageURL:        srv.URL + "/hosted",
+		UseHostedGuestImage: true,
+		Arch:                "arm64",
+	}
+
+	got, err := ensureBaseImage(context.Background(), cfg)
+	if err == nil && got == config.ImageCachePath(sha256Hex(data)) {
+		t.Fatal("an unverified hosted image was cached and used; the sidecar must remain mandatory")
+	}
+}
+
+// A pointer to bytes that are gone, or to bytes whose verification never
+// finished, is not a cache hit.
+//
+// The offline path trusts the .ok stamp as the record that these bytes were
+// verified when stored. If a hit could be produced without it, an interrupted
+// download would become a bootable image.
+func TestCachedImageForURLRequiresBothFileAndStamp(t *testing.T) {
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
+	const url = "https://example.invalid/guest.qcow2"
+	digest := sha256Hex([]byte("some bytes"))
+
+	if _, ok := cachedImageForURL(url); ok {
+		t.Fatal("reported a hit with no pointer written")
+	}
+
+	rememberImageForURL(url, digest)
+	if _, ok := cachedImageForURL(url); ok {
+		t.Error("reported a hit for a pointer whose image file does not exist")
+	}
+
+	cachePath := config.ImageCachePath(digest)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("some bytes"), 0o600); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+	if _, ok := cachedImageForURL(url); ok {
+		t.Error("reported a hit for an image with no .ok stamp; verification may never have completed")
+	}
+
+	if err := os.WriteFile(cachePath+".ok", nil, 0o600); err != nil {
+		t.Fatalf("write stamp: %v", err)
+	}
+	got, ok := cachedImageForURL(url)
+	if !ok {
+		t.Fatal("no hit once both the image and its verification stamp exist")
+	}
+	if got != cachePath {
+		t.Errorf("hit resolved to %q, want %q", got, cachePath)
+	}
+}

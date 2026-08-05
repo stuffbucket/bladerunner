@@ -213,7 +213,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	// materialize the base image once into the shared content-addressed cache and
 	// reuse it across every disk slot.
 	if cfg.BaseImageExpectedSHA256 != "" {
-		return ensureCachedBaseImage(ctx, cfg)
+		return ensureCachedBaseImage(ctx, cfg, cfg.BaseImageExpectedSHA256)
 	}
 
 	path := filepath.Join(cfg.VMDir, "base-image.raw")
@@ -236,7 +236,7 @@ func ensureBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
 	// (--image-url / --debian-image) or a disk-manifest pin is honored verbatim
 	// and never triggers this fallback.
 	if cfg.UseHostedGuestImage {
-		return ensureHostedOrDebian(ctx, cfg, path)
+		return ensureHostedCachedOrDebian(ctx, cfg, path)
 	}
 
 	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", path)
@@ -275,6 +275,95 @@ var useDebianImage = config.UseDebianImage
 // shipped. It mutates cfg (via useDebianImage) when it falls back so the rest of
 // start (status reporting via UseHostedGuestImage) reflects the actual boot. The
 // chosen path is logged.
+// ensureHostedCachedOrDebian resolves the pre-baked hosted image THROUGH THE
+// SHARED CACHE, so a second instance reuses the ~1 GB an earlier one already
+// downloaded and converted rather than fetching its own copy.
+//
+// The cache has existed all along and only disk manifests reached it: the
+// default path wrote base-image.raw into each instance's own directory, so on a
+// machine that had downloaded the same bytes twice the shared cache sat empty.
+// One binary that sometimes shares and sometimes duplicates, depending on how
+// the VM was started, is harder to reason about than either behavior alone.
+//
+// TRUST IS UNCHANGED. The sidecar is fetched first only to learn the cache KEY.
+// A miss downloads and verifies against that same sidecar exactly as before; a
+// hit reuses bytes whose verification the .ok stamp records. Nothing is trusted
+// that was not trusted before, only fetched in a different order — and the cache
+// path is in fact stricter, verifying BEFORE conversion rather than after.
+//
+// An unreachable sidecar falls through to the per-instance path, which makes the
+// same Debian fallback it always did: a hosted image that cannot be verified is
+// not usable by either route.
+func ensureHostedCachedOrDebian(ctx context.Context, cfg *config.Config, path string) (string, error) {
+	sha, err := fetchSidecarSHA256(ctx, cfg.BaseImageURL)
+	if err != nil {
+		// OFFLINE, or the sidecar is briefly unreachable. The bytes may still be
+		// here from an earlier verified download, and refusing to use them
+		// because the network is down would make this a cache that only works
+		// when it is not needed. The pointer records which digest this URL
+		// resolved to last time, and the .ok stamp records that those bytes were
+		// verified when they were stored — so nothing unverified is reachable
+		// through this path.
+		if cached, ok := cachedImageForURL(cfg.BaseImageURL); ok {
+			logging.L().Warn("hosted image sidecar unreachable; using the previously verified cached image",
+				"url", cfg.BaseImageURL+".sha256", "reason", err, "path", cached)
+			return cached, nil
+		}
+		logging.L().Warn("hosted image sidecar unreachable and nothing cached for it",
+			"url", cfg.BaseImageURL+".sha256", "reason", err)
+		return ensureHostedOrDebian(ctx, cfg, path)
+	}
+
+	cached, cacheErr := ensureCachedBaseImage(ctx, cfg, sha)
+	if cacheErr == nil {
+		rememberImageForURL(cfg.BaseImageURL, sha)
+		return cached, nil
+	}
+
+	// A cache failure must not cost the user their VM: an unwritable cache
+	// directory is not a reason to refuse to boot.
+	logging.L().Warn("shared image cache unusable; falling back to a per-instance copy", "reason", cacheErr)
+	return ensureHostedOrDebian(ctx, cfg, path)
+}
+
+// imagePointerPath is where the digest an image URL last resolved to is
+// recorded, keyed by a hash of the URL so it is a safe filename.
+func imagePointerPath(imageURL string) string {
+	sum := sha256.Sum256([]byte(imageURL))
+	return filepath.Join(config.ImageCacheDir(), "by-url", hex.EncodeToString(sum[:])+".digest")
+}
+
+// rememberImageForURL records which cached entry this URL resolved to, so a
+// later run with no network can find the same bytes. Best effort: failing to
+// write a hint must never fail a boot that already succeeded.
+func rememberImageForURL(imageURL, sha256hex string) {
+	p := imagePointerPath(imageURL)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(p, []byte(sha256hex), 0o644)
+}
+
+// cachedImageForURL resolves an image URL to a cached entry without the
+// network, reporting false unless the entry AND its verification stamp are both
+// present. A pointer to bytes that are gone, or to bytes whose verification did
+// not complete, is not a hit.
+func cachedImageForURL(imageURL string) (string, bool) {
+	raw, err := os.ReadFile(imagePointerPath(imageURL))
+	if err != nil {
+		return "", false
+	}
+	digest := strings.TrimSpace(string(raw))
+	if digest == "" {
+		return "", false
+	}
+	cachePath := config.ImageCachePath(digest)
+	if !util.FileExists(cachePath) || !util.FileExists(cachePath+".ok") {
+		return "", false
+	}
+	return cachePath, true
+}
+
 func ensureHostedOrDebian(ctx context.Context, cfg *config.Config, path string) (string, error) {
 	logging.L().Info("downloading pre-baked guest image (default)", "url", cfg.BaseImageURL, "destination", path)
 	err := downloadFile(ctx, cfg.BaseImageURL, path)
@@ -328,11 +417,11 @@ func ensureHostedOrDebian(ctx context.Context, cfg *config.Config, path string) 
 // raw's own digest necessarily differs from the qcow2 digest, so it cannot be
 // re-verified on reuse, and re-hashing a multi-GB raw on every boot would be
 // wasteful.
-func ensureCachedBaseImage(ctx context.Context, cfg *config.Config) (string, error) {
-	cachePath := config.ImageCachePath(cfg.BaseImageExpectedSHA256)
+func ensureCachedBaseImage(ctx context.Context, cfg *config.Config, expectedSHA256 string) (string, error) {
+	cachePath := config.ImageCachePath(expectedSHA256)
 	okStamp := cachePath + ".ok"
 	if util.FileExists(cachePath) && util.FileExists(okStamp) {
-		logging.L().Info("using cached base image (content-addressed)", "path", cachePath, "sha256", cfg.BaseImageExpectedSHA256)
+		logging.L().Info("using cached base image (content-addressed)", "path", cachePath, "sha256", expectedSHA256)
 		return cachePath, nil
 	}
 
@@ -348,7 +437,7 @@ func ensureCachedBaseImage(ctx context.Context, cfg *config.Config) (string, err
 	_ = os.Remove(okStamp)
 
 	dlPath := cachePath + ".dl"
-	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", cachePath, "sha256", cfg.BaseImageExpectedSHA256)
+	logging.L().Info("downloading base image", "url", cfg.BaseImageURL, "destination", cachePath, "sha256", expectedSHA256)
 	if err := downloadFile(ctx, cfg.BaseImageURL, dlPath); err != nil {
 		_ = os.Remove(dlPath)
 		return "", err
@@ -361,11 +450,11 @@ func ensureCachedBaseImage(ctx context.Context, cfg *config.Config) (string, err
 		_ = os.Remove(dlPath)
 		return "", err
 	}
-	if !strings.EqualFold(got, cfg.BaseImageExpectedSHA256) {
+	if !strings.EqualFold(got, expectedSHA256) {
 		_ = os.Remove(dlPath)
-		return "", fmt.Errorf("base image SHA-256 mismatch: got %s, want %s", got, cfg.BaseImageExpectedSHA256)
+		return "", fmt.Errorf("base image SHA-256 mismatch: got %s, want %s", got, expectedSHA256)
 	}
-	logging.L().Info("base image SHA-256 verified (pinned by disk)", "sha256", got)
+	logging.L().Info("base image SHA-256 verified", "sha256", got)
 
 	if err := ensureRawDiskImage(dlPath); err != nil {
 		_ = os.Remove(dlPath)
