@@ -14,6 +14,10 @@ name: Release
 # All three live in one workflow gated on release-please's `release_created`
 # output, so no cross-workflow dispatch / GITHUB_TOKEN anti-loop concerns.
 #
+# A fourth job dispatches publish-update-manifest.yml, which cannot be inlined:
+# it waits up to 30 minutes for macos-builder's asynchronous upload. See the
+# comment on that job.
+#
 # The signed + notarized .app DMG is built off-repo: macos-build (below) just
 # triggers stuffbucket/macos-builder, which owns the runner + Apple secrets.
 
@@ -61,6 +65,39 @@ jobs:
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
     secrets: inherit
+
+  # Start the update-manifest pipeline for the release we just created.
+  #
+  # It has to be a dispatch. publish-update-manifest.yml also listens for
+  # `release: published`, but that event cannot reach it: the release above is
+  # created with GITHUB_TOKEN, and GitHub does not start workflow runs from
+  # events generated with that token — see
+  # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow
+  # ("events triggered by the GITHUB_TOKEN will not create a new workflow run"),
+  # whose stated exceptions include workflow_dispatch. So the same token that
+  # cannot raise a usable release event can still dispatch this.
+  #
+  # It is a dispatch rather than a `uses:` call because the target waits up to
+  # 30 minutes for macos-builder's asynchronous upload, and a called workflow
+  # would hold this run — and the release-${{ github.ref }} concurrency group —
+  # for that whole time.
+  update-manifest:
+    name: Start the update manifest pipeline
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch publish-update-manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish-update-manifest.yml \
+            --repo "${GITHUB_REPOSITORY}" --ref main -f "tag=${TAG}"
+          echo "Dispatched the update manifest pipeline for ${TAG}."
 
   goreleaser:
     name: Build + attach CLI tarball (macOS)

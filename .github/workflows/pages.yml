@@ -1,5 +1,18 @@
 name: Deploy landing site to GitHub Pages
 
+# This workflow also PUBLISHES THE UPDATE MANIFEST that `br self-update` reads
+# from https://stuffbucket.github.io/bladerunner/latest.json.
+#
+# The manifest is derived state, not committed state: the build below generates
+# site/public/latest.json from the release list with cmd/update-manifest and
+# Astro copies it into the deployed output. Nothing commits it, so there is no
+# push to the protected `main` branch to be rejected and no stale checkout to
+# race with. Every deploy recomputes it from the releases as they are now, so a
+# deploy for any reason repairs a manifest that drifted.
+#
+# publish-update-manifest.yml dispatches this workflow after a release's signed
+# updater assets arrive, which is the only reason a release needs a Pages deploy.
+
 on:
   push:
     branches: [main]
@@ -12,6 +25,12 @@ on:
       - 'site/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
+    inputs:
+      allow_downgrade:
+        description: "Publish the update manifest even if it is older than the one already live (rollback)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -48,6 +67,68 @@ jobs:
       # never a guest-image release. node:test, no extra dependency.
       - name: Test
         run: npm test
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      # Writes site/public/latest.json, which Astro copies into site/dist. The
+      # file is gitignored: it is generated on every build and never committed.
+      - name: Generate the update manifest
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The manifest this site currently serves. The generator compares the
+          # candidate against it and re-emits it rather than publishing anything
+          # older, so a release that is deleted or rolled back cannot move users
+          # backward.
+          LIVE_MANIFEST_URL: https://stuffbucket.github.io/bladerunner/latest.json
+          # Set only by a deliberate manual rollback (workflow_dispatch input).
+          ALLOW_DOWNGRADE: ${{ inputs.allow_downgrade }}
+        run: |
+          set -euo pipefail
+
+          bin="${RUNNER_TEMP}/update-manifest"
+          go build -o "${bin}" ./cmd/update-manifest
+
+          releases="${RUNNER_TEMP}/releases.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate > "${releases}"
+
+          tag="$("${bin}" select < "${releases}")"
+          if [ -z "${tag}" ]; then
+            echo "::notice::No release carries the updater assets, so this deploy publishes no latest.json."
+            exit 0
+          fi
+
+          # A fetch failure means nothing is published yet; leave the file absent
+          # so the generator has nothing to compare against.
+          live="${RUNNER_TEMP}/live.json"
+          curl -fsS --max-time 30 -o "${live}" "${LIVE_MANIFEST_URL}" \
+            || echo "Nothing published at ${LIVE_MANIFEST_URL} yet."
+
+          sig="$("${bin}" signature-name)"
+          gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${sig}" --dir "${RUNNER_TEMP}" --clobber
+
+          mkdir -p site/public
+          "${bin}" emit \
+            -signature "${RUNNER_TEMP}/${sig}" \
+            -live-manifest "${live}" \
+            -allow-downgrade="${ALLOW_DOWNGRADE:-false}" \
+            < "${releases}" > site/public/latest.json
+
+          published="$(jq -r '.version // empty' site/public/latest.json)"
+          if [ "${published}" = "${tag#v}" ]; then
+            echo "Publishing the update manifest for ${tag}."
+          else
+            echo "::warning::${tag} is older than the published ${published}; keeping the published manifest."
+          fi
+
+          # Log everything but the (long) signature.
+          jq 'del(.signature)' site/public/latest.json
 
       - name: Build
         env:

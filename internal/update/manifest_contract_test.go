@@ -7,40 +7,47 @@ import (
 	"testing"
 )
 
-// TestManifestContract guards the JSON contract that
-// .github/workflows/publish-update-manifest.yml emits into site/public/latest.json.
-// It constructs a manifest exactly as the workflow would (version derived from
-// the tag without a leading "v"; url is the https GitHub release download link;
-// signature is base64 of the whole minisign .sig file text) and asserts it
-// round-trips through the real Manifest parse + validate path. If the Go struct
-// or validation ever drifts from the workflow's shape, this fails.
+// TestManifestContract guards the JSON contract between the manifest generator
+// (BuildManifest, driven by cmd/update-manifest inside pages.yml) and the
+// updater that reads it. It runs the real builder over a release shaped like the
+// one macos-builder produces, then asserts the output round-trips through the
+// real Manifest parse + validate path. Because the generator itself is under
+// test here, the workflow cannot drift from the reader without this failing.
 func TestManifestContract(t *testing.T) {
-	// Build a realistic signature the way the workflow does: base64 of the whole
-	// minisign .sig file. kp.sign already returns exactly that form (see
-	// verify_test.go), which is what `base64 -w0 Bladerunner.app.tar.gz.sig`
-	// produces from tauri's .sig output. Using the real signer keeps the fixture
-	// honest — the same string also parses via parseSignature below.
+	// Build a realistic signature the way macos-builder emits it: kp.sign
+	// returns base64 of a whole minisign .sig file (see verify_test.go), which
+	// is what tauri writes beside the tarball. Decode it back to the file text,
+	// because that is what BuildManifest is handed — the bytes of the .sig file.
 	kp := newTestKeypair(t)
 	data := []byte("fake Bladerunner.app.tar.gz payload")
-	signature := kp.sign(data, "timestamp:1720000000\tfile:Bladerunner.app.tar.gz")
+	sigFile, err := base64.StdEncoding.DecodeString(kp.sign(data, "timestamp:1720000000\tfile:Bladerunner.app.tar.gz"))
+	if err != nil {
+		t.Fatalf("decode test signature: %v", err)
+	}
 
-	// The workflow strips a leading "v" from the tag for `version` and uses the
-	// asset's browser_download_url for `url`.
 	const tag = "v0.4.8"
 	wantVersion := strings.TrimPrefix(tag, "v")
-	url := "https://github.com/stuffbucket/bladerunner/releases/download/" + tag + "/Bladerunner.app.tar.gz"
+	url := "https://github.com/stuffbucket/bladerunner/releases/download/" + tag + "/" + UpdaterTarballName
 
-	// Emit the manifest JSON with the same keys `jq -n` writes in the workflow.
-	emitted := map[string]string{
-		"version":   wantVersion,
-		"url":       url,
-		"signature": signature,
-		"notes":     "Bladerunner " + tag,
-		"pub_date":  "2026-07-20T00:00:00Z",
+	rel := Release{
+		TagName:     tag,
+		Name:        "bladerunner " + tag,
+		PublishedAt: "2026-07-20T00:00:00Z",
+		Assets: []ReleaseAsset{
+			{Name: UpdaterTarballName, DownloadURL: url},
+			{Name: UpdaterSignatureName, DownloadURL: url + ".sig"},
+		},
 	}
-	raw, err := json.Marshal(emitted)
+	built, err := BuildManifest(rel, sigFile)
 	if err != nil {
-		t.Fatalf("marshal emitted manifest: %v", err)
+		t.Fatalf("BuildManifest: %v", err)
+	}
+
+	// Serialize it exactly as cmd/update-manifest writes latest.json, then read
+	// it back through the reader's own path.
+	raw, err := json.Marshal(built)
+	if err != nil {
+		t.Fatalf("marshal built manifest: %v", err)
 	}
 
 	// Parse through the real Manifest struct + validate(), the exact path
@@ -50,14 +57,14 @@ func TestManifestContract(t *testing.T) {
 		t.Fatalf("unmarshal into Manifest: %v", err)
 	}
 	if err := m.validate(); err != nil {
-		t.Fatalf("workflow-shaped manifest failed validate(): %v", err)
+		t.Fatalf("generated manifest failed validate(): %v", err)
 	}
 
 	if m.Version != wantVersion {
 		t.Errorf("version = %q, want %q (leading v must be stripped)", m.Version, wantVersion)
 	}
-	if !strings.HasPrefix(m.URL, "https://") {
-		t.Errorf("url = %q, want https:// prefix", m.URL)
+	if m.URL != url {
+		t.Errorf("url = %q, want %q", m.URL, url)
 	}
 	if m.Signature == "" {
 		t.Error("signature is empty")
@@ -72,18 +79,18 @@ func TestManifestContract(t *testing.T) {
 	// The signature field must be base64 of the whole minisign .sig file, not the
 	// raw multi-line .sig text. Confirm it decodes as base64 and parses via the
 	// real parseSignature — the same decode fetchManifest -> verifyTarball does.
-	// A raw (un-base64'd) .sig would fail here, catching a workflow regression.
+	// A raw (un-base64'd) .sig would fail here, catching a generator regression.
 	if _, err := base64.StdEncoding.DecodeString(m.Signature); err != nil {
-		t.Fatalf("signature is not valid base64 (workflow must base64 the .sig file): %v", err)
+		t.Fatalf("signature is not valid base64 (the generator must base64 the .sig file): %v", err)
 	}
 	if _, err := parseSignature(m.Signature); err != nil {
 		t.Fatalf("signature does not parse as a minisign .sig: %v", err)
 	}
 }
 
-// TestManifestContract_RejectsRawSigText asserts the negative: if the workflow
+// TestManifestContract_RejectsRawSigText asserts the negative: if the generator
 // mistakenly emitted the raw multi-line .sig text instead of base64 of it, the
-// updater would reject it. This documents why the workflow base64-encodes.
+// updater would reject it. This documents why BuildManifest base64-encodes.
 func TestManifestContract_RejectsRawSigText(t *testing.T) {
 	kp := newTestKeypair(t)
 	data := []byte("payload")

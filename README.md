@@ -87,6 +87,9 @@ anything and refuses to run on Homebrew-managed installs (use `brew upgrade`
 for those). It is distinct from `br upgrade`, which hands the *running* control
 server to a new binary already on disk.
 
+Until a release carries a signed updater bundle, there is no update manifest to
+read. `br self-update` says that there is no published update channel.
+
 ### Build from Source
 
 Requires Xcode Command Line Tools:

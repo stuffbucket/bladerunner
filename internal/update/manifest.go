@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,12 +17,23 @@ import (
 // DefaultManifestURL is the HTTPS location of the update manifest. It is a
 // package variable (not a const) so tests and the --manifest flag can point at
 // an httptest server. The production value is the GitHub Pages project site
-// (stuffbucket.github.io/bladerunner), where publish-update-manifest.yml commits
-// site/public/latest.json after each release.
+// (stuffbucket.github.io/bladerunner). The manifest is derived state: pages.yml
+// generates it from the release list at every site build with
+// cmd/update-manifest, which calls SelectRelease and BuildManifest in this
+// package. Nothing commits it.
+//
+// The URL answers 404 until a product release carries the updater assets. That
+// is the ordinary pre-first-release state, and fetchManifest reports it as
+// ErrNoUpdateChannel.
 //
 // NOTE: if a stuffbucket.co Pages custom domain is configured later, update this
 // URL and add a site/public/CNAME + the CNAME step in pages.yml to match.
 var DefaultManifestURL = "https://stuffbucket.github.io/bladerunner/latest.json"
+
+// ErrNoUpdateChannel reports that the manifest URL answers 404: no update
+// manifest is published. A user cannot act on this and it is not a network
+// fault, so it must not surface as a raw HTTP status.
+var ErrNoUpdateChannel = errors.New("update: no published update channel (no signed release is available yet)")
 
 // manifestTimeout bounds the manifest fetch so a hung server can't wedge the
 // command.
@@ -103,6 +115,9 @@ func fetchManifest(ctx context.Context, client *http.Client, rawURL string) (*Ma
 		return nil, fmt.Errorf("update: fetch manifest: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %s", ErrNoUpdateChannel, rawURL)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("update: manifest fetch: unexpected status %s", resp.Status)
 	}

@@ -34,10 +34,9 @@ func roundTripManifest() update.Manifest {
 
 // TestManifestFileRoundTrip writes a fully populated Manifest to disk as
 // latest.json, reads it back, and compares the whole struct. This is the shape
-// the publish-update-manifest.yml workflow commits to site/public/latest.json
-// and that fetchManifest parses after the download, so the write is the export
-// behavior and the read is the import behavior of every json-tagged field
-// (AGENTS.md 5.5).
+// cmd/update-manifest writes into the Pages build output and that fetchManifest
+// parses after the download, so the write is the export behavior and the read is
+// the import behavior of every json-tagged field (AGENTS.md 5.5).
 //
 // The test lives in package update_test on purpose (AGENTS.md 5.4): it sees
 // Manifest exactly as cmd/bladerunner and any future reader of the manifest
