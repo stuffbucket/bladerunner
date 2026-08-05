@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
@@ -40,6 +41,15 @@ func incusClientFromControl(ctl *control.Client, target resolvedInstance) (*incu
 	return incus.ConnectFromFiles(endpoint, cfg.ClientCertPath, cfg.ClientKeyPath)
 }
 
+// completionBudget bounds the Incus call behind shell completion.
+//
+// Completion gets a DEADLINE where `br exec` and `br ls` get a signal, because
+// the shell owns the keyboard while it is completing: there is no Ctrl-C to
+// press into a call that never answers, so the only bound that can exist here
+// is one the process sets itself. An unreachable API must cost the user a
+// pause, not their shell.
+const completionBudget = 3 * time.Second
+
 // instanceNameCompletion provides shell completion for instance name arguments.
 // Falls back to no completion if the VM is not running or the API is unreachable.
 func instanceNameCompletion(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
@@ -61,7 +71,9 @@ func instanceNameCompletion(_ *cobra.Command, args []string, _ string) ([]string
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError | cobra.ShellCompDirectiveNoFileComp
 	}
-	instances, err := client.ListInstances(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), completionBudget)
+	defer cancel()
+	instances, err := client.ListInstances(ctx)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError | cobra.ShellCompDirectiveNoFileComp
 	}

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -70,10 +69,19 @@ func runExec(cmdCobra *cobra.Command, args []string) error {
 		opts.Stdin = os.Stdin
 	}
 
+	// The signal registration is taken before the terminal is touched and
+	// released after it is put back: the deferred calls unwind in reverse, so
+	// restore() runs while the handler is still installed and the terminal is
+	// never left raw with the default die-on-interrupt disposition restored.
+	// interruptibleContext explains why this is not established in main.go, and
+	// how it coexists with Ctrl-C reaching an interactive guest shell.
+	ctx, stop := interruptibleContext()
+	defer stop()
+
 	restore := configureTTY(&opts)
 	defer restore()
 
-	exitCode, err := client.ExecInstance(context.Background(), instance, cmd, opts)
+	exitCode, err := client.ExecInstance(ctx, instance, cmd, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: exec %s: %v\n", instance, err)
 		return &exitError{code: 1}
@@ -86,6 +94,11 @@ func runExec(cmdCobra *cobra.Command, args []string) error {
 
 // configureTTY sets opts.Width/Height when running with --tty and puts the local terminal
 // into raw mode. It returns a function the caller must defer to restore terminal state.
+//
+// Raw mode is also what keeps Ctrl-C working for the guest: MakeRaw clears
+// ISIG, so the key stops raising SIGINT here and becomes a byte on the stdin
+// relay for the guest's own line discipline to act on. See
+// interruptibleContext.
 func configureTTY(opts *incus.ExecOptions) func() {
 	noop := func() {}
 	if !execFlags.tty {
