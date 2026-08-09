@@ -226,6 +226,39 @@ func TestBuildCloudInit_ShareHonorsGuestPath(t *testing.T) {
 	}
 }
 
+// TestBuildCloudInit_ShareReadOnlyMountsReadOnly is the guest half of #203. The
+// host-side VirtioFS export is what enforces read-only, but a guest that mounts
+// it rw fails at the first write with an error nobody can read; mounting ro
+// says what the cartridge asked for.
+func TestBuildCloudInit_ShareReadOnlyMountsReadOnly(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig()
+	cfg.ShareDir = "/some/host/dir"
+	cfg.ShareTag = config.DefaultShareTag
+	cfg.ShareReadOnly = true
+
+	userData, _ := BuildCloudInit(cfg, "")
+
+	wants := []string{
+		"Options=ro,nofail,_netdev", // the mount unit
+		config.DefaultShareTag + " " + config.DefaultShareGuestPath + " virtiofs ro,nofail,_netdev", // the fstab line
+	}
+	for _, want := range wants {
+		if !strings.Contains(userData, want) {
+			t.Errorf("a read-only share did not mount ro: missing %q\n---\n%s\n---", want, userData)
+		}
+	}
+
+	// The default stays read-write, so no ordinary cartridge changes.
+	rw := testConfig()
+	rw.ShareDir = "/some/host/dir"
+	rw.ShareTag = config.DefaultShareTag
+	rwData, _ := BuildCloudInit(rw, "")
+	if !strings.Contains(rwData, "Options=defaults,nofail,_netdev") {
+		t.Errorf("the default share is no longer read-write\n---\n%s\n---", rwData)
+	}
+}
+
 // TestBuildCloudInit_NoShareWhenDisabled verifies that with no share configured
 // (the default for plain start/boot) none of the share/ACPI machinery is emitted,
 // so non-cartridge boots are unchanged.

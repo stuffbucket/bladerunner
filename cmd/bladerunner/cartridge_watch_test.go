@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -107,6 +108,34 @@ func TestDecideForVolume(t *testing.T) {
 			},
 			wantVerdict: verdictWarn,
 			wantReason:  reasonUnreadable,
+			wantDetects: 1,
+		},
+		{
+			// Neither absence nor permission: a probe that could not be
+			// completed establishes nothing, so it is reported rather than
+			// filed as "not one of ours".
+			name: "a manifest probe that failed is not a negative",
+			disk: cartDisk,
+			detected: &cartridge.Detected{
+				Status: cartridge.StatusNotCartridge, Mountpoint: mount,
+				Reason: mount + " could not be checked for disk.json",
+				Err:    errors.New("too many levels of symbolic links"),
+			},
+			wantVerdict: verdictWarn,
+			wantReason:  mount + " could not be checked for disk.json",
+			wantDetects: 1,
+		},
+		{
+			// The one probe failure with nothing to say: the volume went away
+			// between the callback and the read.
+			name: "a volume that vanished is dropped in silence",
+			disk: cartDisk,
+			detected: &cartridge.Detected{
+				Status: cartridge.StatusNotCartridge, Mountpoint: mount,
+				Reason: mount + " cannot be inspected",
+				Err:    fmt.Errorf("stat %s: %w", mount, fs.ErrNotExist),
+			},
+			wantVerdict: verdictIgnore,
 			wantDetects: 1,
 		},
 		{
@@ -318,6 +347,111 @@ func TestDecideForVolumeIgnoresASecondMountOfABootedCartridge(t *testing.T) {
 	if got.Verdict != verdictIgnore || got.HeldBy != "demo" {
 		t.Fatalf("verdict = %q heldBy = %q, want ignore/demo (booting it again would run one image twice)",
 			got.Verdict, got.HeldBy)
+	}
+}
+
+// TestDecideForVolumeWarnsOnAnUnreadableCartridgeVolume drives the REAL
+// cartridge.Detect against a real directory, because that is where the #204
+// regression lived: every case in the table above hands decideForVolume a
+// hand-built Detected, so a detector that silently downgraded an unreadable
+// volume to "not a cartridge" was invisible to all of them.
+//
+// A volume named like a cartridge whose manifest cannot be read is the TCC
+// failure mode — an AirDropped cartridge in ~/Downloads inspected by a menubar
+// LaunchAgent with no Files and Folders grant — and staying silent about it
+// tells the user their cartridge is not a cartridge.
+func TestDecideForVolumeWarnsOnAnUnreadableCartridgeVolume(t *testing.T) {
+	tests := []struct {
+		name string
+		// stage breaks the manifest probe and reports whether it could.
+		stage      func(t *testing.T, mount string)
+		skipAsRoot bool
+		wantReason string
+	}{
+		{
+			// Readable, not searchable: the volume stats, its manifest does not.
+			name: "the volume cannot be traversed",
+			stage: func(t *testing.T, mount string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(mount, "disk.json"), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(mount, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(mount, 0o755) })
+			},
+			skipAsRoot: true,
+			wantReason: reasonUnreadable,
+		},
+		{
+			// Not a permission problem and not an absence either: the probe
+			// simply could not be completed, which is equally not a negative.
+			name: "the manifest probe fails for another reason",
+			stage: func(t *testing.T, mount string) {
+				t.Helper()
+				if err := os.Symlink("disk.json", filepath.Join(mount, "disk.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantReason: "could not be checked for disk.json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.skipAsRoot && os.Geteuid() == 0 {
+				t.Skip("root traverses a directory with no search bit, so the probe cannot fail")
+			}
+			mount := filepath.Join(t.TempDir(), "bladerunner-demo")
+			if err := os.MkdirAll(mount, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tt.stage(t, mount)
+
+			got := decideForVolume(diskarb.DiskInfo{
+				BSDName:    "disk9s1",
+				VolumeName: "bladerunner-demo",
+				VolumePath: mount,
+				VolumeKind: "apfs",
+			}, cartridge.Detect, nil)
+
+			if got.Verdict != verdictWarn {
+				t.Fatalf("verdict = %q reason = %q, want warn", got.Verdict, got.Reason)
+			}
+			if !strings.Contains(got.Reason, tt.wantReason) {
+				t.Errorf("reason = %q, want it to contain %q", got.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// The offer path must take its source from the ONE API that promises a usable
+// one. Re-deriving the precondition ("BackingImage is empty") beside a
+// BootSource that answered differently is how the two drifted apart in #206.
+func TestDecideForVolumeTakesItsSourceFromBootSource(t *testing.T) {
+	cartDisk := diskarb.DiskInfo{
+		BSDName:    "disk9s1",
+		VolumeName: "bladerunner-demo",
+		VolumePath: testCartridgeMount,
+		VolumeKind: "apfs",
+	}
+	offered := bootableDetected("demo")
+	got := decideForVolume(cartDisk, detectReturning(offered, nil, nil), nil)
+	if got.Verdict != verdictOffer || got.SourcePath != offered.BootSource() {
+		t.Fatalf("verdict = %q source = %q, want offer with BootSource %q",
+			got.Verdict, got.SourcePath, offered.BootSource())
+	}
+
+	// And a cartridge with no boot source is refused rather than offered a
+	// mountpoint no holder can attach.
+	blind := bootableDetected("demo")
+	blind.BackingImage = ""
+	refused := decideForVolume(cartDisk, detectReturning(blind, nil, nil), nil)
+	if refused.Verdict != verdictWarn || refused.SourcePath != "" {
+		t.Fatalf("verdict = %q source = %q, want warn with no source", refused.Verdict, refused.SourcePath)
+	}
+	if blind.BootSource() != "" {
+		t.Errorf("BootSource = %q, want empty so the watcher and the holder agree", blind.BootSource())
 	}
 }
 

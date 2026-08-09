@@ -381,6 +381,114 @@ func TestVerifyRejectsWrongKind(t *testing.T) {
 	}
 }
 
+// TestVerifyRejectsSymlinkedLayoutEntries is the #194 regression.
+//
+// The layout was validated with os.Stat, which FOLLOWS symbolic links, so a
+// required entry could be a link to anywhere on the host and still verify. That
+// breaks the one promise a cartridge makes — that it is self-contained — in the
+// direction that costs the most:
+//
+//   - a symlinked root.img has the VM write its whole disk through the
+//     cartridge boundary into an arbitrary host file;
+//   - a symlinked state/ redirects EFI variables and the cloud-init seed into a
+//     host directory;
+//   - a symlinked share/ hands the guest read-write access to unrelated host
+//     data under the name of a folder the user thinks lives on the cartridge.
+//
+// The links here are REAL symlinks, not paths spelled with "..": a lexical
+// check never sees one, because the escape happens in the filesystem.
+func TestVerifyRejectsSymlinkedLayoutEntries(t *testing.T) {
+	tests := []struct {
+		name     string
+		entry    string
+		wantWord string
+		// outside builds the host target the link escapes to, so each case
+		// proves the link would have RESOLVED rather than merely dangled.
+		outside func(t *testing.T, host string) string
+	}{
+		{
+			name:     "root.img links to a host file",
+			entry:    RootImageFile,
+			wantWord: RootImageFile,
+			outside: func(t *testing.T, host string) string {
+				t.Helper()
+				p := filepath.Join(host, "somebody-elses.img")
+				writeFixtureFile(t, p, "host bytes the guest must not own")
+				return p
+			},
+		},
+		{
+			name:     "state links to a host directory",
+			entry:    StateDirName,
+			wantWord: StateDirName,
+			outside:  mkHostDir,
+		},
+		{
+			name:     "share links to a host directory",
+			entry:    ShareDirName,
+			wantWord: ShareDirName,
+			outside:  mkHostDir,
+		},
+		{
+			name:     "disk.json links to a host file",
+			entry:    ManifestFile,
+			wantWord: ManifestFile,
+			outside: func(t *testing.T, host string) string {
+				t.Helper()
+				p := filepath.Join(host, "elsewhere.json")
+				writeFixtureFile(t, p, `{"name":"not-this-cartridge"}`)
+				return p
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := layoutCartridgeFixture(t)
+			host := t.TempDir()
+			target := tc.outside(t, host)
+
+			entry := filepath.Join(dir, tc.entry)
+			if err := os.RemoveAll(entry); err != nil {
+				t.Fatalf("remove %s: %v", entry, err)
+			}
+			if err := os.Symlink(target, entry); err != nil {
+				t.Fatalf("symlink %s -> %s: %v", entry, target, err)
+			}
+			// The link resolves: this is an escape, not a dangling entry that
+			// any existence check would have caught.
+			if _, err := os.Stat(entry); err != nil {
+				t.Fatalf("precondition: the symlink must resolve, got %v", err)
+			}
+
+			_, err := Verify(dir)
+			if !errors.Is(err, ErrNotCartridge) {
+				t.Fatalf("Verify = %v, want ErrNotCartridge: %s escapes the cartridge", err, tc.entry)
+			}
+			if !strings.Contains(err.Error(), tc.wantWord) {
+				t.Errorf("error %q does not name the offending entry %q", err, tc.wantWord)
+			}
+			if !strings.Contains(err.Error(), "symlink") {
+				t.Errorf("error %q does not say WHY the entry is rejected", err)
+			}
+			if IsCartridge(dir) {
+				t.Error("IsCartridge accepted a cartridge whose layout points outside itself")
+			}
+		})
+	}
+}
+
+// mkHostDir makes a populated directory outside the cartridge for a link to
+// escape to.
+func mkHostDir(t *testing.T, host string) string {
+	t.Helper()
+	p := filepath.Join(host, "host-directory")
+	if err := os.MkdirAll(p, cartridgeDirPerm); err != nil {
+		t.Fatalf("mkdir %s: %v", p, err)
+	}
+	writeFixtureFile(t, filepath.Join(p, "private.txt"), "host data")
+	return p
+}
+
 func TestVerifyOnMissingPath(t *testing.T) {
 	_, err := Verify(filepath.Join(t.TempDir(), "nope"))
 	if err == nil {

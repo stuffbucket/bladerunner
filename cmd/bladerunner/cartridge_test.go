@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,6 +311,40 @@ func TestEnsureCartridgeBootableRefusesARunningCartridge(t *testing.T) {
 	// An unrelated cartridge is unaffected.
 	if err := ensureCartridgeBootable(filepath.Join(downloads, "other"+cartridge.DMGExt), "other"); err != nil {
 		t.Fatalf("an unrelated cartridge was refused: %v", err)
+	}
+}
+
+// A claim that could not be PROBED is refused, and refused in different words.
+//
+// "held by another process; eject it first" is a sentence about a process that
+// does not exist when the probe never established one: the user goes looking
+// for a cartridge to eject, finds nothing, and never sees the permission or
+// filesystem error that actually stopped them. The refusal must name the cause.
+func TestEnsureCartridgeBootableReportsAnUnreadableClaim(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a mode-0 file, so the probe cannot fail")
+	}
+	root := t.TempDir()
+	t.Setenv("BLADERUNNER_STATE_DIR", root)
+	downloads := t.TempDir()
+	source := filepath.Join(downloads, "demo"+cartridge.DMGExt)
+
+	// The claim beside the cartridge, left unreadable — an AirDropped cartridge
+	// on a volume whose permissions this user does not own.
+	lock := filepath.Join(downloads, ".demo"+cartridge.SparseExt+".lock")
+	if err := os.WriteFile(lock, nil, 0o000); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+
+	err := ensureCartridgeBootable(source, "demo")
+	if err == nil {
+		t.Fatal("a boot whose claim could not be probed must be refused")
+	}
+	if errors.Is(err, errCartridgeAlreadyBooted) {
+		t.Errorf("error %q names a holder that was never identified", err)
+	}
+	if !strings.Contains(err.Error(), "cannot tell whether") || !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("error %q does not report the cause the user can act on", err)
 	}
 }
 

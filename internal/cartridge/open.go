@@ -147,6 +147,17 @@ func open(parent context.Context, r commandRunner, path string, opts OpenOptions
 		return nil, err
 	}
 
+	// The working copy EXISTS now, so it has a filesystem identity it did not
+	// have when the claim was first taken — and a hard link to it is a second
+	// name this boot must also own. Taking the claim again picks that up.
+	//
+	// A failure here keeps both the working copy and the claim, for the same
+	// reason the attach unwind below does: the file may be a live disk, and the
+	// claim is what stops the next boot converting over it.
+	if err := o.claim(); err != nil {
+		return nil, err
+	}
+
 	attachCtx, cancelAttach := context.WithTimeout(parent, attachTimeout)
 	defer cancelAttach()
 	mount, err := attach(attachCtx, r, attachRequest{
@@ -427,8 +438,8 @@ func (o *Opened) StillAttached() bool {
 }
 
 // ApplyTo roots a VM config inside the mounted cartridge: the bootable
-// root.img, EFI + cloud-init state under state/, and the read-write share under
-// share/.
+// root.img, EFI + cloud-init state under state/, and the share under share/
+// with the access the manifest asks for.
 //
 // It must be applied AFTER any manifest and flag overrides, so the cartridge's
 // own image and state always win — a cartridge is by definition self-contained.
@@ -452,10 +463,14 @@ func (o *Opened) ApplyTo(cfg *config.Config) {
 	cfg.EFIVarsPath = o.Layout.EFIVarsPath()
 	cfg.CloudInitDir = o.Layout.CloudInitDir()
 
-	// The read-write host<->guest share lives inside the cartridge too.
+	// The host<->guest share lives inside the cartridge too. It is read-write
+	// unless the manifest says otherwise, and when it says otherwise that has to
+	// reach the VMM: a cartridge asking for a read-only share is asking not to
+	// have its host directory written to.
 	cfg.ShareDir = o.Layout.ShareDir()
 	cfg.ShareTag = ShareTag(o.Manifest)
 	cfg.ShareGuestPath = ShareGuestPath(o.Manifest)
+	cfg.ShareReadOnly = ShareReadOnly(o.Manifest)
 }
 
 // GUI reports whether the cartridge's manifest asks for a GUI boot.
@@ -492,7 +507,18 @@ func WritesBack(path string, persist bool) bool {
 // demo.dmg` and `br boot demo.sparseimage` name the SAME working copy, as does
 // a second Finder mount of the same file under a different volume name. Nothing
 // derived from a mountpoint can see that — the mountpoint is chosen by macOS —
-// so the claim is keyed on the working-copy PATH and enforced by the kernel.
+// so the claim is keyed on the working copy and enforced by the kernel.
+//
+// "The same working copy" is TWO identities, not one, and a claim holds both:
+//
+//   - the canonical PATH, symlink-resolved. It is the only identity an image
+//     that does not exist yet can have, which is the case every .dmg boot
+//     starts in, and it is what makes the .dmg and .sparseimage spellings of
+//     one cartridge one claim across the moment the conversion creates the file.
+//   - the DEVICE and INODE, once the file exists. It is the only identity two
+//     hard links to one image share, and a path-keyed claim cannot see them:
+//     both spellings took their own lock file and both boots proceeded, which
+//     is the same live-disk destruction the claim was added to prevent.
 //
 // flock(2) is used rather than an O_EXCL marker file because the kernel drops
 // the lock when the holder dies, however it died. A crashed holder therefore
@@ -505,10 +531,26 @@ func WritesBack(path string, persist bool) bool {
 // image over the running VM's disk, so it is refused.
 var ErrCartridgeBusy = errors.New("cartridge is already booted by another process")
 
+// ErrClaimUnavailable reports that an exclusive claim could not be ESTABLISHED
+// — the lock file could not be opened, or the filesystem it lives on refused
+// the lock (EOPNOTSUPP on some network shares, EIO on failing hardware).
+//
+// It is deliberately distinct from ErrCartridgeBusy, and the difference is the
+// whole point: contention identifies a holder, and every other failure
+// identifies nothing at all. Reporting one as the other invents a process for
+// the user to go and eject, and hides the operational cause they can actually
+// fix. Both outcomes refuse the boot — a claim that was not established cannot
+// be held — but only one of them names a conflict.
+var ErrClaimUnavailable = errors.New("cartridge claim could not be established")
+
 const (
 	// lockExt is appended to the (hidden) working-copy file name to form the
 	// lock file, e.g. ".demo.sparseimage.lock" beside "demo.sparseimage".
 	lockExt = ".lock"
+	// identityLockPrefix names the identity lock file. It is spelled out rather
+	// than reduced to a bare number so a user who finds one beside their
+	// cartridge can tell what wrote it.
+	identityLockPrefix = "." + VolumePrefix
 	// lockFilePerm keeps the claim readable only by its owner; it records a PID
 	// and an instance name.
 	lockFilePerm = 0o600
@@ -540,38 +582,131 @@ func (h Holder) String() string {
 	}
 }
 
-// imageLock is a held claim on one working copy. The open file descriptor IS
-// the lock, so it must stay open for as long as the cartridge is.
-type imageLock struct {
-	path string
-	file *os.File
+// ClaimState is the three-valued outcome of probing a cartridge's boot claim.
+type ClaimState string
+
+const (
+	// ClaimFree means nothing holds the cartridge: no lock file, or one this
+	// process was able to lock and release.
+	ClaimFree ClaimState = "free"
+	// ClaimHeld means a live process holds it, and Claim.Holder names it as
+	// well as the lock record allowed.
+	ClaimHeld ClaimState = "held"
+	// ClaimIndeterminate means the question could not be answered: the lock
+	// file could not be opened or locked for a reason that identifies no
+	// holder. Claim.Err carries the cause. It is not "free" — treating it as
+	// free is what turns a filesystem failure into a second boot.
+	ClaimIndeterminate ClaimState = "indeterminate"
+)
+
+// Claim is the outcome of a Busy probe: whether a cartridge's boot claim is
+// held, by whom, and — when the question could not be answered — why not.
+type Claim struct {
+	// State is the three-valued verdict. Branch on this, never on Err.
+	State ClaimState
+	// Holder names the process holding the claim. Meaningful only when State is
+	// ClaimHeld, and best-effort even then: a holder that could not write its
+	// record still renders as "another process".
+	Holder Holder
+	// Err is why the probe could not be completed. Non-nil only when State is
+	// ClaimIndeterminate.
+	Err error
 }
 
-// lockPathFor returns the lock file guarding image: a hidden sibling of it, so
-// the claim lives on the same filesystem as the thing it protects and needs no
-// host state directory (a cartridge can be booted from anywhere, including a
-// removable volume).
+// Free reports whether the cartridge is known to be unclaimed. It is false for
+// both ClaimHeld and ClaimIndeterminate, which is the conservative reading: a
+// boot may only proceed on a positive answer.
+func (c Claim) Free() bool { return c.State == ClaimFree }
+
+// imageLock is a held claim on one working copy. The open file descriptors ARE
+// the locks, so they must stay open for as long as the cartridge is.
+//
+// There is more than one, because one image has more than one identity (see the
+// section comment above). A claim is the conjunction: every lock that can be
+// computed for the image is held, and losing any one of them releases all.
+type imageLock struct {
+	files map[string]*os.File
+}
+
+// flockFile takes an advisory lock on f. It is a variable so tests can inject
+// the errno values a real filesystem returns — contention, an unsupported
+// operation, an I/O failure — which is the only way to prove the three are told
+// apart, since no portable filesystem produces them on demand.
+var flockFile = func(f *os.File, how int) error {
+	return syscall.Flock(int(f.Fd()), how)
+}
+
+// isLockContention reports whether err is the kernel saying "somebody else
+// holds this lock". flock(2) answers EWOULDBLOCK for LOCK_NB contention and
+// nothing else does; every other errno describes a lock that was never taken,
+// which identifies no holder. EAGAIN is tested too because POSIX allows the
+// two to differ, even though darwin and linux define them equal.
+func isLockContention(err error) bool {
+	return errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)
+}
+
+// lockPathFor returns the path-keyed lock file guarding image: a hidden sibling
+// of it, so the claim lives on the same filesystem as the thing it protects and
+// needs no host state directory (a cartridge can be booted from anywhere,
+// including a removable volume).
 func lockPathFor(image string) string {
 	canonical := CanonicalImagePath(image)
 	return filepath.Join(filepath.Dir(canonical), "."+filepath.Base(canonical)+lockExt)
 }
 
-// claim takes the exclusive lock on this cartridge's working copy. It is a
-// no-op when a claim is already held, so it is safe to call twice.
+// identityLockPathFor returns the lock file keyed on the FILE image is, rather
+// than on the name it was reached by, or "" when there is no file to ask.
+//
+// Two hard links to one image are one disk under two names, and only the
+// device/inode pair says so. The lock is a sibling of the resolved image for
+// the same reason the path lock is: it must live on the filesystem it protects.
+// Two hard links in DIFFERENT directories of one filesystem therefore still get
+// two lock files — closing that would need a host-wide registry, which a
+// cartridge booted from a removable volume cannot rely on.
+func identityLockPathFor(image string) string {
+	canonical := CanonicalImagePath(image)
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "" // no file yet, so no identity to key on: the path claim stands alone
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(canonical),
+		fmt.Sprintf("%s%d-%d%s", identityLockPrefix, st.Dev, st.Ino, lockExt))
+}
+
+// lockPathsFor returns every lock file a claim on image must hold. The path
+// lock is always present; the identity lock joins it once the file exists.
+func lockPathsFor(image string) []string {
+	paths := []string{lockPathFor(image)}
+	if id := identityLockPathFor(image); id != "" && id != paths[0] {
+		paths = append(paths, id)
+	}
+	return paths
+}
+
+// claim takes the exclusive locks on this cartridge's working copy.
+//
+// It is safe to call more than once, and the second call is not a no-op: each
+// lock file is taken at most once, and any lock that has become computable
+// since is taken now. That is how the IDENTITY claim on the working copy of a
+// shipped .dmg is picked up — at the first call the file does not exist, so it
+// has no inode; by the time the conversion is done it does, and a hard link to
+// it could be booted from.
 func (o *Opened) claim() error {
-	if o == nil || o.lock != nil {
+	if o == nil {
 		return nil
 	}
-	lock, err := acquireImageLock(WorkingCopyPath(o.SourcePath), Holder{
+	if o.lock == nil {
+		o.lock = &imageLock{}
+	}
+	return o.lock.acquire(WorkingCopyPath(o.SourcePath), Holder{
 		PID:    os.Getpid(),
 		Name:   o.Name,
 		Source: o.SourcePath,
 	})
-	if err != nil {
-		return err
-	}
-	o.lock = lock
-	return nil
 }
 
 // releaseClaim drops the claim, if one is held. It is idempotent.
@@ -583,35 +718,73 @@ func (o *Opened) releaseClaim() {
 	o.lock = nil
 }
 
-// acquireImageLock locks image for holder, or fails with ErrCartridgeBusy
-// naming whoever holds it.
-func acquireImageLock(image string, holder Holder) (*imageLock, error) {
-	path := lockPathFor(image)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, lockFilePerm)
-	if err != nil {
-		return nil, fmt.Errorf("claim cartridge %s: %w", image, err)
+// acquire takes every lock identifying image that this claim does not already
+// hold. A failure on any one of them leaves the claim exactly as it was: the
+// locks taken by THIS call are dropped, so a partial claim never outlives the
+// attempt, while locks held from an earlier call are kept.
+func (l *imageLock) acquire(image string, holder Holder) error {
+	var taken []string
+	for _, path := range lockPathsFor(image) {
+		if _, held := l.files[path]; held {
+			continue
+		}
+		if err := l.lockOne(image, path, holder); err != nil {
+			l.releasePaths(taken)
+			return err
+		}
+		taken = append(taken, path)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		other, _ := readHolder(f)
-		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s is held by %s", ErrCartridgeBusy, image, other)
-	}
-	writeHolder(f, holder)
-	return &imageLock{path: path, file: f}, nil
+	return nil
 }
 
-// release closes the descriptor, which is what drops the kernel lock. The
+// lockOne opens and flocks one lock file, recording the holder inside it.
+func (l *imageLock) lockOne(image, path string, holder Holder) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, lockFilePerm)
+	if err != nil {
+		return fmt.Errorf("%w: claim cartridge %s: %w", ErrClaimUnavailable, image, err)
+	}
+	if err := flockFile(f, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		other, _ := readHolder(f)
+		_ = f.Close()
+		if isLockContention(err) {
+			return fmt.Errorf("%w: %s is held by %s", ErrCartridgeBusy, image, other)
+		}
+		return fmt.Errorf("%w: lock %s for cartridge %s: %w", ErrClaimUnavailable, path, image, err)
+	}
+	writeHolder(f, holder)
+	if l.files == nil {
+		l.files = make(map[string]*os.File)
+	}
+	l.files[path] = f
+	return nil
+}
+
+// release closes every descriptor, which is what drops the kernel locks. Each
 // record is blanked first so a later reader never attributes the image to a
-// process that has let go of it. The lock FILE is deliberately left behind:
-// unlinking it would let a second process create and lock a different inode
+// process that has let go of it. The lock FILES are deliberately left behind:
+// unlinking one would let a second process create and lock a different inode
 // for the same path while this one still believes it holds the claim.
 func (l *imageLock) release() {
-	if l == nil || l.file == nil {
+	if l == nil {
 		return
 	}
-	_ = l.file.Truncate(0)
-	_ = l.file.Close()
-	l.file = nil
+	for path := range l.files {
+		l.releasePaths([]string{path})
+	}
+}
+
+// releasePaths drops the named locks, which is how a partially taken claim is
+// unwound without touching the locks it already held.
+func (l *imageLock) releasePaths(paths []string) {
+	for _, path := range paths {
+		f, ok := l.files[path]
+		if !ok {
+			continue
+		}
+		_ = f.Truncate(0)
+		_ = f.Close()
+		delete(l.files, path)
+	}
 }
 
 // writeHolder records who holds the claim. Best effort: the lock is already
@@ -656,22 +829,45 @@ const maxHolderRecord = 4096
 // returned, so it exists to give a friendly refusal before a destructive step
 // (unmounting a volume, converting an image), never as the protection itself.
 // The protection is the claim Open takes, which is atomic.
-func Busy(sourcePath string) (Holder, bool) {
+//
+// The verdict is three-valued because the question has three answers. A lock
+// that is held names a holder the user can go and eject. A probe that could not
+// be COMPLETED names nobody: reporting it as held sends the user looking for a
+// process that does not exist, and reporting it as free is worse — it clears
+// the way for a second boot. Callers must branch on Claim.State, or use
+// Claim.Free when only "may I proceed?" matters.
+func Busy(sourcePath string) Claim {
 	if sourcePath == "" {
-		return Holder{}, false
+		return Claim{State: ClaimFree}
 	}
+	for _, path := range lockPathsFor(WorkingCopyPath(sourcePath)) {
+		if c := probeClaim(path); !c.Free() {
+			return c
+		}
+	}
+	return Claim{State: ClaimFree}
+}
+
+// probeClaim tests one lock file without disturbing it.
+func probeClaim(path string) Claim {
 	// Read-only, no O_CREATE: a probe must not litter a lock file beside an
 	// image nobody ever booted. No lock file means no holder, ever.
-	f, err := os.Open(lockPathFor(WorkingCopyPath(sourcePath)))
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Claim{State: ClaimFree}
+	}
 	if err != nil {
-		return Holder{}, false
+		return Claim{State: ClaimIndeterminate, Err: err}
 	}
 	defer func() { _ = f.Close() }()
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := flockFile(f, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if !isLockContention(err) {
+			return Claim{State: ClaimIndeterminate, Err: err}
+		}
 		holder, _ := readHolder(f)
-		return holder, true
+		return Claim{State: ClaimHeld, Holder: holder}
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return Holder{}, false
+	_ = flockFile(f, syscall.LOCK_UN)
+	return Claim{State: ClaimFree}
 }

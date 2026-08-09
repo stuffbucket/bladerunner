@@ -261,6 +261,13 @@ type Config struct {
 	// cartridge manifest's Share.GuestPath so a non-default path actually mounts
 	// there (not just reported).
 	ShareGuestPath string
+	// ShareReadOnly exports the share read-only, so the guest can read the host
+	// directory but not write to it. Defaults to false (read-write), which is
+	// what a cartridge's default share is. Only meaningful when ShareDir is set;
+	// set from a cartridge manifest's Share.ReadOnly, which is the only thing
+	// that makes that field mean anything — a manifest asking for a read-only
+	// share used to be parsed, preserved and then ignored.
+	ShareReadOnly bool
 	// HostListeners holds loopback listeners bound ahead of the services that
 	// use them (see the HostListeners type). Nil on a plain config, in which
 	// case every service binds its own address exactly as before.
