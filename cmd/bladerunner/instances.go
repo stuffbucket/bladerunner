@@ -80,9 +80,12 @@ type resolvedInstance struct {
 	// instance.ProtectionUnrecorded rather than as "protected".
 	Protection instance.Protection
 
-	// Running records that the control socket answered when the instance was
-	// discovered. It is always true for an implicitly resolved instance.
-	Running bool
+	// Liveness is where this instance sat on internal/instance's ladder when it
+	// was discovered: Serving (its control socket accepted a connection),
+	// ProcessOnly (no socket, but a live holder process is recorded for it), or
+	// Dead. It is deliberately not a boolean — the middle rung is what tells a
+	// wedged instance apart from one that is really gone.
+	Liveness instance.Liveness
 	// Explicit records that the user named this instance, so a verb may report
 	// "not running" instead of silently doing nothing.
 	Explicit bool
@@ -90,6 +93,20 @@ type resolvedInstance struct {
 	// default layout — exactly what every verb targeted before --instance
 	// existed.
 	Fallback bool
+}
+
+// isLive reports whether anything still holds this instance: either it is
+// serving or a live holder process is recorded for it. This is the rung a
+// data-safety guard needs — a wedged holder still has the disk image open.
+func (r resolvedInstance) isLive() bool {
+	return r.Liveness != instance.Dead
+}
+
+// isServing reports whether this instance's control socket accepted a
+// connection. Note that this is weaker than "will answer a request": a wedged
+// holder accepts and never replies.
+func (r resolvedInstance) isServing() bool {
+	return r.Liveness == instance.Serving
 }
 
 // isDefaultSlot reports whether this instance is the flat default layout rooted
@@ -120,18 +137,22 @@ func (r resolvedInstance) instanceName() string {
 // resolution policy can be tested against a temporary state dir without a live
 // control socket.
 type instanceScanner struct {
-	root    string
-	running func(stateDir string) bool
-	ports   func(stateDir string) instance.Ports
+	root string
+	// liveness places one candidate on the ladder. It is NOT a ping: resolution
+	// has to find a holder that is alive but wedged, and a ping cannot tell that
+	// apart from a holder that is gone. See cmd/bladerunner/liveness.go.
+	liveness func(r resolvedInstance) instance.Liveness
+	ports    func(stateDir string) instance.Ports
 }
 
 // defaultScanner is the scanner every verb uses: the real state dir, with
-// liveness and ports read from the control socket.
+// liveness read from the control socket and the start lock, and ports read from
+// the control socket.
 func defaultScanner() instanceScanner {
 	return instanceScanner{
-		root:    config.DefaultStateDir(),
-		running: func(stateDir string) bool { return control.NewClient(stateDir).IsRunning() },
-		ports:   livePorts,
+		root:     config.DefaultStateDir(),
+		liveness: livenessOf,
+		ports:    livePorts,
 	}
 }
 
@@ -223,17 +244,34 @@ func requireDefaultInstance(verb string) (string, error) {
 // resolve applies the selection policy:
 //
 //   - an explicitly named instance always wins, running or not;
-//   - exactly one running instance resolves implicitly (the single-VM case,
+//   - exactly one live instance resolves implicitly (the single-VM case,
 //     which is every existing install);
-//   - nothing running resolves to the flat default layout, so verbs report
+//   - nothing live resolves to the flat default layout, so verbs report
 //     "not running" exactly as they always have;
-//   - more than one running instance is an error that names the candidates.
+//   - more than one live instance is an error that names the candidates.
+//
+// "Live" is the liveness ladder, not a ping. This used to filter candidates by
+// a ping round trip, which meant a holder that was alive but wedged survived no
+// filter at all: nothing answered, so the resolver fell through to the flat
+// default with PID 0 and never read the registry entry that knew the answer.
+// The bare `br stop --force` that every unresponsive-VM message suggests then
+// acted on the wrong instance, and the wedged one could only be reached by a
+// user who already knew its name and typed --instance (issue #290).
+//
+// Candidates are taken from the strongest rung that has any. That keeps the
+// ambiguity error honest: a Serving instance is proof of a live listener,
+// whereas ProcessOnly rests on a recorded PID that the OS may since have
+// recycled, and a phantom of that kind must not make an otherwise unambiguous
+// selection ambiguous.
 func (s instanceScanner) resolve(name string) (resolvedInstance, error) {
 	if name != "" {
 		return s.resolveNamed(name)
 	}
-	running := s.runningInstances()
-	switch len(running) {
+	candidates := s.liveInstances()
+	if serving := servingOnly(candidates); len(serving) > 0 {
+		candidates = serving
+	}
+	switch len(candidates) {
 	case 0:
 		return resolvedInstance{
 			Name:     config.DefaultInstanceName,
@@ -242,10 +280,22 @@ func (s instanceScanner) resolve(name string) (resolvedInstance, error) {
 			Fallback: true,
 		}, nil
 	case 1:
-		return running[0], nil
+		return candidates[0], nil
 	default:
-		return resolvedInstance{}, s.ambiguousError(running)
+		return resolvedInstance{}, s.ambiguousError(candidates)
 	}
+}
+
+// servingOnly narrows a candidate list to the instances whose control socket
+// accepted a connection.
+func servingOnly(candidates []resolvedInstance) []resolvedInstance {
+	out := make([]resolvedInstance, 0, len(candidates))
+	for i := range candidates {
+		if candidates[i].isServing() {
+			out = append(out, candidates[i])
+		}
+	}
+	return out
 }
 
 // resolveNamed resolves an explicitly named instance: the registry first, then
@@ -308,11 +358,12 @@ func attachedCartridgeMountpoint(root, name string) (string, bool) {
 // mark stamps an explicitly selected instance with its liveness.
 func (s instanceScanner) mark(r resolvedInstance) resolvedInstance {
 	r.Explicit = true
-	r.Running = s.running(r.StateDir)
+	r.Liveness = s.liveness(r)
 	return r
 }
 
-// runningInstances returns every instance whose control socket answers: the
+// liveInstances returns every instance that something still holds — serving on
+// its control socket, or with a live holder process recorded for it: the
 // registry unioned with a scan of the legacy directory layout, deduplicated by
 // state dir and sorted by name.
 //
@@ -320,16 +371,19 @@ func (s instanceScanner) mark(r resolvedInstance) resolvedInstance {
 // only, so a VM started by an older binary (or one whose holder predates the
 // registry) would otherwise be invisible to a freshly upgraded CLI — and an
 // invisible VM cannot be stopped or ejected.
-func (s instanceScanner) runningInstances() []resolvedInstance {
+func (s instanceScanner) liveInstances() []resolvedInstance {
 	seen := make(map[string]bool)
 	out := make([]resolvedInstance, 0, 4)
 	add := func(r resolvedInstance) {
 		key := filepath.Clean(r.StateDir)
-		if r.StateDir == "" || seen[key] || !s.running(r.StateDir) {
+		if r.StateDir == "" || seen[key] {
+			return
+		}
+		r.Liveness = s.liveness(r)
+		if !r.isLive() {
 			return
 		}
 		seen[key] = true
-		r.Running = true
 		out = append(out, r)
 	}
 
@@ -422,7 +476,7 @@ func (s instanceScanner) ambiguousError(running []resolvedInstance) error {
 // unknownError reports that a named instance could not be found, listing what
 // is running instead.
 func (s instanceScanner) unknownError(name string) error {
-	running := s.runningInstances()
+	running := s.liveInstances()
 	if len(running) == 0 {
 		return fmt.Errorf("unknown instance %q (nothing is running)", name)
 	}
@@ -535,7 +589,7 @@ func runInstances(_ *cobra.Command, _ []string) error {
 		logging.L().Debug("pruned dead instance entries", "names", removed)
 	}
 
-	listings := scanner.listings(scanner.runningInstances())
+	listings := scanner.listings(scanner.liveInstances())
 	if jsonOutput {
 		return emitJSON(listings)
 	}
@@ -557,7 +611,7 @@ func (s instanceScanner) listings(running []resolvedInstance) []instanceListing 
 			Name:              r.Name,
 			Kind:              string(r.Kind),
 			StateDir:          r.StateDir,
-			Running:           r.Running,
+			Running:           r.isLive(),
 			PID:               r.PID,
 			Ports:             ports,
 			SourcePath:        r.SourcePath,

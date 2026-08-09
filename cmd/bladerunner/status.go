@@ -31,6 +31,40 @@ var statusCmd = &cobra.Command{
 	RunE:  runStatus,
 }
 
+// reportUnreachableStatus renders `br status` for an instance whose control
+// socket did not answer.
+//
+// A silent socket has two meanings and they need opposite reports. Nothing
+// holds the instance any more, which is "stopped" and is answered by 'br up';
+// or a holder is still alive and simply not replying — a wedge — in which case
+// the VM still owns its disk image, its forwarded ports and any attached
+// cartridge, 'br up' will refuse to start a second one, and the honest report
+// names 'br stop --force'. Calling both of them "stopped" is what left users
+// with a VM they could neither reach nor explain.
+func reportUnreachableStatus(target resolvedInstance, right *panel) error {
+	held := target.isLive() || instanceHeld(target.StateDir)
+
+	state := control.StatusStopped
+	if held {
+		state = control.StatusUnreachable
+	}
+	if jsonOutput {
+		return emitJSON(statusReport{Running: held, Status: state, Build: currentBuildInfo()})
+	}
+
+	left := newPanel("VM")
+	left.row("Status", errorf(state))
+	fmt.Println(title("Bladerunner Status"))
+	fmt.Println(renderPanels(left, right))
+	if held {
+		fmt.Println(subtle("  The holder is alive but is not answering. Terminate it with:"), command("br stop --force"))
+	} else {
+		fmt.Println(subtle("  Start the VM with:"), command("br up"))
+	}
+	fmt.Println()
+	return nil
+}
+
 func runStatus(_ *cobra.Command, _ []string) error {
 	target, err := resolveInstanceTarget()
 	if err != nil {
@@ -44,17 +78,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	right.row("Built", date)
 
 	if !client.IsRunning() {
-		if jsonOutput {
-			return emitJSON(statusReport{Running: false, Status: control.StatusStopped, Build: currentBuildInfo()})
-		}
-		left := newPanel("VM")
-		left.row("Status", errorf(control.StatusStopped))
-
-		fmt.Println(title("Bladerunner Status"))
-		fmt.Println(renderPanels(left, right))
-		fmt.Println(subtle("  Start the VM with:"), command("br up"))
-		fmt.Println()
-		return nil
+		return reportUnreachableStatus(target, right)
 	}
 
 	status, err := client.GetStatus()

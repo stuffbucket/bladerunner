@@ -50,7 +50,11 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	// Not running is not an error. Someone typing restart wants a running VM at
 	// the end of it, and refusing here would send them to a second command to
 	// reach the state they already asked for.
-	if control.NewClient(stateDir).IsRunning() {
+	//
+	// The gate is the liveness ladder, not a ping: a wedged holder answers
+	// nothing, so a ping-shaped gate would skip the stop and go straight to a
+	// start that the wedged holder's own start lock then refuses.
+	if instanceHeld(stateDir) {
 		if err := runStop(cmd, args); err != nil {
 			return fmt.Errorf("restart: stop: %w", err)
 		}

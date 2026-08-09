@@ -35,7 +35,6 @@ import (
 
 	"github.com/stuffbucket/bladerunner/internal/bootstage"
 	"github.com/stuffbucket/bladerunner/internal/config"
-	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/ui/board"
@@ -450,8 +449,13 @@ func printHolderNotice(pid int, stopCmd string) {
 // own ErrAlreadyRunning would be written to a holder log nobody is reading,
 // and the terminal would show a spawned pid followed by a wait that could only
 // end in a timeout.
+//
+// It asks the liveness ladder rather than pinging. A holder that is alive but
+// wedged replies to nothing, so a ping-shaped gate would let a second holder
+// through — and the second one would then fail on the start lock the first one
+// still owns, after the terminal had already reported a spawn.
 func alreadyRunningAt(stateDir string) error {
-	if !control.NewClient(stateDir).IsRunning() {
+	if !instanceHeld(stateDir) {
 		return nil
 	}
 	return explainHostError(fmt.Errorf("%w", vmhost.ErrAlreadyRunning))

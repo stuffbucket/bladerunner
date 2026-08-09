@@ -14,18 +14,24 @@ import (
 	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
-// testScanner builds a scanner rooted at root whose liveness probe answers true
-// only for the listed state dirs, so the resolution policy can be exercised
-// without a control socket.
+// testScanner builds a scanner rooted at root whose liveness probe reports
+// Serving only for the listed state dirs, so the resolution policy can be
+// exercised without a control socket.
 func testScanner(root string, running ...string) instanceScanner {
-	live := make(map[string]bool, len(running))
+	rungs := make(map[string]instance.Liveness, len(running))
 	for _, dir := range running {
-		live[filepath.Clean(dir)] = true
+		rungs[filepath.Clean(dir)] = instance.Serving
 	}
+	return testScannerWithRungs(root, rungs)
+}
+
+// testScannerWithRungs builds a scanner whose liveness probe answers from an
+// explicit state-dir-to-rung map. Anything absent is Dead.
+func testScannerWithRungs(root string, rungs map[string]instance.Liveness) instanceScanner {
 	return instanceScanner{
-		root:    root,
-		running: func(dir string) bool { return live[filepath.Clean(dir)] },
-		ports:   func(string) instance.Ports { return instance.Ports{SSH: 6022, API: 18443} },
+		root:     root,
+		liveness: func(r resolvedInstance) instance.Liveness { return rungs[filepath.Clean(r.StateDir)] },
+		ports:    func(string) instance.Ports { return instance.Ports{SSH: 6022, API: 18443} },
 	}
 }
 
@@ -182,14 +188,74 @@ func TestScannerResolvePolicy(t *testing.T) {
 			if want := tt.wantStateDir(root); got.StateDir != want {
 				t.Errorf("StateDir = %q, want %q", got.StateDir, want)
 			}
-			if got.Running != tt.wantRunning {
-				t.Errorf("Running = %v, want %v", got.Running, tt.wantRunning)
+			if got.isLive() != tt.wantRunning {
+				t.Errorf("isLive() = %v, want %v", got.isLive(), tt.wantRunning)
 			}
 			if got.Fallback != tt.wantFallback {
 				t.Errorf("Fallback = %v, want %v", got.Fallback, tt.wantFallback)
 			}
 		})
 	}
+}
+
+// TestResolveOnTheProcessOnlyRung holds the two halves of the middle rung.
+//
+// A wedged or still-booting instance is Serving-or-ProcessOnly and must be
+// resolvable, because it is the one a user has to reach in order to recover it.
+// But a ProcessOnly candidate rests on a recorded PID that the OS may since
+// have recycled, so it must never turn an otherwise unambiguous selection into
+// an ambiguity error: candidates come from the strongest rung that has any.
+func TestResolveOnTheProcessOnlyRung(t *testing.T) {
+	t.Run("a process-only instance resolves when nothing is serving", func(t *testing.T) {
+		root := t.TempDir()
+		booting := filepath.Join(root, "booting")
+		register(t, root, instance.Entry{Name: "booting", Kind: instance.KindDisk, StateDir: booting})
+
+		scanner := testScannerWithRungs(root, map[string]instance.Liveness{
+			filepath.Clean(booting): instance.ProcessOnly,
+		})
+		got, err := scanner.resolve("")
+		if err != nil {
+			t.Fatalf("resolve(\"\"): %v", err)
+		}
+		if got.Name != "booting" || got.Fallback {
+			t.Errorf("resolve(\"\") = %q (fallback=%v), want the process-only instance \"booting\"", got.Name, got.Fallback)
+		}
+	})
+
+	t.Run("a serving instance outranks a process-only one", func(t *testing.T) {
+		root := t.TempDir()
+		serving := filepath.Join(root, "serving")
+		stale := filepath.Join(root, "stale")
+		register(t, root, instance.Entry{Name: "serving", Kind: instance.KindDisk, StateDir: serving})
+		register(t, root, instance.Entry{Name: "stale", Kind: instance.KindDisk, StateDir: stale})
+
+		scanner := testScannerWithRungs(root, map[string]instance.Liveness{
+			filepath.Clean(serving): instance.Serving,
+			filepath.Clean(stale):   instance.ProcessOnly,
+		})
+		got, err := scanner.resolve("")
+		if err != nil {
+			t.Fatalf("resolve(\"\") = %v; a recycled PID must not make the selection ambiguous", err)
+		}
+		if got.Name != "serving" {
+			t.Errorf("resolve(\"\") = %q, want \"serving\"", got.Name)
+		}
+	})
+
+	t.Run("dead instances are not candidates", func(t *testing.T) {
+		root := t.TempDir()
+		gone := filepath.Join(root, "gone")
+		register(t, root, instance.Entry{Name: "gone", Kind: instance.KindDisk, StateDir: gone})
+
+		got, err := testScannerWithRungs(root, nil).resolve("")
+		if err != nil {
+			t.Fatalf("resolve(\"\"): %v", err)
+		}
+		if !got.Fallback {
+			t.Errorf("resolve(\"\") = %q, want the flat default fallback", got.Name)
+		}
+	})
 }
 
 func TestAmbiguityErrorNamesEveryCandidate(t *testing.T) {
@@ -258,8 +324,8 @@ func TestResolveFallsBackToLegacyLayoutWithEmptyRegistry(t *testing.T) {
 	if named.StateDir != slot {
 		t.Errorf("named resolve StateDir = %q, want %q", named.StateDir, slot)
 	}
-	if !named.Running {
-		t.Error("named resolve Running = false, want true")
+	if !named.isLive() {
+		t.Error("named resolve isLive() = false, want true")
 	}
 }
 
@@ -271,9 +337,9 @@ func TestRunningInstancesDeduplicatesRegistryAndLegacy(t *testing.T) {
 		Name: config.DefaultInstanceName, Kind: instance.KindFlat, StateDir: root, PID: os.Getpid(),
 	})
 
-	got := testScanner(root, root).runningInstances()
+	got := testScanner(root, root).liveInstances()
 	if len(got) != 1 {
-		t.Fatalf("runningInstances() = %d entries, want 1: %+v", len(got), got)
+		t.Fatalf("liveInstances() = %d entries, want 1: %+v", len(got), got)
 	}
 	if got[0].PID != os.Getpid() {
 		t.Errorf("PID = %d, want the registry value %d", got[0].PID, os.Getpid())
@@ -329,7 +395,7 @@ func TestInstanceListingsJSONShape(t *testing.T) {
 	})
 
 	scanner := testScanner(root, cart)
-	listings := scanner.listings(scanner.runningInstances())
+	listings := scanner.listings(scanner.liveInstances())
 	if len(listings) != 1 {
 		t.Fatalf("listings = %d, want 1", len(listings))
 	}
@@ -575,7 +641,7 @@ func TestInstanceListingsReportUnmountProtection(t *testing.T) {
 }`)
 
 	scanner := testScanner(root, cart)
-	listings := scanner.listings(scanner.runningInstances())
+	listings := scanner.listings(scanner.liveInstances())
 	if len(listings) != 1 {
 		t.Fatalf("listings = %d, want 1", len(listings))
 	}
@@ -614,7 +680,7 @@ func TestInstanceListingsOmitProtectionForNonCartridges(t *testing.T) {
 	register(t, root, instance.Entry{Name: "builder", Kind: instance.KindDisk, StateDir: slot})
 
 	scanner := testScanner(root, slot)
-	listings := scanner.listings(scanner.runningInstances())
+	listings := scanner.listings(scanner.liveInstances())
 	if len(listings) != 1 {
 		t.Fatalf("listings = %d, want 1", len(listings))
 	}

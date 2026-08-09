@@ -26,10 +26,17 @@ into it. Use 'br start' directly when you need to pass CPU/memory/image flags.`,
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
-	// If a VM is already running, don't try to start a second one (runStart
-	// would error) — just report and point at the next steps.
+	// If a VM already holds this state dir, don't try to start a second one
+	// (runStart would error) — just report and point at the next steps.
+	//
+	// Three answers, not two: it replies (report it), it does not reply but
+	// something still holds it (the wedge — name it and the way out), or nothing
+	// holds it (start one). The old gate asked only the first question, so a
+	// wedged holder read as "nothing there" and `br up` went on to a start that
+	// the wedged holder's own start lock refused.
 	if cfg, err := config.Default(startFlags.stateDir); err == nil {
-		if control.NewClient(cfg.VMDir).IsRunning() {
+		switch {
+		case control.NewClient(cfg.VMDir).IsRunning():
 			if jsonOutput {
 				return emitJSON(map[string]string{jsonFieldStatus: "already-running"})
 			}
@@ -37,6 +44,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 			fmt.Println(success("✓ VM is already running"))
 			printNextSteps()
 			return nil
+		case instanceHeld(cfg.VMDir):
+			return jsonOrError(unresponsiveError("the VM", cfg.VMDir))
 		}
 	}
 

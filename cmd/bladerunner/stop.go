@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/instance"
-	"github.com/stuffbucket/bladerunner/internal/logging"
 )
 
 var stopFlags struct {
@@ -160,18 +159,25 @@ func runStop(_ *cobra.Command, _ []string) error {
 // and PID alive" becomes true of an innocent process, and --force would
 // terminate it.
 //
-// The dial separates them. A live wedged holder accepts the connection — the
-// kernel completes it from the listen backlog even when nothing ever reads —
-// while a dead holder's leftover inode has no listener, so connect fails with
-// ECONNREFUSED. This is the same probe bindListener uses to decide whether a
-// socket it found is somebody's live claim.
+// The dial separates them, and it is the liveness ladder's own Serving rung
+// (internal/instance owns that probe; see livenessOf). A live wedged holder
+// accepts the connection — the kernel completes it from the listen backlog even
+// when nothing ever reads — while a dead holder's leftover inode has no
+// listener, so connect fails with ECONNREFUSED. This is the same probe
+// bindListener uses to decide whether a socket it found is somebody's live
+// claim.
+//
+// Serving alone is not enough to authorize a signal, and neither is a live PID:
+// the conjunction is the guard. That is the one place the three-rung ladder
+// does not fit on its own, because the ladder short-circuits at Serving and
+// never reaches the PID probe.
 //
 // Getting this wrong is worse than it looks, because the surrounding behavior
 // funnels users into it: acquireStartLock sees the same recycled PID and refuses
 // `br start` with ErrInstanceLocked, which sends them straight to --force.
 func stopUnreachable(target resolvedInstance, socketPath string) error {
 	pid := holderPID(target)
-	if !socketAccepting(socketPath) || !instance.ProcessAlive(pid) {
+	if livenessOf(target) != instance.Serving || !instance.ProcessAlive(pid) {
 		return jsonOrError(fmt.Errorf("VM is not running"))
 	}
 	if !stopFlags.force {
@@ -183,23 +189,6 @@ func stopUnreachable(target resolvedInstance, socketPath string) error {
 		fmt.Printf("Control socket is not answering; holder process %d is still alive.\n", pid)
 	}
 	return forceTerminate(socketPath, pid)
-}
-
-// holderPID returns the PID of the process holding target, taken from a source
-// that does not need the control socket to answer.
-//
-// The start lock comes first: it lives next to the socket, is written before the
-// socket is bound and removed after it is cleaned up, so it names the process
-// that owns THIS socket. The registry entry is the fallback for a holder that
-// could not take a lock (see control.LockOwnerPID). Zero means unknown, which
-// forceTerminate already refuses to signal.
-func holderPID(target resolvedInstance) int {
-	pid, err := control.LockOwnerPID(target.StateDir)
-	if err == nil {
-		return pid
-	}
-	logging.L().Debug("no control lock owner", "stateDir", target.StateDir, "error", err)
-	return target.PID
 }
 
 // drainBudget converts a --timeout value in seconds into the budget the guest
@@ -347,19 +336,4 @@ func cleanupSocket(socketPath string) {
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) && !jsonOutput {
 		fmt.Printf("note: could not remove stale control socket %s: %v\n", socketPath, err)
 	}
-}
-
-// socketAccepting reports whether something is listening on socketPath.
-//
-// A successful connect is the only evidence separating a wedged holder from a
-// dead one's leftover inode. It is deliberately not followed by a request: a
-// wedged holder accepts and never answers, and that is exactly the state this
-// has to report as live.
-func socketAccepting(socketPath string) bool {
-	conn, err := control.DefaultTransport.Dial(socketPath, control.SocketCheckTimeout)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }

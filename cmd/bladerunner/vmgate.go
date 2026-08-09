@@ -93,6 +93,13 @@ func bootArgument(target resolvedInstance) string {
 // 'br boot' owns that. The raw control-socket dial failure is logged, never
 // printed, so the terminal stays clean.
 //
+// A ping that fails has two meanings and only one of them is "not running". The
+// other is a holder that is alive but wedged, which still owns the disk image,
+// the forwarded ports and any attached cartridge — so the offer to start it is
+// refused (a second holder would only collide with the first one's start lock)
+// and the report names the wedge and 'br stop --force' instead of claiming
+// nothing is there.
+//
 // Commands that need a VM funnel through requireRunningTarget, which resolves
 // --instance and then calls this, rather than touching the control client
 // directly.
@@ -105,6 +112,9 @@ func requireRunningVM(target resolvedInstance) (*control.Client, error) {
 	logging.L().Debug("VM control socket unreachable; VM not running",
 		"instance", target.instanceName(), "socket", control.SocketPath(target.StateDir))
 
+	if instanceHeld(target.StateDir) {
+		return nil, unresponsiveError(unresponsiveLabel(target), target.StateDir)
+	}
 	if !target.isDefaultSlot() || !interactiveTerminal() || !confirmStartVM() {
 		return nil, notRunningError(target)
 	}
@@ -112,6 +122,15 @@ func requireRunningVM(target resolvedInstance) (*control.Client, error) {
 		return nil, err
 	}
 	return client, nil
+}
+
+// unresponsiveLabel names the target of an unresponsive-VM report the way the
+// user addressed it.
+func unresponsiveLabel(target resolvedInstance) string {
+	if target.isDefaultSlot() {
+		return "the default VM"
+	}
+	return fmt.Sprintf("instance %q (%s)", target.instanceName(), target.Kind)
 }
 
 // interactiveTerminal reports whether both stdin and stdout are TTYs, so a

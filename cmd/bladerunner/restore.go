@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
-	"github.com/stuffbucket/bladerunner/internal/control"
 )
 
 var restoreFlags struct {
@@ -38,7 +37,9 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return jsonOrError(err)
 	}
-	if control.NewClient(stateDir).IsRunning() {
+	// isLive, not a ping: restoring writes over the disk image and EFI state of
+	// the instance in that state dir, and a wedged holder still has them open.
+	if instanceHeld(stateDir) {
 		return jsonOrError(fmt.Errorf("VM is already running; stop it first ('br stop') before restoring"))
 	}
 

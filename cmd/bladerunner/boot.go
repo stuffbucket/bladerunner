@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/cartridge"
 	"github.com/stuffbucket/bladerunner/internal/config"
-	"github.com/stuffbucket/bladerunner/internal/control"
 	"github.com/stuffbucket/bladerunner/internal/disk"
 	"github.com/stuffbucket/bladerunner/internal/util"
 )
@@ -281,9 +280,11 @@ func runBoot(cmd *cobra.Command, args []string) error {
 
 	baseDir := diskSlotDir(m.Name)
 
-	// Refuse to boot a disk that is already running in its slot (the gate is
-	// per-socket, and each slot has its own control socket via baseDir).
-	if control.NewClient(baseDir).IsRunning() {
+	// Refuse to boot a disk that is already held in its slot (the gate is
+	// per-socket, and each slot has its own control socket via baseDir). The
+	// gate is the liveness ladder, not a ping: a wedged holder answers nothing
+	// and still owns the slot's disk image.
+	if instanceHeld(baseDir) {
 		return jsonOrError(fmt.Errorf("disk %q is already booted (use 'br eject' first)", m.Name))
 	}
 

@@ -107,7 +107,7 @@ func resolveEjectSlot(name string) (baseDir, slotName string, err error) {
 		return ejectSlotDirForName(name), name, nil
 	}
 
-	found := scanner.runningInstances()
+	found := scanner.liveInstances()
 	switch len(found) {
 	case 0:
 		return "", "", fmt.Errorf("no booted VM to eject")
