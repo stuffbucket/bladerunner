@@ -43,7 +43,6 @@ func withBakeFlags(t *testing.T, out string) {
 	diskBakeFlags.arch = "arm64"
 	diskBakeFlags.output = out
 	diskBakeFlags.size = 8
-	diskBakeFlags.release = "trixie"
 	diskBakeFlags.timeoutMin = 1
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 }

@@ -180,7 +180,13 @@ This is a host-side developer action. It needs qemu-img, and the mechanic it
 selects decides the rest: the native path wants Linux, root and an nbd device;
 the libguestfs path wants neither root nor a device but does want a working
 appliance. Builtin disks are read-only; fork one first with
-'br disk new <name> --from <builtin>'.`,
+'br disk new <name> --from <builtin>'.
+
+The Debian release is not selectable. This builder owns Debian Trixie alone:
+the base image name, the optional Incus UI suite, and the package and service
+assumptions in the recipe are all Trixie's. The exact image and its reviewed
+digest come from internal/imagebuild, which is the one place a release move is
+made.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDiskBake,
 }
@@ -197,7 +203,6 @@ var diskBakeFlags struct {
 	output     string
 	arch       string
 	size       int
-	release    string
 	timeoutMin int
 }
 
@@ -211,7 +216,6 @@ func init() {
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.output, "output", "", "Output qcow2 path (default: <disks-dir>/<name>-<arch>.qcow2)")
 	diskBakeCmd.Flags().StringVar(&diskBakeFlags.arch, "arch", runtime.GOARCH, "Target architecture to build")
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.size, "size", defaultBakeSizeGiB, "Working image size the base is grown to before customizing")
-	diskBakeCmd.Flags().StringVar(&diskBakeFlags.release, "debian-release", "trixie", "Debian release to build from")
 	diskBakeCmd.Flags().IntVar(&diskBakeFlags.timeoutMin, "timeout", defaultBakeTimeoutMin, "Build timeout in minutes")
 
 	diskCmd.AddCommand(diskNewCmd, diskBakeCmd)

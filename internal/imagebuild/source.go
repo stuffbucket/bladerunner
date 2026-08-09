@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/httpfetch"
 )
 
 // Where the guest image starts from.
@@ -37,6 +39,12 @@ const (
 // megabytes, so this is generous rather than tight; its job is to stop a
 // wedged connection from hanging a build forever.
 const downloadTimeout = 30 * time.Minute
+
+// downloadStallTimeout bounds time WITHOUT PROGRESS inside that window. The
+// outer deadline alone lets a peer trickle one byte an hour for half an hour
+// before anything notices; this reports the wedge in a minute and says which
+// kind of failure it was. It is a var only so a test can shorten it.
+var downloadStallTimeout = httpfetch.StallTimeout
 
 // Manifest scanning limits. Debian writes one short line per file, but a long
 // line should widen the buffer rather than silently truncate the map.
@@ -177,15 +185,16 @@ func FetchBase(ctx context.Context, r Release, dest, baseURL string) error {
 //
 // The digest is computed while streaming rather than by re-reading the file,
 // so the bytes that were checked are exactly the bytes that were stored.
+//
+// Two bounds apply. The outer context deadline caps the whole fetch, and the
+// stall watchdog caps how long the peer may send nothing — the second is what
+// distinguishes a slow mirror from a wedged one, and it reports in a minute
+// rather than in half an hour.
 func downloadTo(ctx context.Context, url string, w io.Writer) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
-	if err != nil {
-		return "", fmt.Errorf("build a request for %s: %w", url, err)
-	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpfetch.Get(ctx, httpfetch.StreamingClient(), url, downloadStallTimeout)
 	if err != nil {
 		return "", fmt.Errorf("fetch %s: %w", url, err)
 	}

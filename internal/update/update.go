@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/stuffbucket/bladerunner/internal/httpfetch"
 )
 
 // productionPublicKey is the pinned Ed25519 public key (minisign/tauri format,
@@ -75,7 +77,7 @@ func (o *Options) httpClient() *http.Client {
 	if o.HTTPClient != nil {
 		return o.HTTPClient
 	}
-	return &http.Client{Timeout: downloadTimeout}
+	return httpfetch.Client(downloadTimeout)
 }
 
 func (o *Options) execPath() (string, error) {

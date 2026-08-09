@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/httpfetch"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/oidc"
 )
@@ -351,7 +352,10 @@ func loadSSHSigner(keyPath string) (ssh.Signer, error) {
 
 // --- small HTTP helpers --------------------------------------------------
 
-func httpClient() *http.Client { return &http.Client{Timeout: webHTTPTimeout} }
+// httpClient builds this command's client through internal/httpfetch, the
+// owner of outbound HTTP budgets, so the loopback calls here carry the same
+// header bound as every other fetch in the tree.
+func httpClient() *http.Client { return httpfetch.Client(webHTTPTimeout) }
 
 func httpGetJSON(rawURL string, out any) error {
 	resp, err := httpClient().Get(rawURL) //nolint:noctx // short-lived loopback CLI call

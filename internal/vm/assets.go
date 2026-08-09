@@ -17,8 +17,27 @@ import (
 	"time"
 
 	"github.com/stuffbucket/bladerunner/internal/config"
+	"github.com/stuffbucket/bladerunner/internal/httpfetch"
 	"github.com/stuffbucket/bladerunner/internal/logging"
 	"github.com/stuffbucket/bladerunner/internal/util"
+)
+
+// Network budgets for the two guest-image fetches. They are package vars, not
+// constants, only so a test can shorten them: a test that had to wait out the
+// production budget would either be skipped or would itself be the hang it is
+// meant to catch.
+var (
+	// sidecarTimeout is a FLAT deadline on the whole sidecar exchange. The
+	// sidecar is a single 64-character digest, it is fetched before anything
+	// else on a cold boot, and a stalled one hangs the boot with no output at
+	// all — so total duration is the right bound and it can be tight.
+	sidecarTimeout = 30 * time.Second
+
+	// downloadStallTimeout bounds time WITHOUT PROGRESS on a base image, which
+	// is roughly a gigabyte. A flat deadline is the wrong tool here: it would
+	// cap total transfer time and break an honest download over a slow link,
+	// while still letting a wedged peer trickle bytes underneath it forever.
+	downloadStallTimeout = httpfetch.StallTimeout
 )
 
 // fetchSidecarSHA256 fetches a "<url>.sha256" sidecar and returns the
@@ -28,11 +47,8 @@ import (
 // 404s (caller decides whether that's acceptable).
 func fetchSidecarSHA256(ctx context.Context, imageURL string) (string, error) {
 	sidecarURL := imageURL + ".sha256"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sidecarURL, http.NoBody)
-	if err != nil {
-		return "", fmt.Errorf("create sidecar request: %w", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
+	// No stall watchdog: the flat client deadline already covers this body.
+	resp, err := httpfetch.Get(ctx, httpfetch.Client(sidecarTimeout), sidecarURL, 0)
 	if err != nil {
 		return "", fmt.Errorf("fetch sidecar checksum: %w", err)
 	}
@@ -663,12 +679,11 @@ func convertQcow2ToRaw(ctx context.Context, qcow2Path string) error {
 
 func downloadFile(ctx context.Context, url, path string) error {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
-	if err != nil {
-		return fmt.Errorf("create download request: %w", err)
-	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// The image is roughly a gigabyte, so the bound is on silence rather than
+	// on total duration: the streaming client carries no flat deadline and the
+	// watchdog abandons the transfer if the peer stops sending.
+	resp, err := httpfetch.Get(ctx, httpfetch.StreamingClient(), url, downloadStallTimeout)
 	if err != nil {
 		return fmt.Errorf("download base image: %w", err)
 	}
