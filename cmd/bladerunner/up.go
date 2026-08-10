@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
 // upCmd is the single memorable entry verb. It brings a VM up with sensible
@@ -30,12 +31,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// (runStart would error) — just report and point at the next steps.
 	//
 	// Three answers, not two: it replies (report it), it does not reply but
-	// something still holds it (the wedge — name it and the way out), or nothing
-	// holds it (start one). The old gate asked only the first question, so a
-	// wedged holder read as "nothing there" and `br up` went on to a start that
-	// the wedged holder's own start lock refused.
+	// something still holds it (name the state and the remedy for its rung), or
+	// nothing holds it (start one). The old gate asked only the first question,
+	// so a wedged holder read as "nothing there" and `br up` went on to a start
+	// that the wedged holder's own start lock refused.
 	if cfg, err := config.Default(startFlags.stateDir); err == nil {
-		switch {
+		switch rung := livenessAt(cfg.VMDir); {
 		case control.NewClient(cfg.VMDir).IsRunning():
 			if jsonOutput {
 				return emitJSON(map[string]string{jsonFieldStatus: "already-running"})
@@ -44,8 +45,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 			fmt.Println(success("✓ VM is already running"))
 			printNextSteps()
 			return nil
-		case instanceHeld(cfg.VMDir):
-			return jsonOrError(unresponsiveError("the VM", cfg.VMDir))
+		case rung != instance.Dead:
+			return jsonOrError(heldError("the VM", cfg.VMDir, rung, holderPIDAt(cfg.VMDir)))
 		}
 	}
 

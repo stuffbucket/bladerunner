@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 	"github.com/stuffbucket/bladerunner/internal/ui"
 	"github.com/stuffbucket/bladerunner/internal/vm"
 )
@@ -34,15 +35,20 @@ var statusCmd = &cobra.Command{
 // reportUnreachableStatus renders `br status` for an instance whose control
 // socket did not answer.
 //
-// A silent socket has two meanings and they need opposite reports. Nothing
-// holds the instance any more, which is "stopped" and is answered by 'br up';
-// or a holder is still alive and simply not replying — a wedge — in which case
-// the VM still owns its disk image, its forwarded ports and any attached
-// cartridge, 'br up' will refuse to start a second one, and the honest report
-// names 'br stop --force'. Calling both of them "stopped" is what left users
-// with a VM they could neither reach nor explain.
+// A silent socket has three meanings and they need different reports. Nothing
+// holds the instance any more, which is "stopped" and is answered by 'br up'; a
+// holder is alive with its socket bound and simply not replying, which 'br stop
+// --force' can terminate; or a live PID is recorded with nothing listening,
+// which --force deliberately refuses to touch, so the report has to name the
+// start lock instead. Calling all three "stopped" is what left users with a VM
+// they could neither reach nor explain.
 func reportUnreachableStatus(target resolvedInstance, right *panel) error {
-	held := target.isLive() || instanceHeld(target.StateDir)
+	rung := target.Liveness
+	if rung == instance.Dead {
+		rung = livenessAt(target.StateDir)
+	}
+	pid := holderPID(target)
+	held := rung != instance.Dead
 
 	state := control.StatusStopped
 	if held {
@@ -56,9 +62,12 @@ func reportUnreachableStatus(target resolvedInstance, right *panel) error {
 	left.row("Status", errorf(state))
 	fmt.Println(title("Bladerunner Status"))
 	fmt.Println(renderPanels(left, right))
-	if held {
+	switch {
+	case canForceStop(rung, pid):
 		fmt.Println(subtle("  The holder is alive but is not answering. Terminate it with:"), command("br stop --force"))
-	} else {
+	case held:
+		fmt.Println(subtle("  " + heldWithoutListenerNote(target.StateDir, pid)))
+	default:
 		fmt.Println(subtle("  Start the VM with:"), command("br up"))
 	}
 	fmt.Println()

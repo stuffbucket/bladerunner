@@ -81,16 +81,67 @@ func instanceHeld(stateDir string) bool {
 	return livenessAt(stateDir) != instance.Dead
 }
 
-// unresponsiveError reports an instance that is held but not answering: the
-// state a ping cannot tell apart from "not running", and the one `br stop
-// --force` exists for. It names the holder so the user can confirm what they
-// are about to terminate.
-func unresponsiveError(label, stateDir string) error {
-	pid := holderPIDAt(stateDir)
-	if pid <= 0 {
-		return fmt.Errorf("%s is unresponsive: its control socket %s is not answering\n"+
-			"  terminate it with 'br stop --force'", label, control.SocketPath(stateDir))
+// canForceStop reports whether `br stop --force` has anything it is allowed to
+// terminate for an instance on this rung.
+//
+// This is the ONE definition of that question, because a message that names
+// --force and a stop path that refuses to use it are how a user ends up with no
+// way out at all. Both halves ask here.
+//
+// The conjunction is deliberate and neither half is sufficient. Serving proves
+// a listener is bound and accepting — a wedged holder accepts from the listen
+// backlog even when nothing ever reads — but not which process owns it. A live
+// PID proves a process exists, but a holder killed with SIGKILL leaves its lock
+// and its registry entry behind, so once the OS reuses that PID it names an
+// innocent process. Only together do they say "this PID is behind that
+// listener".
+func canForceStop(rung instance.Liveness, pid int) bool {
+	return rung == instance.Serving && instance.ProcessAlive(pid)
+}
+
+// heldError explains an instance that something still holds but that will not
+// answer, with the remedy that applies to the rung it is actually on.
+//
+// The two live rungs need OPPOSITE advice, which is why this branches rather
+// than printing one message. On Serving there is a listener and a live PID
+// behind it, so --force can prove the holder is there and terminate it. On
+// ProcessOnly there is no listener at all — only a PID in the start lock — and
+// --force refuses to signal that, correctly. Naming --force there sent the user
+// to a command that answers "VM is not running" and does nothing, while every
+// guard in the CLI went on refusing: a closed loop with no exit.
+func heldError(label, stateDir string, rung instance.Liveness, pid int) error {
+	if canForceStop(rung, pid) {
+		return fmt.Errorf("%s is unresponsive: holder process %d is alive but its control socket %s is not answering\n"+
+			"  terminate it with 'br stop --force'", label, pid, control.SocketPath(stateDir))
 	}
-	return fmt.Errorf("%s is unresponsive: holder process %d is alive but its control socket %s is not answering\n"+
-		"  terminate it with 'br stop --force'", label, pid, control.SocketPath(stateDir))
+	return fmt.Errorf("%s is held but not serving: %s", label, heldWithoutListenerNote(stateDir, pid))
+}
+
+// heldWithoutListenerNote explains the ProcessOnly rung and names the only
+// thing that clears it.
+//
+// Removing the start lock is the escape, and it is enough on its own: the
+// leftover socket file beside it does not have to be removed by hand, because
+// control's bindListener unlinks a stale socket itself — but only after it wins
+// the lock. TestRemovingTheStartLockClearsAHeldInstance holds that claim.
+//
+// The advice stops short of removing the lock automatically. A live recorded
+// PID has two meanings that nothing on this host can tell apart: an instance
+// still starting up, whose lock is the only thing keeping a second holder off
+// the disk image it is about to open, or a dead holder's litter with a recycled
+// PID. The lock is an O_CREAT|O_EXCL file holding a number, not a kernel-held
+// flock, so it carries no evidence of which. Deleting it on a guess is an
+// AGENTS.md section 8 operation; naming it costs the user one command and
+// cannot corrupt anything.
+func heldWithoutListenerNote(stateDir string, pid int) string {
+	socket := control.SocketPath(stateDir)
+	lock := control.LockPath(stateDir)
+	if pid <= 0 {
+		return fmt.Sprintf("nothing is listening on %s and %s records no usable holder\n"+
+			"  remove %s and try again", socket, lock, lock)
+	}
+	return fmt.Sprintf("nothing is listening on %s, and %s records pid %d as its holder\n"+
+		"  if pid %d is this instance starting up, wait for it and try again\n"+
+		"  if it is not bladerunner — a crashed holder's pid gets reused — remove %s and try again",
+		socket, lock, pid, pid, lock)
 }

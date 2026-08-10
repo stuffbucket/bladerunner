@@ -94,11 +94,13 @@ func bootArgument(target resolvedInstance) string {
 // printed, so the terminal stays clean.
 //
 // A ping that fails has two meanings and only one of them is "not running". The
-// other is a holder that is alive but wedged, which still owns the disk image,
-// the forwarded ports and any attached cartridge — so the offer to start it is
+// other is a holder that is still alive, which still owns the disk image, the
+// forwarded ports and any attached cartridge — so the offer to start it is
 // refused (a second holder would only collide with the first one's start lock)
-// and the report names the wedge and 'br stop --force' instead of claiming
-// nothing is there.
+// and the report names the state and the remedy that applies to it instead of
+// claiming nothing is there. heldError picks that remedy per rung: --force can
+// terminate a bound-and-silent listener, but not a PID with no listener behind
+// it.
 //
 // Commands that need a VM funnel through requireRunningTarget, which resolves
 // --instance and then calls this, rather than touching the control client
@@ -112,8 +114,8 @@ func requireRunningVM(target resolvedInstance) (*control.Client, error) {
 	logging.L().Debug("VM control socket unreachable; VM not running",
 		"instance", target.instanceName(), "socket", control.SocketPath(target.StateDir))
 
-	if instanceHeld(target.StateDir) {
-		return nil, unresponsiveError(unresponsiveLabel(target), target.StateDir)
+	if rung := livenessAt(target.StateDir); rung != instance.Dead {
+		return nil, heldError(unresponsiveLabel(target), target.StateDir, rung, holderPID(target))
 	}
 	if !target.isDefaultSlot() || !interactiveTerminal() || !confirmStartVM() {
 		return nil, notRunningError(target)

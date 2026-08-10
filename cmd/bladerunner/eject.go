@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stuffbucket/bladerunner/internal/config"
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
 var ejectFlags struct {
@@ -56,8 +57,18 @@ func runEject(_ *cobra.Command, args []string) error {
 	}
 
 	client := control.NewClient(baseDir)
+	// Eject sends a REQUEST, so the ping is the right gate for going ahead: a
+	// holder that will not answer cannot be asked to shut its guest down. What
+	// the ping must NOT do is decide the report. resolveEjectSlot found this
+	// slot through the liveness ladder, so answering "not booted" three lines
+	// later is the ladder and the ping disagreeing inside one command — the
+	// exact lie this stopped telling everywhere else.
 	if !client.IsRunning() {
-		return jsonOrError(fmt.Errorf("%q is not booted", slotName))
+		rung := livenessAt(baseDir)
+		if rung == instance.Dead {
+			return jsonOrError(fmt.Errorf("%q is not booted", slotName))
+		}
+		return jsonOrError(heldError(fmt.Sprintf("%q", slotName), baseDir, rung, holderPIDAt(baseDir)))
 	}
 
 	if !jsonOutput {
@@ -92,14 +103,21 @@ const ejectWaitMargin = 15 * time.Second
 
 // resolveEjectSlot determines which slot to eject. An explicit name selects its
 // slot directly (a registered instance, a cartridge under mnt/<name>, a disk
-// under disks/<name>, or the flat default). Otherwise it scans for the single
-// booted instance across the registry and the legacy layouts: zero booted is an
-// error, more than one requires a name.
+// under disks/<name>, or the flat default). Otherwise it takes the single
+// implicitly selectable instance: zero is an error, more than one requires a
+// name.
 func resolveEjectSlot(name string) (baseDir, slotName string, err error) {
-	scanner := defaultScanner()
+	return defaultScanner().ejectSlot(name)
+}
 
+// ejectSlot is resolveEjectSlot against an injectable scanner.
+//
+// The unqualified case defers to implicitCandidates, the single owner of the
+// implicit-selection policy, so `br eject` and `br stop` can never disagree
+// about which instance "the one that is up" means.
+func (s instanceScanner) ejectSlot(name string) (baseDir, slotName string, err error) {
 	if name != "" {
-		if target, rerr := scanner.resolveNamed(name); rerr == nil {
+		if target, rerr := s.resolveNamed(name); rerr == nil {
 			return target.StateDir, name, nil
 		}
 		// An unregistered name still addresses its legacy slot, so the caller
@@ -107,7 +125,7 @@ func resolveEjectSlot(name string) (baseDir, slotName string, err error) {
 		return ejectSlotDirForName(name), name, nil
 	}
 
-	found := scanner.liveInstances()
+	found := s.implicitCandidates()
 	switch len(found) {
 	case 0:
 		return "", "", fmt.Errorf("no booted VM to eject")

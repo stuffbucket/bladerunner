@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stuffbucket/bladerunner/internal/control"
+	"github.com/stuffbucket/bladerunner/internal/instance"
 )
 
 // TestLockOwnerPID holds the contract that the holder of an instance can be
@@ -71,5 +72,38 @@ func TestLockOwnerPIDNamesTheProcessThatBoundTheSocket(t *testing.T) {
 	}
 	if _, err := control.LockOwnerPID(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("LockOwnerPID after Close = %v, want a wrapped fs.ErrNotExist", err)
+	}
+}
+
+// TestSocketPathAgreesWithTheRegistry holds the "keep the two in sync" comment
+// on instance.controlSocketName.
+//
+// internal/instance cannot import this package — this package imports it — so
+// it hand-copies the control socket's file name. A comment asking a future
+// editor to keep two constants in sync is exactly the class of claim that goes
+// wrong in silence (AGENTS.md section 5, point 7): if the two ever drift, the
+// registry's liveness probe dials a path no listener ever binds and every
+// instance reads as Dead. This test is the only thing that would notice.
+func TestSocketPathAgreesWithTheRegistry(t *testing.T) {
+	dir, err := os.MkdirTemp("", "brsock")
+	if err != nil {
+		t.Fatalf("temp state dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	if got, want := instance.ControlSocketPath(dir), control.SocketPath(dir); got != want {
+		t.Fatalf("instance.ControlSocketPath = %q, control.SocketPath = %q; the hand-copied socket name has drifted", got, want)
+	}
+
+	// Not merely equal strings: the path a real listener binds has to be the one
+	// the registry's probe dials, so a live instance reads as serving.
+	l, err := control.NewListener(dir, nil)
+	if err != nil {
+		t.Fatalf("NewListener: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	if !instance.DefaultProbe(instance.ControlSocketPath(dir)) {
+		t.Error("instance.DefaultProbe found no listener at the path control.NewListener bound")
 	}
 }

@@ -334,6 +334,13 @@ func TestWaitForStop(t *testing.T) {
 //
 // TestRunStopReportsNotRunningForADeadHolder covers the easier half, where the
 // recorded PID has exited. This is the half where it has not.
+//
+// The refusal is the contract; the WORDING of it used to be "VM is not
+// running", and that was wrong in a way this test was quietly holding in place.
+// Every guard in the CLI treats this state as held, so a stop that reports
+// nothing is there leaves the user with no exit at all. It now names the start
+// lock -- see TestHeldWithoutAListenerGivesAdviceThatWorks, which holds the
+// whole loop.
 func TestRunStopDoesNotSignalARecycledPID(t *testing.T) {
 	dir := shortStateDir(t)
 	t.Setenv("BLADERUNNER_STATE_DIR", dir)
@@ -345,25 +352,18 @@ func TestRunStopDoesNotSignalARecycledPID(t *testing.T) {
 	}
 
 	// An unrelated live process standing where the holder's PID used to be.
-	innocent := exec.Command("/bin/sleep", "60")
-	if err := innocent.Start(); err != nil {
-		t.Fatalf("start innocent process: %v", err)
-	}
-	reaped := make(chan struct{})
-	go func() { _ = innocent.Wait(); close(reaped) }()
-	t.Cleanup(func() {
-		_ = innocent.Process.Kill()
-		<-reaped
-	})
-	pid := innocent.Process.Pid
+	pid := startStandInHolder(t)
 
 	if err := os.WriteFile(control.LockPath(dir), fmt.Appendf(nil, "%d\n", pid), 0o600); err != nil {
 		t.Fatalf("write control lock: %v", err)
 	}
 
 	err := runStop(nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "not running") {
-		t.Errorf("runStop --force = %v, want it to report the instance is not running", err)
+	if err == nil {
+		t.Fatal("runStop --force = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), control.LockPath(dir)) {
+		t.Errorf("runStop --force = %q, want it to name the start lock that clears this state", err)
 	}
 	if !instance.ProcessAlive(pid) {
 		t.Errorf("br stop --force terminated pid %d, which is not a bladerunner holder", pid)

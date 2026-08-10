@@ -267,10 +267,7 @@ func (s instanceScanner) resolve(name string) (resolvedInstance, error) {
 	if name != "" {
 		return s.resolveNamed(name)
 	}
-	candidates := s.liveInstances()
-	if serving := servingOnly(candidates); len(serving) > 0 {
-		candidates = serving
-	}
+	candidates := s.implicitCandidates()
 	switch len(candidates) {
 	case 0:
 		return resolvedInstance{
@@ -284,6 +281,22 @@ func (s instanceScanner) resolve(name string) (resolvedInstance, error) {
 	default:
 		return resolvedInstance{}, s.ambiguousError(candidates)
 	}
+}
+
+// implicitCandidates returns the instances an unqualified verb may act on:
+// every live instance, narrowed to the strongest rung that has any.
+//
+// This is the ONE definition of that set, and it is a method rather than a step
+// inside resolve because `br eject` needs the same answer. Eject used to
+// re-derive it from liveInstances() and switch on the length itself, so a
+// ProcessOnly phantom made `br eject` ambiguous while `br stop` resolved
+// cleanly: one policy, two implementations, disagreeing (AGENTS.md section 3).
+func (s instanceScanner) implicitCandidates() []resolvedInstance {
+	candidates := s.liveInstances()
+	if serving := servingOnly(candidates); len(serving) > 0 {
+		return serving
+	}
+	return candidates
 }
 
 // servingOnly narrows a candidate list to the instances whose control socket

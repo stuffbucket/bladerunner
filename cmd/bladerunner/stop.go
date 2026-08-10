@@ -141,54 +141,57 @@ func runStop(_ *cobra.Command, _ []string) error {
 }
 
 // stopUnreachable decides what `br stop` does when the control socket did not
-// answer the ping. There are two states behind that one silence and they need
-// opposite answers:
+// answer the ping. There are three states behind that one silence and they need
+// different answers:
 //
 //   - Nothing holds the instance any more: the honest report is "not running".
 //   - A holder process is still alive with its socket still bound — the
-//     instance.ProcessOnly rung of the liveness ladder. It still owns the disk
+//     instance.Serving rung reached without a reply. It still owns the disk
 //     image, the forwarded ports and any attached cartridge, and no amount of
 //     waiting will change that. This is the one state --force exists for, so
 //     --force escalates straight to the signal ladder and a plain stop reports
 //     the state and names --force as the way out.
+//   - A live PID is recorded but nothing is listening — instance.ProcessOnly.
+//     --force must NOT act here (see canForceStop), so it must not claim "not
+//     running" either: every guard in the CLI treats this instance as held, and
+//     a stop that shrugs leaves the user with no exit. It reports the state and
+//     names the start lock, which is the thing that clears it.
 //
-// A wedged holder is one whose socket is BOUND AND ACCEPTING while its handler
-// never answers. That is the discriminator, and stat'ing the socket file is not
-// it: a holder killed with SIGKILL, or lost to a panic or a reboot, leaves the
-// socket inode AND the lock file behind. Once its PID is recycled, "file present
-// and PID alive" becomes true of an innocent process, and --force would
-// terminate it.
+// The discriminator between the last two is a CONNECT, and stat'ing the socket
+// file is not it: a holder killed with SIGKILL, or lost to a panic or a reboot,
+// leaves the socket inode AND the lock file behind. Once its PID is recycled,
+// "file present and PID alive" becomes true of an innocent process, and --force
+// would terminate it.
 //
-// The dial separates them, and it is the liveness ladder's own Serving rung
-// (internal/instance owns that probe; see livenessOf). A live wedged holder
-// accepts the connection — the kernel completes it from the listen backlog even
-// when nothing ever reads — while a dead holder's leftover inode has no
-// listener, so connect fails with ECONNREFUSED. This is the same probe
-// bindListener uses to decide whether a socket it found is somebody's live
-// claim.
-//
-// Serving alone is not enough to authorize a signal, and neither is a live PID:
-// the conjunction is the guard. That is the one place the three-rung ladder
-// does not fit on its own, because the ladder short-circuits at Serving and
-// never reaches the PID probe.
+// The dial separates them, and it is the liveness ladder's Serving rung —
+// internal/instance owns that probe (see livenessOf), so this file no longer
+// keeps a second copy. A live wedged holder accepts the connection, because the
+// kernel completes it from the listen backlog even when nothing ever reads,
+// while a dead holder's leftover inode has no listener and connect fails with
+// ECONNREFUSED. bindListener makes the same distinction with its own dial, at a
+// shorter timeout: the two are the same idea, not the same call.
 //
 // Getting this wrong is worse than it looks, because the surrounding behavior
 // funnels users into it: acquireStartLock sees the same recycled PID and refuses
 // `br start` with ErrInstanceLocked, which sends them straight to --force.
 func stopUnreachable(target resolvedInstance, socketPath string) error {
 	pid := holderPID(target)
-	if livenessOf(target) != instance.Serving || !instance.ProcessAlive(pid) {
+	rung := livenessOf(target)
+	label := unresponsiveLabel(target)
+
+	if canForceStop(rung, pid) {
+		if !stopFlags.force {
+			return jsonOrError(heldError(label, target.StateDir, rung, pid))
+		}
+		if !jsonOutput {
+			fmt.Printf("Control socket is not answering; holder process %d is still alive.\n", pid)
+		}
+		return forceTerminate(socketPath, pid)
+	}
+	if rung == instance.Dead {
 		return jsonOrError(fmt.Errorf("VM is not running"))
 	}
-	if !stopFlags.force {
-		return jsonOrError(fmt.Errorf(
-			"VM is unresponsive: holder process %d is alive but its control socket %s is not answering\n"+
-				"  terminate it with 'br stop --force'", pid, socketPath))
-	}
-	if !jsonOutput {
-		fmt.Printf("Control socket is not answering; holder process %d is still alive.\n", pid)
-	}
-	return forceTerminate(socketPath, pid)
+	return jsonOrError(heldError(label, target.StateDir, rung, pid))
 }
 
 // drainBudget converts a --timeout value in seconds into the budget the guest
