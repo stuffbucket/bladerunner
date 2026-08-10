@@ -2,9 +2,16 @@
 
 Produced by the design workflow critic, verified against lxc/incus/v6@v6.23.0.
 
+> **Point-in-time review of a parked, unimplemented design.** Read
+> [`prd.md`](prd.md) status block first. Phase 2 never started, so every blocker
+> below is still open — but the "verified against the codebase" claims in
+> §Strengths were true in June 2026 and several are now false. They are corrected
+> in place. The Incus SDK findings (the blockers) were verified against the
+> pinned SDK version and were folded back into `prd.md` §6.1; those still hold.
+
 ## Verdict
 
-Strong, evidence-grounded PRD + scope; the metaphor, the import/export pivot, the data-safety surface, and the phase structure are sound and the codebase anchors are real (I verified the SDK methods, attach/eject/provisioning anchors, and the useHosted=false default). But it is NOT yet build-ready: several load-bearing claims about the Incus backup API contradict how that API actually works, the "optimized-storage" checkpoint path collides with the "fall back to dir" story, and the most-repeated guarantee ("never delete the VM-pool copy until export is confirmed") is mechanically impossible as written because export materializes the backup ON the pool first. Fix the API-contract blockers below and tighten the clobber/multi-machine edge cases before Phase 2 starts.
+Strong, evidence-grounded PRD + scope; the metaphor, the import/export pivot, the data-safety surface, and the phase structure are sound and the codebase anchors were real at the time. But it is NOT yet build-ready: several load-bearing claims about the Incus backup API contradict how that API actually works, the "optimized-storage" checkpoint path collides with the "fall back to dir" story, and the most-repeated guarantee ("never delete the VM-pool copy until export is confirmed") is mechanically impossible as written because export materializes the backup ON the pool first. Fix the API-contract blockers below and tighten the clobber/multi-machine edge cases before Phase 2 starts.
 
 ## Blockers (fix before building Phase 2)
 
@@ -43,8 +50,8 @@ Strong, evidence-grounded PRD + scope; the metaphor, the import/export pivot, th
 ## Strengths (validated)
 
 - The core architectural pivot is correctly grounded: spike #1 (VirtioFS idmap collapse) genuinely kills live-rootfs-on-DMG, and the import/export-into-pool model is the right response. I verified CreateInstanceFromBackup/CreateInstanceBackup/GetInstanceBackupFile all exist in lxc/incus/v6@v6.23.0 with the cited shapes, so the SDK foundation is real, not aspirational.
-- Codebase anchoring is unusually honest and mostly accurate: attachArgs hardcodes a writable mount (cartridge.go:165, confirmed — AttachReadOnly is genuinely new), assets.go does rename-without-fsync/.prev (confirmed ~308, so the 'greenfield write-back' framing is right), useHosted defaults false (config.go, confirmed), and ejectWaitMargin=15s / saveCommandTimeout=10min are real (eject.go:89, listener.go:26). An implementer can trust the map.
+- Codebase anchoring was unusually honest and mostly accurate **at the time**: `attachArgs` emitted no `-readonly` (then `cartridge.go:165`, since moved to `internal/cartridge/mountpolicy.go` — `AttachReadOnly` is still genuinely new), `assets.go` did rename-without-fsync/`.prev` (still true, so the "greenfield write-back" framing holds), and `ejectWaitMargin=15s` / `saveCommandTimeout` were real. **Now false:** `useHosted` no longer defaults false — `UseHostedGuestImage` and `UseGuestAgent` both default true. Trust the symbol names, re-check the line numbers.
 - The build-tag discipline is correctly specified: copying the cartridge_darwin.go/cartridge_other.go split with !darwin ErrUnsupported stubs, and the explicit 'keep exported API referenced on Linux to dodge unused-code lint' is exactly the right guardrail for this repo's CI.
-- Decisions are made, not deferred-by-default: verb noun, checkpoint cadence, container-only v1, bake-progs-init-pool-on-first-boot, and explicit DEFER of DiskArbitration + live share with sound rationale. The 'do not flip useHosted until -no-agent naming is reconciled' callout is a genuine, correctly-identified 404 trap.
+- Decisions are made, not deferred-by-default: verb noun, checkpoint cadence, container-only v1, bake-progs-init-pool-on-first-boot, and explicit DEFER of DiskArbitration + live share with sound rationale. **Both deferrals have since been overtaken:** DiskArbitration shipped anyway in the cartridge runtime (`internal/diskarb`), and the `useHosted` / `-no-agent` 404 trap — a genuine, correctly-identified catch at the time — was resolved when the hosted image became the default with a checksum-verified fallback.
 - The data-safety design instinct is correct even where the invariant wording is off: temp-in-DMG -> fsync -> verify(size+sha256) -> atomic rename -> one .prev, plus identity-stamp conflict side-files, is the right shape and the fault-injection-as-the-gate framing for Phase 2 is appropriately paranoid.
-- Phase 0's '4 divergent provisioning paths, miss one => silent dir pool' risk and the 'no || true swallow' rule are real, well-targeted, and exactly the kind of drift this repo is prone to (the existing incus admin init --auto || true at cloudinit.go:372 is precisely the line to kill).
+- Phase 0's '4 divergent provisioning paths, miss one => silent dir pool' risk and the 'no || true swallow' rule are real, well-targeted, and exactly the kind of drift this repo is prone to. The `incus admin init --auto || true` line is still there and still the line to kill (now `internal/provision/cloudinit.go:478`). The path count has changed — `scripts/build-guest-image.sh` and its chroot fallback were replaced by `internal/imagebuild` — but the drift risk is unchanged, and no `btrfs` string exists anywhere in the tree yet.

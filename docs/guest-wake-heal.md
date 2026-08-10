@@ -10,7 +10,7 @@ Two things can wedge a previously-healthy VM across a host sleep:
 2. **Stale vsock connectivity** — the socat VSOCK↔TCP relays (`br shell`,
    the Incus API, the OIDC bridge) can be wedged with no SSH banner.
 
-This change provisions a **guest-local backstop** for both, with no dependency on
+bladerunner provisions a **guest-local backstop** for both, with no dependency on
 `br-agent` being enabled and no dependency on the host being reachable. It is the
 recovery layer for exactly the case the host-side reconnect path cannot reach
 (vsock SSH down).
@@ -54,33 +54,26 @@ recovery layer for exactly the case the host-side reconnect path cannot reach
 
 ## Provisioning paths (all kept in sync)
 
-The same chrony swap + watchdog is applied identically across every path that
-provisions a guest; missing one would silently leave that path on timesyncd with
-no backstop:
+`internal/provision/scripts/` holds the ONE canonical copy of `chrony.conf`,
+`bladerunner-watchdog.{sh,service}` and `bladerunner-vsock-relay@.service`.
+There is no second copy to keep in sync:
 
-| Path | Where | chrony + watchdog source |
+| Path | Where | How it gets the files |
 | --- | --- | --- |
-| cloud-init bootstrap | `internal/provision/cloudinit.go` (`renderTimeHeal`, `renderVsockRelays`) | `go:embed`s the `internal/provision/scripts/*` files (see `embed.go`) and emits them verbatim; the vsock relays are the templated `bladerunner-vsock-relay@` unit + per-channel arg files |
-| image build, virt-customize | `scripts/build-guest-image.sh` | `--copy-in internal/provision/scripts/chrony.conf` + `bladerunner-watchdog.{sh,service}` (the relays are **not** baked — cloud-init installs them every boot after #160) |
-| image build, nbd/chroot | `scripts/build-guest-image.sh` | `install` the same `internal/provision/scripts/*` files (chrony.conf + watchdog only) |
+| cloud-init bootstrap | `internal/provision/cloudinit.go` (`renderTimeHeal`, `renderVsockRelays`) | `go:embed`s `internal/provision/scripts/*` (see `embed.go`) and emits them verbatim |
+| image bake | `internal/imagebuild` | installs the same files into the image (chrony.conf + watchdog only; the relays are **not** baked) |
 
-**Single source of truth:** `internal/provision/scripts/chrony.conf` and
-`internal/provision/scripts/bladerunner-watchdog.{sh,service}` are the ONE
-canonical copy; the cloud-init Go path `go:embed`s them (see
-`internal/provision/embed.go`) and the image build `--copy-in`s the same files,
-so there is no second copy to keep in sync. The four vsock relays are **not**
-image-baked at all: after #160 every boot provisions via full cloud-init, which
-installs the single `bladerunner-vsock-relay@.service` template
-(`internal/provision/scripts/bladerunner-vsock-relay@.service`, `go:embed`'d) plus
-one `/etc/bladerunner/relays/<name>.env` per channel (ssh/incus/oidc/ntp) — so
+The four vsock relays are not image-baked at all: after #160 every boot
+provisions via full cloud-init, which installs the single
+`bladerunner-vsock-relay@.service` template plus one
+`/etc/bladerunner/relays/<name>.env` per channel (ssh/incus/oidc/ntp) — so
 cloud-init is the sole runtime source for the relays. Port values are threaded
-via a templated `/etc/default/bladerunner-watchdog` env file for the watchdog and
-via each channel's `RELAY_ARGS` line for the relays (e.g. the NTP bridge's
+via a templated `/etc/default/bladerunner-watchdog` env file for the watchdog
+and via each channel's `RELAY_ARGS` line for the relays (e.g. the NTP bridge's
 `VsockNTPPort`), not by string substitution into a script body.
 
 CI exercises the cloud-init path (`internal/provision/cloudinit_test.go`); the
-two image-build arms `--copy-in`/`install` the identical embedded files, so they
-cannot drift from the cloud-init emission.
+image bake installs the identical embedded files, so the two cannot drift.
 
 ## Confirmed vs. hypothesis (read before "fixing" this)
 
@@ -138,11 +131,6 @@ journalctl -t bladerunner-watchdog --since '-1h'
 # look for: clock sys_offset=… leap=… rtc_delta=…s ; listen ssh22=… ; heal: …
 ```
 
-## Coordination (followup)
-
-The host-side reconnect path (`cmd/bladerunner/reconnect.go`) restarts
-`systemd-timesyncd` over SSH. Once timesyncd is masked, that restart no-ops on a
-masked unit. That file does **not** exist on `main` yet (it is introduced by the
-unmerged menubar/wake-handler work), so the rename — drop `systemd-timesyncd`,
-run `chronyc makestep` instead — must land with whichever PR carries
-`reconnect.go`. Flagged here so the two changes do not contradict.
+The host-side reconnect path (`cmd/bladerunner/reconnect.go`) runs
+`chronyc burst 4/4 && chronyc makestep` over SSH, so it does not depend on
+`systemd-timesyncd`, which this change masks.

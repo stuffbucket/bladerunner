@@ -4,8 +4,7 @@
 
 It is designed to provide the core behavior of a `colima --runtime incus` setup without Lima/Colima orchestration overhead:
 
-- Architecture-aware defaults (`arm64` and `amd64`). Fresh installs boot the pre-baked bladerunner guest image (Debian 13 trixie + Incus, no first-boot apt); the Debian genericcloud image is the warned auto-fallback and the `--debian-image` escape hatch. Ubuntu and other cloud images remain reachable via `--image-url` or `BLADERUNNER_BASE_IMAGE_URL`.
-- Incus daemon shipped in the pre-baked image (or bootstrapped via cloud-init on the Debian fallback path).
+- Architecture-aware defaults (`arm64` and `amd64`), booting the pre-baked bladerunner guest image with Incus already installed. See [Notes](#notes) for the fallback and the escape hatches.
 - Localhost-accessible SSH and Incus HTTPS endpoints via virtio-vsock port forwarding.
 - Incus web dashboard availability through the forwarded API endpoint.
 - Optional bridged networking (for transparent L2 presence) when signed with `com.apple.vm.networking`.
@@ -75,20 +74,12 @@ Every release also ships a signed, notarized `.dmg` installer on the
 The bundle is code-signed with the Virtualization entitlement and notarized, so
 Gatekeeper allows it on first launch — no `xattr` dance required.
 
-DMG installs self-update in place:
-
-```bash
-br self-update          # download + verify + install the latest signed .app
-br self-update --check   # just report whether a newer version is available
-```
-
-`br self-update` verifies the new bundle's Ed25519 signature before replacing
-anything and refuses to run on Homebrew-managed installs (use `brew upgrade`
-for those). It is distinct from `br upgrade`, which hands the *running* control
-server to a new binary already on disk.
-
-Until a release carries a signed updater bundle, there is no update manifest to
-read. `br self-update` says that there is no published update channel.
+`br self-update` is the in-place updater for `.dmg` installs (`--check` only
+reports; Homebrew installs are refused — use `brew upgrade`). It is **dormant
+today**: no release yet carries the signed updater bundle it verifies, so
+`br self-update` reports that there is no published update channel. It is
+distinct from `br upgrade`, which hands the *running* control server to a new
+binary already on disk.
 
 ### Build from Source
 
@@ -103,13 +94,6 @@ Build and sign:
 ```bash
 make build
 make sign
-```
-
-Or manually:
-
-```bash
-go build -o bin/br ./cmd/bladerunner
-codesign --entitlements vz.entitlements -s - bin/br
 ```
 
 ## Run
@@ -225,9 +209,11 @@ Layout:
   its own `disk.raw`, `saved-state.bin`, console log, EFI vars, and cloud-init)
 - Shared image cache (SHA-256-pinned disks only): `~/.local/state/bladerunner/cache/images/<sha256>.raw`
 
-`br disk bake` shells out to `scripts/build-guest-image.sh` and is a
-host-side developer action: it requires `bash`, `qemu-img`, and the script's
-build dependencies (`libguestfs-tools`, likely `sudo`). Builtin disks are
+`br disk bake` is a host-side developer action. It needs `qemu-img`, and it
+**needs Linux**: the mechanic mounts a guest root and chroots into it, so on a
+Mac it refuses and points you at a Linux VM (colima, lima, UTM), WSL2, or the
+published `guest-image-latest` release. It builds Debian Trixie only — the base
+image and its reviewed digest live in `internal/imagebuild`. Builtin disks are
 read-only — fork one with `br disk new <name> --from <builtin>` first.
 
 ## Cartridges
@@ -305,10 +291,13 @@ br stop --instance <name>     # orderly drain of one specific VM
 br watch                      # notice inserted cartridges and offer to boot them
 ```
 
-`--instance` is a root flag, so it appears in every verb's help — but only
-`status`, `stop`, `reset`, `config`, `shell`, `ssh`, `ls` and `eject` currently
-resolve it. Other verbs act on the default instance without saying so; see
-[docs/cartridge-runtime/behaviour-changes.md](docs/cartridge-runtime/behaviour-changes.md).
+`--instance` is a root flag, so it appears in every verb's help — and every verb
+declares what it does with it. A verb that acts on one VM resolves it
+(`status`, `stop`, `restart`, `reset`, `eject`, `save`, `restore`, `upgrade`,
+`reconnect`, `shell`, `exec`, `ssh-config`, `incus`, `ls`, `logs`, `events`,
+`web`, `config`); `br instances` deliberately spans all of them; anything else
+**refuses** the flag and says what to reach for instead, rather than quietly
+acting on the default.
 
 With a single VM running there is nothing to choose and `--instance` can be
 omitted, so the single-VM workflow is unchanged. The default instance keeps the
@@ -340,7 +329,7 @@ fixed allocation.
 
 ## Notes
 
-- The default base image is the **pre-baked bladerunner guest image**: Debian 13 trixie with Incus. `scripts/build-guest-image.sh` builds it. The `build-guest-image` workflow publishes it under the `guest-image-latest` release. Fresh installs boot it directly, so first boot is faster and runs no apt. bladerunner fetches it fail-closed against its published `.sha256` sidecar. A missing, unreachable, or mismatched sidecar is fatal for the hosted image, because bladerunner never boots an unverified image.
+- The default base image is the **pre-baked bladerunner guest image**: Debian 13 trixie with Incus. `internal/imagebuild` builds it and the `build-guest-image` workflow publishes it under the `guest-image-latest` release. Fresh installs boot it directly, so first boot is faster and runs no apt. bladerunner fetches it fail-closed against its published `.sha256` sidecar. A missing, unreachable, or mismatched sidecar is fatal for the hosted image, because bladerunner never boots an unverified image.
 - **Warned auto-fallback:** bladerunner falls back when it cannot use the pre-baked image. The causes are a missing or renamed release asset for the architecture, a download error, or a bad, missing, or unreachable checksum sidecar. It emits a `WARN` and uses the pinned Debian 13 (trixie) genericcloud qcow2 with the first-boot cloud-init path. That fallback is itself SHA-512 fail-closed against an embedded pin. The invariant holds: you always boot a **verified** image, either verified-hosted or verified-Debian. bladerunner logs the path it chose.
 - **Escape hatch:** pass `--debian-image`, or set `BLADERUNNER_FORCE_DEBIAN_IMAGE=1`, to force the Debian genericcloud and cloud-init path. This is the "bring your own generic image" opt-out. `--hosted-image`, or `BLADERUNNER_FORCE_HOSTED_IMAGE=1`, forces the pre-baked image, which is already the default. The two flags are mutually exclusive. You cannot combine either one with `--image-url` or `--image-path`. To use Ubuntu 24.04 or another distribution, set `--image-url` or `BLADERUNNER_BASE_IMAGE_URL`.
 - The base image can be raw or qcow2 format. qcow2 images are automatically converted to raw via `qemu-img`.
