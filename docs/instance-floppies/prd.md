@@ -1,13 +1,19 @@
-I have all the context I need. This is a self-contained PRD writing task using the provided design context and grounded map facts. Let me write the complete PRD.
-
 # PRD: Instance Floppies
 
-> **Status (2026-06-05):** Design doc, parked. Per latest direction we are keeping
-> v1 straightforward: a multi-minute cold machine boot is acceptable for now, so the
-> pre-baked `guest-image-latest` dependency (§8.F) is **deferred, not a prerequisite**.
-> This PRD + the build scope + the review notes capture the validated design so the
-> floppy build can resume later. Near-term effort is going to a simple menubar app
-> over the existing CLI, not this feature.
+> **Status: parked, unimplemented.** Written 2026-06-05; staleness pass 2026-08-07.
+> No part of this design is built: there is no `internal/floppy` package, no
+> `br floppy` command, and no `ImportInstance`/`ExportInstance` wrapper in
+> `internal/incus`. `cmd/bladerunner/docs_commands_test.go` excludes this
+> directory from the doc-command check for exactly that reason.
+>
+> **This is not the cartridge runtime.** A *floppy* carries one **Incus instance**;
+> a *cartridge* carries a whole **machine**. The cartridge runtime shipped and is
+> documented in [`docs/cartridge-runtime/`](../cartridge-runtime/); §4 and §8.G
+> below state the coexistence. Do not read this directory as a description of
+> anything that runs today.
+>
+> Two dependencies named below have since resolved on their own: §8.D
+> (DiskArbitration) and §8.F (the pre-baked guest image). Both are marked in place.
 
 **One-line summary:** A floppy is an Incus instance you carry as a DMG — insert it into the running bladerunner machine to run it, work, checkpoint as you go, and eject to a safe, atomically-stamped savefile.
 
@@ -116,9 +122,9 @@ A periodic checkpoint goroutine snapshots + exports each attached floppy back to
 ### 6.2 The btrfs machine pool (fast, non-pausing export)
 
 - The machine's default Incus storage pool must be **btrfs** (loopback file, no extra disk), not the current `DRIVER=dir`. This is what makes export ~4s/GB and non-pausing (spikes #2, #3) and enables native incremental `send -p` for very large floppies.
-- Implementation: add `btrfs-progs` to the apt install block (`cloudinit.go:346–356`, both native-trixie and zabbly branches) and replace bare `incus admin init --auto` (`cloudinit.go:372`) with an explicit btrfs pool create / preseed.
+- Implementation: add `btrfs-progs` to the apt install block in `internal/provision/cloudinit.go` (both native-trixie and zabbly branches) and replace the bare `incus admin init --auto || true` (`cloudinit.go:478`) with an explicit btrfs pool create / preseed.
 - **No silent `|| true`:** if the btrfs pool create fails (missing `btrfs-progs`, kernel lacks btrfs), fall back to `dir` *with a loud log*, never an Incus left with no usable default pool.
-- The same canonical btrfs-init form must be applied identically in **all** provisioning paths to avoid silent drift: (a) cloud-init bootstrap, (b) `build-guest-image.sh` virt-customize path, (c) its chroot fallback, (d) the future `br-agent` init.
+- The same canonical btrfs-init form must be applied identically in **all** provisioning paths to avoid silent drift: the cloud-init bootstrap and the image-bake pipeline (`internal/imagebuild/incusinit.go`). *(Stale as written: the original four-path list named `scripts/build-guest-image.sh` and its chroot fallback, which no longer exist — image baking moved into the `internal/imagebuild` Go package.)*
 
 ### 6.3 Checkpoint cadence
 
@@ -139,7 +145,7 @@ This entire surface is greenfield; the existing `assets.go` rename helper is ren
 ### 6.5 The three write-protect levers
 
 - **Born read-only (pressed disk):** `ConvertToDMG` (UDZO) already exists; eject of a read-only-source must enforce **save-as a new writable DMG** (a new "never write back to a read-only source" guard — new logic).
-- **Write-protect tab (`-readonly` attach):** **new code** — `attachArgs` (`cartridge.go:165`) hardcodes a writable mount; add an `AttachReadOnly` variant / threaded flag without breaking existing single-arg `Attach` callers.
+- **Write-protect tab (`-readonly` attach):** **new code** — `attachArgs` (`internal/cartridge/mountpolicy.go`) still emits no `-readonly`; add an `AttachReadOnly` variant / threaded flag. *(Anchor updated: this logic moved out of `cartridge.go` into the newer `mountpolicy.go`, which now carries a private/browsable `MountPolicy` the original design did not know about.)*
 - **Sealed case (`chflags uchg`):** a host-level file lock on the DMG.
 - **Default R/W DMG:** updated in place at eject.
 
@@ -180,14 +186,37 @@ This design is not speculative — four live spikes anchor it:
 **C. Live `share/<name>/` data cable — v1 or later?**
 **Recommend defer past v1.** The VirtioFS share is already wired at the machine level and the `disk.ShareSpec` shape can be reused later, but it is orthogonal to the core insert/checkpoint/eject value and adds per-floppy mount lifecycle. Ship the savefile model first; add the live cable as a fast-follow.
 
-**D. DiskArbitration Finder-eject coordination — v1 or later?**
-**Recommend defer past v1.** It requires a substantial new cgo surface (DiskArbitration + CoreFoundation frameworks, a `CFRunLoop` on a dedicated thread for the session) — a notable departure from the repo's pure-Go + hdiutil-exec approach. Critically, the import/export model already makes the DMG a savefile, so a Finder force-eject mid-session only loses changes since the last checkpoint; it does **not** crash the running instance. Honest tradeoff: until this lands, a user who force-ejects in Finder gets a stale-by-one-checkpoint DMG and a detached image — acceptable, and clearly documented, for v1.
+**D. DiskArbitration Finder-eject coordination — v1 or later? — SUPERSEDED.**
+This recommendation is dead. The cartridge runtime built the DiskArbitration
+bridge (`internal/diskarb`, plus `cmd/bladerunner/cartridge_watch_darwin.go` and
+`protection.go`), so the cgo surface this decision priced as "a notable departure"
+now exists and is owned. `docs/cartridge-runtime/design.md` states the supersession
+directly. A floppy build would reuse `internal/diskarb` rather than defer or
+rebuild it — AGENTS.md §3 forbids a second cgo bridge.
+>
+> *Historic rationale, kept for the reasoning only:* deferral was recommended
+> because the import/export model already makes the DMG a savefile, so a Finder
+> force-eject mid-session loses only changes since the last checkpoint and does
+> not crash the running instance.
 
 **E. Container-only in v1, or Incus VMs too?**
 **Recommend container-only in v1.** Incus VM export differs (needs nested virt — gated on `ConfigKeyNestedVirt` — and a different rootfs format). Container-only avoids that surface. Design the export/import wrappers to **not hardcode container assumptions**, so VM floppies are an additive v2.
 
-**F. Pre-baked `guest-image-latest` + btrfs — hard prerequisite or parallel track?**
-**Recommend parallel track, hard prerequisite for the *good* UX, not for correctness.** The host DMG surface (insert/checkpoint/eject/anti-clobber) is independent and can be built and tested against a cold-init machine. But the "open DMG → go" experience and the cheap-checkpoint numbers depend on (a) the btrfs pool and (b) booting from a pre-baked image instead of the ~7-min cold-init. The publish machinery already exists (`build-guest-image.yml` maintains `guest-image-latest`); the gaps are: it has not been run, the artifact may carry a `-no-agent` suffix that will not match `HostedGuestImageURL`'s expected `bladerunner-guest-<arch>.qcow2` name, and `useHosted` defaults `false` (`config.go:280`). **Do not flip `useHosted=true` until the artifact name/agent situation is reconciled, or the download 404s.** Track this as a coupled dependency, ship floppy code in parallel, and gate the "fast UX" milestone on the published btrfs image.
+**F. Pre-baked `guest-image-latest` + btrfs — hard prerequisite or parallel track? — RESOLVED (the image half).**
+The pre-baked guest image landed and is now the **default** provisioning path:
+`UseHostedGuestImage` and `UseGuestAgent` default true, `DefaultBaseImageURL`
+resolves `HostedGuestImageURL`, the artifact is checksum-verified against its
+published `.sha256` sidecar, and any download or verify failure falls back to the
+pinned Debian + cloud-init path with a WARN. The `-no-agent` naming trap named
+below no longer exists in `.github/workflows/build-guest-image.yml`. So the
+~7-minute cold-init that spike #4 measured is no longer the default experience,
+and this is not a blocker for a floppy build.
+
+**Still outstanding:** the **btrfs** half. There is no `btrfs` string anywhere in
+the Go source, the scripts, or the workflows — the guest still gets whatever
+`incus admin init --auto` picks (`internal/provision/cloudinit.go:478`), which is
+`dir`. The cheap-checkpoint numbers in §7 spike #3 remain ungrounded until a btrfs
+default pool is provisioned. Phase 0 of the build scope is therefore still real work.
 
 **G. Coexistence with #72 whole-VM cartridges.**
 **Recommend explicit separation, shared low-level reuse.** Floppies reuse `internal/cartridge`'s hdiutil mechanics but live in their own mnt subtree / typed marker and their own `.floppy` registry so the whole-VM cartridge scanners never mistake a floppy for a bootable cartridge. Messaging: cartridge = carry a *machine* (rare, heavy); floppy = carry an *instance* (everyday, light).
@@ -196,12 +225,12 @@ This design is not speculative — four live spikes anchor it:
 
 ## 9. Dependencies & risks
 
-- **Pre-baked `guest-image-latest` + btrfs default pool** (spike #4): hard dependency of the good UX. btrfs-init must be applied in up to **four divergent places** (cloud-init bootstrap, virt-customize path, chroot fallback, future `br-agent`) — miss one and that path silently gets a `dir` pool. **Bake-pool-at-build-time vs init-on-first-boot is an unresolved fork**: baking a loopback btrfs pool inflates the qcow2 and may not survive `virt-sparsify`; first-boot init keeps the image small but reintroduces some of the cold-init cost the pre-bake is meant to kill. **Recommend: bake `btrfs-progs` into the image, but init the loopback pool on first boot via systemd-firstboot/`br-agent`** — small image, single quick init, fallback-to-dir-with-loud-log on failure.
-- **`-no-agent` artifact naming mismatch**: `HostedGuestImageURL` expects the bare `bladerunner-guest-<arch>.qcow2`; the published artifact may carry `-no-agent`. Reconcile before flipping `useHosted`.
+- **btrfs default pool** (spike #4): still unbuilt, and still a hard dependency of the good UX. The pre-baked image itself has landed (§8.F), but it bakes no btrfs: the string `btrfs` appears nowhere in the tree, so every provisioning path still lands on a `dir` pool. The init must be applied identically in every surviving path — the cloud-init bootstrap (`internal/provision/cloudinit.go`) and the image-bake pipeline (`internal/imagebuild/`, notably `incusinit.go`) — miss one and that path silently gets a `dir` pool. **Bake-pool-at-build-time vs init-on-first-boot is an unresolved fork**: baking a loopback btrfs pool inflates the qcow2 and may not survive sparsification; first-boot init keeps the image small but adds an init step. **Recommend: bake `btrfs-progs` into the image, but init the loopback pool on first boot** — small image, single quick init, fallback-to-dir-with-loud-log on failure.
+- ~~**`-no-agent` artifact naming mismatch**~~ — resolved. No `-no-agent` suffix exists in `build-guest-image.yml`, and the hosted path is checksum-verified against a published `.sha256` sidecar with an explicit warned fallback to pinned Debian.
 - **idmap/btrfs assumptions**: the whole model rests on unprivileged Incus needing real idmap ownership (spike #1) and btrfs delivering non-pausing optimized export (spike #3). If a target kernel lacks btrfs, the loud-fallback-to-dir path keeps correctness (at the cost of slower, pausing exports).
 - **DiskArbitration cgo surface**: deferred (§8.D); flagged as substantial if/when pursued.
 - **Data-integrity sensitivity**: fsync ordering, verify-before-rename, one-`.prev`, and the "never delete the VM-pool copy until export confirmed" invariant are entirely new and must be gotten exactly right — this is the load-bearing safety surface.
-- **Timing window on eject**: the final export must complete while the DMG is still attached and the guest still live (before `cancel()` + the LIFO detach defer). The `saveCommandTimeout=10min` covers long handlers, but the client-side `waitForSocketGone` margin (`ejectWaitMargin=15s`, sized for VMM teardown) must be raised to cover a real multi-GB export.
+- **Timing window on eject**: the final export must complete while the DMG is still attached and the guest still live (before `cancel()` + the LIFO detach defer). The `saveCommandTimeout` (`internal/control/listener.go`) covers long handlers, but the client-side `ejectWaitMargin` (`cmd/bladerunner/eject.go:91`, 15s, sized for VMM teardown) must be raised to cover a real multi-GB export.
 - **Slot-resolution category error**: a floppy is an instance inside the one machine, not a control-socket slot; reusing `resolveEjectSlot` for floppies would mis-detect. New registry + listing required.
 
 ---

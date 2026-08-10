@@ -8,7 +8,7 @@ proxy (`internal/webproxy`); not yet scheduled.
 `br web` signs the user into the Incus web UI by bouncing the browser through a
 local OIDC provider. That provider is served over **plain HTTP**:
 
-- `internal/config/config.go` — `OIDCIssuerURL = http://127.0.0.1:<oidc-port>`
+- `internal/config/config.go` — `OIDCIssuerURLForPort` returns `http://127.0.0.1:<oidc-port>`
 - `cmd/bladerunner/web.go` — `providerBase = fmt.Sprintf("http://127.0.0.1:%s", oidcPort)`
 - `internal/provision/cloudinit.go` — `incus config set oidc.issuer "http://…"`
 
@@ -57,10 +57,11 @@ SAN already `127.0.0.1` / `::1` / `localhost`) then covers both browser origins
 
 ## Implementation outline (~5–6 files)
 
-1. **Generate the shared cert early.** Today `webproxy.New` lazily generates
-   `webproxy.crt/key` in `VMDir`. Hoist generation so the PEM exists *before*
-   both (a) the OIDC provider starts and (b) cloud-init renders — so the same
-   cert can be handed to the provider and embedded into the guest CA injection.
+1. **Generate the shared cert early.** Today `webproxy.New` loads-or-generates
+   `webproxy.crt/key` at its configured `CertPath`/`KeyPath`. Hoist generation
+   so the PEM exists *before* both (a) the OIDC provider starts and (b)
+   cloud-init renders — so the same cert can be handed to the provider and
+   embedded into the guest CA injection.
 2. **Provider → `ServeTLS`.** `internal/oidc/provider.go` `Start()` loads the
    cert/key (new fields on `ProviderConfig`) and serves TLS instead of plain
    `Serve`.

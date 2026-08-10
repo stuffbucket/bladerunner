@@ -53,11 +53,7 @@ The test is skipped unless `BLADERUNNER_E2E=1` and `GOOS=darwin`, so a normal
 `go test ./...` never boots a VM.
 
 ```sh
-# Build + codesign br, then run the smoke test (default: pre-baked hosted image):
-make sign
-BLADERUNNER_E2E=1 go test -run TestE2EBootSmoke -count=1 -timeout 30m -v ./test/e2e/
-
-# Or let the test build + sign br itself (it runs `make sign`):
+# The test builds + codesigns br itself (it runs `make sign`):
 BLADERUNNER_E2E=1 go test -run TestE2EBootSmoke -count=1 -timeout 30m -v ./test/e2e/
 ```
 
@@ -67,7 +63,6 @@ BLADERUNNER_E2E=1 go test -run TestE2EBootSmoke -count=1 -timeout 30m -v ./test/
 | ------------------------------ | ------------------------------------------------------------------------------ |
 | `BLADERUNNER_E2E=1`            | **Required.** Opt in to the real boot.                                          |
 | `BLADERUNNER_E2E_DEBIAN=1`     | Force the Debian escape hatch (`--debian-image`) instead of the pre-baked default. |
-| `BLADERUNNER_E2E_HOSTED=1`     | No-op alias (the hosted image is already the default); retained for compatibility. |
 | `BLADERUNNER_E2E_BIN=/path/br` | Use an already-signed `br` instead of building one. You vouch that it is signed. |
 | `BLADERUNNER_E2E_BOOT_TIMEOUT` | Readiness budget for first boot (Go duration; default `15m`).                   |
 

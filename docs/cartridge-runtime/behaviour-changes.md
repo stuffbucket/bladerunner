@@ -2,8 +2,8 @@
 
 What changed for a user or a script that already drives `br`. Each entry says
 what it was, what it is, and what you have to do about it. The architecture is in
-[design.md](design.md); the workflow is in [usage.md](usage.md); the honest
-project status is in [status.md](status.md).
+[design.md](design.md); the workflow is in [usage.md](usage.md); what is still
+open is in [status.md](status.md).
 
 Everything below is current behaviour on `main`, checked against the code rather
 than against a pull-request summary. Where a change is a **behaviour change** it
@@ -32,8 +32,8 @@ on not happening.
 
 ## 2. `br stop` default timeout is 60s, and it is now the guest's budget
 
-**Was:** `-t` / `--timeout` defaulted to 30 seconds (`config.DefaultStopTimeout`)
-and bounded only how long the *client* waited.
+**Was:** `-t` / `--timeout` defaulted to 30 seconds and bounded only how long the
+*client* waited.
 
 **Is:** it defaults to 60 seconds (`control.DefaultEjectTimeoutSeconds`) and is
 sent to the server as the guest's real drain budget: the guest gets that long to
@@ -45,8 +45,7 @@ forwarders and exit.
 The budget is clamped to 9 minutes so a very large `--timeout` cannot turn into a
 control-client transport error.
 
-`config.DefaultStopTimeout` is now an orphaned constant — nothing reads it. If
-you were matching on the old 30-second behaviour, stop.
+If you were matching on the old 30-second behaviour, stop.
 
 ## 3. `br reset` refuses to run against a running VM
 
@@ -69,54 +68,39 @@ recovering a wedged instance).
 `br reset` also now targets the instance selected by `--instance` rather than
 always the default state dir.
 
-## 4. `--instance` is a root flag that only some verbs honour
+## 4. `--instance` is refused by the verbs that do not act on one VM
 
 `--instance` (and `BLADERUNNER_INSTANCE` / `BR_INSTANCE`) is a **persistent flag
-on the root command**, so cobra renders it in the help of *every* verb. Only
-these eight actually resolve it:
+on the root command**, so cobra renders it in the help of *every* verb. It used
+to be silently ignored by about half of them, which is worse than rejecting it:
+the user reads the help, uses the flag, and gets an answer about a different VM.
 
-| Verb | How |
+**Is:** every command declares what it does with the flag, and an undeclared
+command refuses it. There are three policies:
+
+| Policy | Commands |
 |---|---|
-| `br status` | `resolveInstanceTarget()` |
-| `br stop` | `targetStateDir()` |
-| `br reset` | `resolveInstanceTarget()` |
-| `br config` | `targetStateDir()` (get, set, keys) |
-| `br shell` | `sshTarget()` |
-| `br ssh` | `sshTarget()` |
-| `br ls` | `incusClientForTarget()` |
-| `br eject` | `selectedInstanceName()`, when no name is given positionally |
+| **Honoured** — resolves the flag and acts on that instance | `status`, `stop`, `restart`, `reset`, `eject`, `save`, `restore`, `upgrade`, `reconnect`, `ssh config`, `shell`, `exec`, `incus`, `ls`, `logs`, `events`, `web`, `config` |
+| **All instances** — spans every instance, so selecting one would mean nothing | `instances` |
+| **Refused** — does not act on a selected VM | everything else, including `up`, `start`, `boot`, `watch`, `disk`, `disks`, `user`, `notice`, `menubar`, `self-update`, `web untrust` |
 
-**Every other verb silently ignores it** and acts on the flat default instance.
-The ones where that is a genuine surprise, because they *do* talk to a running
-VM:
+A refusal names what to reach for instead, for example:
 
-| Verb | What it actually targets |
-|---|---|
-| `br exec` | `connectIncus()` → the default state dir |
-| `br logs` | `connectIncus()` → the default state dir |
-| `br events` | `connectIncus()` → the default state dir |
-| `br incus` | `sshConfigFromControl()` → `requireRunningVM()` → the default state dir |
-| `br reconnect` | `sshConfigFromControl()` → the default state dir |
-| `br web` | `webEndpoints()` → `requireRunningVM()` → the default state dir |
-| `br save` | `control.NewClient(config.DefaultStateDir())` |
-| `br restore` | `control.NewClient(config.DefaultStateDir())` |
-| `br upgrade` | `config.DefaultStateDir()` |
-| `br up` / `br start` / `br boot` | the default state dir (via `vmgate`), or the cartridge named on the command line |
+```
+--instance selects a VM to act on; 'br boot' does not act on one
+  'br boot' names the instance it creates in its own argument: 'br boot <name>'
+```
 
-The remaining verbs — `br disk`, `br disks`, `br user`, `br notice`,
-`br menubar`, `br self-update` — are not instance-scoped at all: they act on the
-disk shelf, the identity store, or the host install. `br instances` deliberately
-ignores `--instance` because listing everything is its job.
+Only the **flag** triggers a refusal. A `BLADERUNNER_INSTANCE` left in the
+environment is a standing preference, not a claim about this invocation, so it
+never makes `br disks` fail.
 
-There is **no warning** when a verb ignores the flag. `br exec --instance green`
-runs against the default VM and says nothing.
+**What to do:** if a script relied on `--instance` being tolerated by a verb that
+does not act on one VM, drop the flag there. If it relied on `--instance` being
+*ignored* by `br exec`, `br save`, `br restore` or `br upgrade` — those now
+honour it, and will act on the named instance rather than the default.
 
-**What to do until this is fixed:** for a verb not in the first table, address the
-instance another way — `br ssh --instance green` then run the command in the
-guest, or `br shell --instance green`. Do not assume `--instance` reached
-`br exec`, `br save`, `br restore` or `br upgrade`.
-
-## 5. Booted cartridges mount browsably under `/Volumes`, with no opt-out
+## 5. Booted cartridges mount browsably under `/Volumes` by default
 
 **Was:** a cartridge attached `-nobrowse` at `<state-dir>/mnt/<name>` — invisible
 in Finder.
@@ -129,35 +113,34 @@ dictated.
 This is deliberate: ejecting the volume is the gesture that asks for an orderly
 shutdown, and a volume nobody can see is a volume nobody can eject.
 
-**There is no CLI flag to opt a boot back into the private mount.** The private
-policy survives as a value, and `br disk pack` (and `cartridge.Attach`) are pinned
-to it so packing and booting never contend for one mountpoint — but no boot path
-exposes it. `--private-mount` appears only in source comments and in
-`scripts/smoke-cartridge.sh`'s prose; it is not a flag you can pass.
+`br boot --private-mount` opts one boot back into the old dictated, invisible
+mount — deterministic, and what a script usually wants. `br disk pack` (and
+`cartridge.Attach`) are pinned to the private policy unconditionally, so packing
+and booting never contend for one mountpoint.
 
-**What to do:** expect a booted cartridge to be visible and ejectable in Finder,
-and expect an idle eject click to start a full VM shutdown. That shutdown is
-orderly (see §9 of `usage.md`), but it is still a shutdown.
+**What to do:** expect a booted cartridge to be visible and ejectable in Finder
+unless you pass `--private-mount`, and expect an idle eject click to start a full
+VM shutdown. That shutdown is orderly (see *Eject safely* in
+[usage.md](usage.md)), but it is still a shutdown.
 
-## 6. `br disk pack --out demo.dmg` produces `demo.dmg.sparseimage`, then fails
+## 6. `br disk pack --out demo.dmg` is refused up front
 
-`--out` is passed through `ensureSparseExt`, which appends `.sparseimage` unless
-the path already ends in it. So `--out demo.dmg` becomes `demo.dmg.sparseimage`.
-
-The cartridge name is then derived from that output path by trimming one
-cartridge extension, giving `demo.dmg`, which is checked against
-`instance.ValidName`. That regex is `^[a-z0-9][a-z0-9-]*$`, so the dot is
-rejected and the pack fails before anything is written:
+`--out` names the **runnable** cartridge form. A path with any other extension is
+refused before anything is written:
 
 ```
-cartridge name "demo.dmg" derived from output path demo.dmg.sparseimage is unusable:
-invalid instance name: "demo.dmg" must match ^[a-z0-9][a-z0-9-]*$ ...
+cartridge output path must name the runnable form: demo.dmg ends in ".dmg";
+write the runnable cartridge with '--out demo.sparseimage', and add --ship to
+also produce the compressed .dmg AirDrop artifact
 ```
 
-**What to do:** pass `--out demo.sparseimage`, or `--out demo`, or omit `--out`.
-Use `--ship` to get the `.dmg`; you do not name it with `--out`. The failure is
-loud and happens before any work, so nothing is left behind — but the error names
-a path you did not type, which is why it is here.
+This used to be a much worse failure: `--out demo.dmg` silently became
+`demo.dmg.sparseimage`, whose derived cartridge name `demo.dmg` then failed
+`instance.ValidName` three calls later and put a regex in front of a user who had
+only picked the wrong extension — after `--ship` had advertised a `.dmg` to them.
+
+**What to do:** pass `--out demo.sparseimage`, or a bare `--out demo`, or omit
+`--out`. Use `--ship` to get the `.dmg`; you do not name it with `--out`.
 
 ## 7. Downgrading `br` drops the ssh `Include` line
 
@@ -166,8 +149,10 @@ legacy `Host bladerunner` block **plus** an `Include` of
 `~/.config/bladerunner/ssh/config.d/*`, and each named instance writes its own
 fragment at `config.d/<name>` with a `Host bladerunner-<name>` alias.
 
-The aggregator is written `O_TRUNC` — the whole file is replaced on every write.
-A **newer** `br` writes the `Include` line; an **older** `br` writes the same path
+The current `br` *appends* the `Include` to an aggregator that predates
+per-instance configs, and publishes both the fragment and the aggregator
+atomically, so the existing default-instance block stays first and keeps winning.
+An **older** `br` knows nothing about the line and rewrites the whole aggregator
 without it. So running an older `br` after a newer one silently drops the
 `Include`, and every named instance's `config.d/<name>` fragment is orphaned:
 still on disk, no longer reachable, so `ssh -F ~/.config/bladerunner/ssh/config
@@ -178,27 +163,27 @@ upgrade` and `br self-update` replace `br` while old holders keep running old
 code, and version skew is a standing condition rather than a one-off.
 
 **What to do:** if named-instance ssh aliases stop working after a downgrade or a
-mixed-version session, start any instance with the current `br` — that rewrites
-the aggregator with the `Include` — or re-add the line by hand. The fragments
-themselves are intact.
+mixed-version session, start any instance with the current `br` — that restores
+the `Include` — or re-add the line by hand. The fragments themselves are intact.
 
-## 8. `br boot` on a `.dmg` still discards guest changes
+## 8. `br boot` on a `.dmg` discards guest changes unless you pass `--persist`
 
 A shipped `.dmg` is read-only, so `br boot` converts it to a writable
 `.sparseimage` working copy next to the original, boots that, and **removes the
 working copy when the cartridge is closed**. Everything the guest wrote goes with
-it.
+it. That is still the default and it does not change: a `.dmg` boot is a
+throwaway run.
 
-This was *guarded* in the cartridge work, not fixed: the removal now happens only
-after the volume is genuinely detached, and a stale working copy that is still
-attached is refused rather than unlinked, so the failure mode "delete an image the
-kernel is still serving" is gone. The data still does not survive.
+`br boot <file>.dmg --persist` writes the changes back. It never writes into the
+original — see the `--persist` description in [usage.md](usage.md) §3 for what it
+does instead, and what it leaves behind if the write-back is interrupted.
 
-`br boot` on a `.sparseimage` attaches it **in place** and does persist.
+`br boot` on a `.sparseimage` attaches it **in place** and always persists, so
+`--persist` is a no-op there and says so.
 
-**What to do:** if you need a cartridge's guest changes to survive, boot the
-`.sparseimage` form, not the `.dmg`. Cartridge persistence for the shipped form is
-outstanding work (W10 in `design.md`).
+**What to do:** a `.dmg` boot that you expect to keep its changes needs
+`--persist`. Without it, nothing warns you — the discard is the documented
+default.
 
 ## 9. Ports are a preference, not a guarantee
 
@@ -231,7 +216,7 @@ reserved, so they follow automatically.
 |---|---|
 | `<stateDir>/instances/<name>.json` | The instance registry entry, published by the holder and removed on clean exit. Pruned by `br instances` when the holder is gone. |
 | `<stateDir>/control.lock` | The ownership claim taken next to `control.sock` before the dial/bind dance. |
-| `<stateDir>/vmd.log`, `<stateDir>/vmd-<name>.log` | The detached holder's raw stdout/stderr, one per instance. Rotated at 10 MB, 3 backups, 14 days. |
+| `<stateDir>/vmd.log`, `<stateDir>/vmd-<name>.log` | The detached holder's raw stdout/stderr, one per instance. Rotated at 10 MB, 3 backups, 14 days. Which file belongs to which instance is in [usage.md](usage.md), *Where the logs are*. |
 | `<cartridge volume>/cartridge.json` | The cartridge's self-description and format stamp — inside the mounted volume, so it travels with the image. |
 | `~/.config/bladerunner/ssh/config.d/<name>` | The per-instance ssh fragment (see §7). |
 

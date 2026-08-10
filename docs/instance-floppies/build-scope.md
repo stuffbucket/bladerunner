@@ -1,7 +1,17 @@
 
 # BUILD SCOPE — Instance Floppies
 
-Phased, PR-by-PR implementation plan for the Instance Floppies PRD, grounded in the bladerunner codebase as it stands on `main`. Each phase is independently shippable. Real file paths and line anchors are cited so an implementer can start immediately.
+> **Status: parked, unimplemented.** Companion to [`prd.md`](prd.md); read its
+> status block first. None of the phases below were built. This plans a **floppy**
+> (one Incus instance as a DMG), which is a different artifact from the shipped
+> **cartridge** (a whole machine as a DMG) documented in
+> [`docs/cartridge-runtime/`](../cartridge-runtime/).
+>
+> **Trust the symbol names, not the line numbers.** This was grounded against
+> `main` in June 2026 and the tree has moved since. Anchors verified wrong in the
+> 2026-08-07 pass are corrected in place and marked; the rest are unverified.
+
+Phased, PR-by-PR implementation plan for the Instance Floppies PRD, grounded in the bladerunner codebase as it stood on `main` in June 2026. Each phase is claimed to be independently shippable (the review disputes this for Phase 1). Real file paths and line anchors are cited so an implementer can start immediately.
 
 ---
 
@@ -25,8 +35,8 @@ A new top-level **`br floppy`** noun with sub-verbs. This keeps the three artifa
   - `Manifest` — the small read-mostly metadata Incus needs (instance name, image base, profile, devices, idmap, instance UUID, export digest, payload filename). Schema/validate/parse/load/clone **mirrors** `internal/disk/manifest.go` (do not import-reuse — different shape). Reuses `disk.ValidName` / `disk.ValidSHA256` validators directly.
   - `Stamp` — `{UUID string; Generation uint64}` JSON sidecar inside the DMG. UUID via `crypto/rand`+hex (repo convention — **no `google/uuid`**; closest prior art `internal/vm/metadata.go`).
   - `Registry` / `RegistryEntry` — host-side map of `instance name + Stamp(UUID,generation)` ↔ mounted DMG path ↔ pool. Persisted under the state dir. **Nothing maps instance↔DMG today**; this is net-new. Catalog/overlay pattern **mirrors** `internal/disk/catalog.go`.
-  - `WriteBack(ctx, dmgMount, payload, expectStamp)` — the load-bearing data-safety primitive: temp-in-DMG → **fsync** → verify (size+sha256) → atomic rename over canonical → keep exactly one `.prev`; conflict/recovery side-file on stamp mismatch/deletion. Starting points: `internal/vm/assets.go:438` (temp+rename, **no fsync/.prev** — extend) and `internal/vm/metadata.go` (JSON sidecar).
-  - Floppy sizing constants (`HeadroomGiB`/`MinSizeGiB` in `cartridge.go:45` are VM-scale; floppies want their own small values — sparse cost is real-bytes-only, so over-provisioning is cheap, but the floor should be export-tarball-appropriate).
+  - `WriteBack(ctx, dmgMount, payload, expectStamp)` — the load-bearing data-safety primitive: temp-in-DMG → **fsync** → verify (size+sha256) → atomic rename over canonical → keep exactly one `.prev`; conflict/recovery side-file on stamp mismatch/deletion. Starting points: the temp+rename idiom in `internal/vm/assets.go` (**no fsync/.prev** — extend) and `internal/vm/metadata.go` (JSON sidecar).
+  - Floppy sizing constants (`HeadroomGiB`/`MinSizeGiB` in `internal/cartridge/cartridge.go` are VM-scale — 8 GiB headroom, 10 GiB floor; floppies want their own small values — sparse cost is real-bytes-only, so over-provisioning is cheap, but the floor should be export-tarball-appropriate).
 
 - **`internal/incus`** (EXTEND, not new) — add thin wrapper methods on the existing `Client` (`internal/incus/instance.go`), each following the established `ExecInstance` shape (build `api.*Post`, `op := server.X(...)`, `op.WaitContext(ctx)`):
   - `ImportInstance(ctx, backup io.Reader, pool, name)` → `CreateInstanceFromBackup(InstanceBackupArgs{...})`
@@ -42,7 +52,7 @@ A new top-level **`br floppy`** noun with sub-verbs. This keeps the three artifa
 
 | Package | Reused as-is | Mirrored (copy pattern) | Extended (new code) |
 |---|---|---|---|
-| `internal/cartridge` | `Create`, `Attach`, `Detach` (busy→-force), `Compact`, `ConvertToDMG` (UDZO template), `ConvertToSparse` (writable copy), `IsAttached`, `Mount`, the darwin/`!darwin` `hostSupported()` split | — | **`AttachReadOnly`** / `-readonly` flag through `attachArgs` (`cartridge.go:165` hardcodes writable — new); a floppy-sized `SizeGiB` |
+| `internal/cartridge` | `Create`, `Attach`, `Detach` (busy→-force), `Compact`, `ConvertToDMG` (UDZO template), `ConvertToSparse` (writable copy), `IsAttached`, `Mount`, the darwin/`!darwin` `hostSupported()` split | — | **`AttachReadOnly`** / `-readonly` flag through `attachArgs` (now in `internal/cartridge/mountpolicy.go`, not `cartridge.go:165` — and it now carries a private/browsable `MountPolicy` this plan predates); a floppy-sized `SizeGiB` |
 | `internal/disk` | `ValidName`, `ValidSHA256`, `nameRe`, `sha256Re`, `ShareSpec` shape | `Manifest`/`Validate`/`Parse`/`Load`/`Clone` + `Catalog` (builtins+XDG overlay) | — |
 | `internal/control` | `Router.Mount` sub-router, `registerUpgradeHandlers` wiring pattern, `getRunner`/`setRunner` mutex holder, `client.Send`, `saveCommandTimeout` | — | `floppy.*` sub-router commands; raise client-side `ejectWaitMargin` for floppy eject |
 | `internal/incus` | `Connect`/`ConnectFromFiles`, `Server()` escape hatch, the loopback→vsock forwarder | — | the 5 wrapper methods above |
@@ -57,23 +67,35 @@ A new top-level **`br floppy`** noun with sub-verbs. This keeps the three artifa
 
 ### Decision: bake `btrfs-progs`, init pool on first boot (resolves §9 fork + §8.F)
 
-Bake the **package** into the image but **init the loopback pool on first boot** (via the canonical init step), not at image-build time. Rationale: a build-time loopback pool inflates the qcow2 and may not survive `virt-sparsify` (`build-guest-image.sh:192`); a single quick first-boot `incus storage create pool btrfs size=NNGiB` keeps the image small for one bounded init. Fallback-to-`dir`-with-loud-log on failure, never a silent `|| true` that leaves Incus with no usable pool.
+Bake the **package** into the image but **init the loopback pool on first boot** (via the canonical init step), not at image-build time. Rationale: a build-time loopback pool inflates the qcow2 and may not survive sparsification; a single quick first-boot `incus storage create pool btrfs size=NNGiB` keeps the image small for one bounded init. Fallback-to-`dir`-with-loud-log on failure, never a silent `|| true` that leaves Incus with no usable pool.
 
-### The single canonical btrfs-init form (applied identically in all 4 paths)
+### The single canonical btrfs-init form (applied identically in every path)
 
 Define one shell snippet: `incus admin waitready` (reuse existing loop) → if no usable default pool, `incus storage create <pool> btrfs size=NNGiB`; **on failure, fall back to `incus storage create <pool> dir` and emit a loud `WARNING: btrfs pool create failed, falling back to dir (slow, pausing exports)` log — not `|| true`.** Replace the bare `incus admin init --auto || true`.
 
 ### Files (edited)
 
-- `internal/provision/cloudinit.go:348,349-352,355` — append `btrfs-progs` to all three apt/dnf install invocations. Pure literal text in the `fmt.Sprintf` template — **mind `%%` escaping** (`cloudinit.go:430` precedent); no new format args.
-- `internal/provision/cloudinit.go:372` — replace `incus admin init --auto || true` with the canonical btrfs-init snippet. Keep the existing `waitready` loop (365–370) ahead of it.
-- `internal/provision/cloudinit.go:538-557` (`buildMinimalCloudInit`, the `UseGuestAgent=true` path) — this path defers to `br-agent`, so the canonical init must **also** land in the agent's `admin init` logic (documented at `internal/agent/protocol.go:33`; `cmd/br-agent` does not yet exist — leave a tracked TODO + the shared snippet ready so the agent path does not silently get a `dir` pool).
-- `scripts/build-guest-image.sh:125` — add `btrfs-progs` to the virt-customize `--install` list; **do not** bake the pool (decision above). `:175` — same `btrfs-progs` addition in the nbd+chroot fallback to avoid divergence.
-- `scripts/build-guest-image.sh` — leave the first-boot pool init to the agent/cloud-init canonical snippet (image stays small; no `TARGET_SIZE_GIB:33` bump needed).
+> *Anchors re-verified 2026-08-07.* The original list named four paths, two of
+> which no longer exist: `scripts/build-guest-image.sh` (and its nbd+chroot
+> fallback) was replaced by the `internal/imagebuild` Go package, and
+> `internal/agent/protocol.go` / `cmd/br-agent` were never created in this repo.
+> Line numbers inside `cloudinit.go` have all shifted.
 
-### Pre-baked image track (parallel, gated)
+- `internal/provision/cloudinit.go` — append `btrfs-progs` to every apt/dnf install invocation. Pure literal text in the `fmt.Sprintf` template — **mind `%%` escaping**; no new format args.
+- `internal/provision/cloudinit.go:478` — replace `incus admin init --auto || true` with the canonical btrfs-init snippet. Keep the existing `waitready` loop ahead of it.
+- `internal/provision/cloudinit.go` (`buildMinimalCloudInit`, the `UseGuestAgent=true` path) — this path defers to the guest agent, which is now the **default** (`UseGuestAgent` defaults true). The agent lives outside this repo, so the canonical init must land in the baked image instead or that path silently gets a `dir` pool. This is the highest-drift risk in the phase.
+- `internal/imagebuild/incusinit.go` — the image-bake pipeline's Incus init step; the canonical snippet must land here too. **Do not** bake the pool (decision above).
 
-- The publish machinery already exists (`.github/workflows/build-guest-image.yml:108-161` maintains `guest-image-latest`). **Do not flip `useHosted=true` (`internal/config/config.go:280`) yet.** Two blockers, both tracked here, neither blocking floppy code: (a) `guest-image-latest` is unpublished; (b) the artifact may carry a `-no-agent` suffix (`build-guest-image.yml:75-78,84`) that will not match the bare `bladerunner-guest-<arch>.qcow2` name `HostedGuestImageURL` (`config.go:253-262`) expects → 404. Reconcile artifact naming before flipping. Per-disk opt-in (`internal/disk/apply.go:27-31`) remains available for testing without touching the global default.
+### Pre-baked image track — RESOLVED, no longer a gate
+
+The pre-baked guest image shipped and is now the default: `UseHostedGuestImage`
+and `UseGuestAgent` default true, `DefaultBaseImageURL` resolves
+`HostedGuestImageURL`, the artifact is verified against a published `.sha256`
+sidecar, and any download/verify failure emits a WARN and falls back to the pinned
+Debian + cloud-init path. The `-no-agent` suffix that this section flagged as a
+404 trap does not exist in `.github/workflows/build-guest-image.yml`.
+`--cloud-init` / `BLADERUNNER_FORCE_CLOUD_INIT=1` force the legacy path.
+**Nothing here blocks floppy work; only the btrfs half of Phase 0 remains.**
 
 ### Verbs/flags
 
@@ -81,7 +103,7 @@ None (provisioning only).
 
 ### Test strategy
 
-- **New `scripts/smoke-floppy.sh` (stub) + `make smoke-floppy`** — Phase 0 slice asserts only: machine boots → `incus storage list` shows a **btrfs** default pool → a uid-shifted container launches on it (spike #2). Mirrors `scripts/smoke-cartridge.sh` / `Makefile:97-98`.
+- **New `scripts/smoke-floppy.sh` (stub) + `make smoke-floppy`** — Phase 0 slice asserts only: machine boots → `incus storage list` shows a **btrfs** default pool → a uid-shifted container launches on it (spike #2). Mirrors `scripts/smoke-cartridge.sh` and its `smoke-cartridge` / `smoke-holder` Makefile targets.
 - Unit: a render test asserting the bootstrap script contains `btrfs-progs` and the canonical init in every branch (catches the brittle `fmt.Sprintf` template — a class only caught by running the bootstrap, so assert the rendered string).
 
 ### Build-tag / GOOS=linux obligations
@@ -102,7 +124,7 @@ None (provisioning only).
 
 - **`internal/floppy/floppy.go`** (new) — `Manifest` (mirror `disk/manifest.go:44,112,197,209,170`), `Stamp`, sizing constants, format constants. Reuse `disk.ValidName`/`disk.ValidSHA256`.
 - **`internal/floppy/floppy_darwin.go`** / **`internal/floppy/floppy_other.go`** (new) — `hostSupported()` true/false + `ErrUnsupported` sentinel; every public fn early-returns it on `!darwin`. **Copy `cartridge_darwin.go`/`cartridge_other.go` verbatim.**
-- **`internal/floppy/registry.go`** (new) — `Registry` keyed by `instance name + Stamp`. Persisted JSON under `config.DefaultStateDir()`. Uses a **separate `mnt-floppy/` subtree** (or a typed marker file) so `listAttachedCartridges`/`resolveEjectSlot` (`cartridge.go:480`, `eject.go:96`) never mis-detect a floppy as a bootable cartridge (PRD §6.6, §8.G).
+- **`internal/floppy/registry.go`** (new) — `Registry` keyed by `instance name + Stamp`. Persisted JSON under `config.DefaultStateDir()`. Uses a **separate `mnt-floppy/` subtree** (or a typed marker file) so `listAttachedCartridges` (`cmd/bladerunner/cartridge.go`) and `resolveEjectSlot` (`cmd/bladerunner/eject.go`) never mis-detect a floppy as a bootable cartridge (PRD §6.6, §8.G).
 - **`internal/incus/instance.go`** (edit) — add `ImportInstance` (+ stub `ExportInstance`/`SnapshotInstance`/`SetInstanceState`/`DeleteInstance` so the Phase-2 surface compiles referenced; keep exported API used on Linux to dodge the unused-code trap).
 - **`internal/cartridge/cartridge.go`** (edit) — add floppy-sized `SizeGiB` variant or a `SizeGiBFor(bytes)` helper (do not reuse the VM-scale `HeadroomGiB=8`/`MinSizeGiB=10`).
 - **`cmd/bladerunner/floppy.go`** (new) — `floppy` command tree; `floppy insert <name.dmg>`, `floppy new <name>`, `floppy list`.
@@ -203,21 +225,19 @@ Stamp captured at insert vs at eject: changed → conflict side-file + warn (nev
 
 ---
 
-## Phase 4 — Finder-eject via DiskArbitration (DEFERRED past v1 — resolves §8.D)
+## Phase 4 — Finder-eject via DiskArbitration (OBSOLETE — the bridge already exists)
 
-**Recommendation: defer.** Substantial new cgo surface (DiskArbitration.framework + CoreFoundation, `DARegisterDiskUnmountApprovalCallback`, a `CFRunLoop` on a dedicated session thread) — a notable departure from the repo's pure-Go+hdiutil-exec approach. The import/export model already makes the DMG a savefile, so a Finder force-eject mid-session loses only changes-since-last-checkpoint and does **not** crash the running instance — acceptable and documented for v1.
+**This phase is dead as written.** It priced DiskArbitration as an XL/high-risk
+new cgo surface and recommended deferring past v1. The cartridge runtime has since
+built and shipped that bridge: `internal/diskarb` owns the session, the run loop,
+and the unmount-approval callback, with `cmd/bladerunner/cartridge_watch_darwin.go`
+and `protection.go` on top. AGENTS.md §3 names `internal/diskarb` as the owner and
+forbids a second cgo bridge, so the plan below — a floppy-local
+`internal/floppy/diskarb_darwin.go` — must **not** be followed.
 
-### If/when pursued
-
-- **`internal/floppy/diskarb_darwin.go`** (cgo, darwin-only) + **`internal/floppy/diskarb_other.go`** (`!darwin` stub `ErrUnsupported`). Veto unmount → acquire per-floppy lock → final checkpoint/flush → approve. Started from the checkpoint goroutine's lifecycle in `runStart`.
-
-### Test strategy
-
-Manual + a darwin-only smoke step (cannot run in Linux CI). The `!darwin` stub keeps CI green.
-
-### Effort / risk
-
-**Effort: XL. Risk: H** (cgo + framework linking + run-loop threading + entitlements). Explicitly out of v1.
+A floppy build would instead call `internal/diskarb` to veto the unmount, take the
+per-floppy lock, run the final checkpoint/flush, and approve. That is a small
+integration, not an XL phase.
 
 ---
 
@@ -253,7 +273,7 @@ Phase 4 (DiskArbitration)    Phase 5 (live share)
 - **Critical path:** 0 → 1 → 2 → 3. Phases 4 and 5 are deferred (recommended out of v1).
 - **Parallelizable now:** Phase 0's provisioning edits and the pre-baked-image publish/reconcile work are independent of the entire host DMG surface (Phases 1–3) — the host code can be built and tested against a cold-init machine. The "fast UX" milestone (§10.5: seconds-not-7-minutes insert) gates on the published btrfs image but **correctness does not** (§8.F).
 - **Within Phase 1:** the `internal/incus` wrapper methods and the `internal/floppy` manifest/registry can be built by two people in parallel; they meet at `runFloppyInsert`.
-- **Hard dependencies:** Phase 2 needs Phase 1's registry + import wrapper. Phase 3's save-as branches into Phase 2's eject. Do **not** flip `config.go:280 useHosted=true` until the `-no-agent` artifact naming is reconciled (else download 404s).
+- **Hard dependencies:** Phase 2 needs Phase 1's registry + import wrapper. Phase 3's save-as branches into Phase 2's eject. *(The former `useHosted` gate here is gone — the hosted image is now the default and the `-no-agent` trap no longer exists.)*
 
 ## Cross-cutting guardrails (every phase)
 
@@ -261,7 +281,7 @@ Phase 4 (DiskArbitration)    Phase 5 (live share)
 - No new heavy deps (UUID via `crypto/rand`+hex, not `google/uuid`). `golangci-lint(latest)` clean: keep new exported API referenced on Linux (unused-code trap), `gocyclo<=25` on orchestration funcs (insert/checkpoint/eject get long), `unparam` on helpers.
 - Drive all insert/checkpoint/eject via the **REST SDK** (`internal/incus.Client`) over the existing `127.0.0.1:18443`→vsock→guest `:8443` path with `op.WaitContext(ctx)` — never shell `incus export/import` over SSH.
 - Never conflate with VZ `save`/`restore` (whole-VM machine state) — different layer, different verb.
-- Prove host behavior live with `make smoke-floppy` (mirroring `scripts/smoke-cartridge.sh` / `Makefile:97`), grown phase-by-phase.
+- Prove host behavior live with `make smoke-floppy` (mirroring `scripts/smoke-cartridge.sh` and its Makefile target), grown phase-by-phase.
 
 ## Success-metric → phase mapping
 
@@ -275,4 +295,4 @@ Phase 4 (DiskArbitration)    Phase 5 (live share)
 | 6. Multi-floppy independence | Phase 1 registry + Phase 2 smoke |
 | 7. CI/convention health | Every phase (build-tag + lint + smoke obligations) |
 
-**Relevant grounding files:** `internal/cartridge/cartridge.go`, `internal/cartridge/cartridge_{darwin,other}.go`, `internal/incus/instance.go`, `internal/disk/{manifest,catalog}.go`, `internal/control/control.go`, `internal/provision/cloudinit.go`, `scripts/build-guest-image.sh`, `internal/vm/{assets,metadata}.go`, `cmd/bladerunner/{eject,start,incus_client,output,ls,floppy}.go`, `internal/config/config.go`, `scripts/smoke-cartridge.sh`, `Makefile`.
+**Relevant grounding files:** `internal/cartridge/{cartridge,mountpolicy}.go`, `internal/cartridge/cartridge_{darwin,other}.go`, `internal/diskarb/`, `internal/incus/instance.go`, `internal/disk/{manifest,catalog}.go`, `internal/control/control.go`, `internal/provision/cloudinit.go`, `internal/imagebuild/incusinit.go`, `internal/vm/{assets,metadata}.go`, `cmd/bladerunner/{eject,start,incus_client,output,ls}.go`, `internal/config/config.go`, `scripts/smoke-cartridge.sh`, `Makefile`.

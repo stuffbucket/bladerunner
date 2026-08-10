@@ -105,9 +105,24 @@ the VM inside the mount (`root.img`, state under `state/`, the RW share at
 `share/`) and owns that mount for as long as the VM runs.
 
 Browsable is deliberate: a volume nobody can see is a volume nobody can eject,
-and ejecting is how you ask for an orderly shutdown (§5). Packing still attaches
+and ejecting is how you ask for an orderly shutdown (§5). Packing always attaches
 privately under the state dir, so `br disk pack` and `br boot` never contend for
 one mountpoint.
+
+Two flags apply only to a cartridge boot. Passing either on a disk or URL boot is
+refused, not ignored:
+
+| Flag | Meaning |
+|---|---|
+| `--persist` | Write the guest's changes back over the `.dmg` you booted. Without it a `.dmg` boot is a throwaway run — that is the default. A `.sparseimage` boot already writes in place, so `--persist` is a no-op there. |
+| `--private-mount` | Attach `-nobrowse` at `<state>/mnt/<name>` instead of `/Volumes`. Deterministic, and what scripts want — but invisible in Finder, so the cartridge cannot be ejected by hand. |
+
+`--persist` never writes into the original: once the guest has powered off and the
+volume is detached, the working copy is compacted, compressed to a new `.dmg`
+beside the original, verified, and only then renamed over it. A failed or
+interrupted write-back leaves the original byte-for-byte as it was and keeps the
+guest's changes in a `<name>-rescue-<timestamp>.sparseimage` you can boot
+directly.
 
 The host side of the share is `share/` inside the mount; the guest sees it at
 `/mnt/share` over VirtioFS. Drop a file in either and it appears in the other.
@@ -126,10 +141,15 @@ br instances                    # what is running, on which ports, held by which
 ```
 
 ```
-NAME   KIND       SSH    API    UPTIME  PID    STATE DIR                  SOURCE
-blue   cartridge  6022   18443  4m12s   41207  /Volumes/bladerunner-blue  /…/blue.sparseimage
-green  cartridge  53812  53813  1m02s   41880  /Volumes/bladerunner-green /…/green.sparseimage
+NAME   KIND       SSH    API    UPTIME  PID    EJECT      STATE DIR                  SOURCE
+blue   cartridge  6022   18443  4m12s   41207  protected  /Volumes/bladerunner-blue  /…/blue.sparseimage
+green  cartridge  53812  53813  1m02s   41880  protected  /Volumes/bladerunner-green /…/green.sparseimage
 ```
+
+The `EJECT` column reports whether that cartridge's unmount veto armed. When it
+did not, the column says why — the veto fails open so the VM still runs, and an
+unprotected cartridge is visible rather than buried in a log. `br status` reports
+the same for one instance.
 
 Pick one for any verb with `--instance` (or `BLADERUNNER_INSTANCE` /
 `BR_INSTANCE` in the environment):
@@ -141,6 +161,11 @@ br ssh     --instance green
 br stop    --instance green
 br eject   green
 ```
+
+A verb that does not act on one selected VM — `br disks`, `br up`, `br watch` —
+**refuses** `--instance` with an error naming what to reach for instead, rather
+than silently acting on the default. See
+[behaviour-changes.md](behaviour-changes.md) §4.
 
 The selection policy is deliberately boring:
 
@@ -261,12 +286,17 @@ the fourth one. AirDropping four cartridges to a 16 GB Mac and booting them all
 will wedge that Mac. Size the guests (`--memory`, or the disk manifest) and
 count them yourself.
 
-**One holder per cartridge, enforced only by the control socket.** The mutual
-exclusion is the bound socket inside the mount (taken under an `O_EXCL` lock)
-plus a liveness probe, and the watcher additionally skips a volume some instance
-already holds. Two *different* processes attaching the same image file is still
-not something the runtime prevents in every ordering — do not boot the same file
-twice concurrently.
+**One holder per cartridge, enforced by a kernel lock on the image.** Booting a
+cartridge takes an exclusive `flock(2)` claim on its working copy, keyed on both
+the symlink-resolved path *and* the device/inode — so the `.dmg` and
+`.sparseimage` spellings of one cartridge are one claim, and two hard links to
+one image cannot each take their own. A second boot of the same file is refused
+with "cartridge is already booted by another process". A claim that could not be
+*established* at all (a network share that refuses locks, failing hardware) is
+reported separately and also refuses the boot, because it names no conflict for
+you to go and clear. The instance's own state dir is additionally guarded by its
+control socket and lock file, and the watcher skips a volume some instance
+already holds.
 
 **Detection can be blocked by macOS privacy settings.** AirDropped cartridges
 land in `~/Downloads`, and the menubar runs from a LaunchAgent with no
@@ -278,12 +308,6 @@ removable volumes in System Settings › Privacy & Security, or boot by path wit
 
 **Booted cartridges are visible in Finder now.** That is the point (you cannot
 eject what you cannot see), but it also means an idle click can start a full VM
-shutdown. There is no CLI flag to opt a boot back into the old invisible
-`-nobrowse` mount; the private policy is used internally by `br disk pack` only.
+shutdown. `br boot --private-mount` opts one boot back into the invisible
+`-nobrowse` mount when that is what you want; `br disk pack` always uses it.
 
-**`--instance` is accepted by every verb but honoured by only some of them.** It
-is a persistent flag on the root command, so cobra renders it in every verb's
-help. `status`, `stop`, `reset`, `config`, `shell`, `ssh`, `ls` and `eject`
-resolve it; `exec`, `logs`, `events`, `incus`, `reconnect`, `web`, `save`,
-`restore` and `upgrade` silently act on the default instance instead, with no
-warning. The full map is in [behaviour-changes.md](behaviour-changes.md) §4.

@@ -32,6 +32,9 @@ obligations — so we shell out to a user-installed copy instead of vendoring it
 ```bash
 br stop                     # or: br stop --force   (panicked/hung guest)
 
+# The default instance's disk. A named disk slot or a cartridge keeps its own
+# disk.raw under ~/.local/state/bladerunner/disks/<name>/ — `br instances`
+# reports each one's state directory.
 cd ~/.local/state/bladerunner
 
 # Attach the raw disk image WITHOUT mounting (macOS can't mount ext4 anyway).
