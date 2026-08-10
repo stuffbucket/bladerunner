@@ -357,6 +357,7 @@ func withDebianFallback(t *testing.T, url string, data []byte) {
 // hosted image with a matching fail-closed sidecar is used verbatim and cfg
 // stays hosted (no fallback).
 func TestEnsureBaseImage_HostedSuccessStaysHosted(t *testing.T) {
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
 	hosted := []byte("pre-baked guest image bytes")
 	sidecar := []byte(sha256Hex(hosted) + "\n")
 	srv := hostedDebianServer(t, hosted, sidecar, []byte("debian bytes"))
@@ -385,6 +386,7 @@ func TestEnsureBaseImage_HostedSuccessStaysHosted(t *testing.T) {
 // (404 on the image) warns and lands on the verified Debian fallback — never an
 // unverified image.
 func TestEnsureBaseImage_Hosted404FallsBackToDebian(t *testing.T) {
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
 	debian := []byte("debian genericcloud bytes")
 	srv := hostedDebianServer(t, nil, nil, debian)
 	srv.Close() // shut the hosted endpoint down entirely -> download error (like a 404/DNS fail)
@@ -418,6 +420,7 @@ func TestEnsureBaseImage_Hosted404FallsBackToDebian(t *testing.T) {
 // fail-closed sidecar: a hosted image whose sidecar does not match is rejected
 // (never booted) and the run falls back to the verified Debian path.
 func TestEnsureBaseImage_HostedChecksumMismatchFallsBackToDebian(t *testing.T) {
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
 	hosted := []byte("corrupt-or-tampered hosted image")
 	badSidecar := []byte(strings.Repeat("0", 64) + "\n") // valid-shaped hex, wrong digest
 	debian := []byte("debian genericcloud bytes v2")
@@ -447,6 +450,7 @@ func TestEnsureBaseImage_HostedChecksumMismatchFallsBackToDebian(t *testing.T) {
 // (404) sidecar on the hosted image is fail-closed (never booted unverified) and
 // the run falls back to the verified Debian path.
 func TestEnsureBaseImage_HostedMissingSidecarFallsBackToDebian(t *testing.T) {
+	t.Setenv("BLADERUNNER_STATE_DIR", t.TempDir())
 	hosted := []byte("hosted image with no published sidecar")
 	debian := []byte("debian genericcloud bytes v3")
 	srv := hostedDebianServer(t, hosted, []byte("404"), debian)
