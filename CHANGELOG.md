@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.9](https://github.com/stuffbucket/bladerunner/compare/v0.4.8...v0.4.9) (2026-08-11)
+
+
+### Bug Fixes
+
+* **update:** serialize the bundle swap; ignore AppleDouble sidecars ([#313](https://github.com/stuffbucket/bladerunner/issues/313)) ([aae11d2](https://github.com/stuffbucket/bladerunner/commit/aae11d296ed5120d2b2c9a74840a04cee791b472))
+
 ## [0.4.8](https://github.com/stuffbucket/bladerunner/compare/v0.4.7...v0.4.8) (2026-08-10)
 
 
