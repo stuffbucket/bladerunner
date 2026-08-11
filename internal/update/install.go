@@ -120,6 +120,13 @@ func extractAppBundle(tarball []byte, destDir string) (string, error) {
 			// nothing, so they need no destination and get no say in it.
 			continue
 		}
+		if isAppleDouble(hdr.Name) {
+			// An archiver artifact carrying resource forks and xattrs, not
+			// bundle content. Skipped before it can define appRoot or be
+			// written: the sidecar beside the bundle would otherwise become the
+			// root, and the ones inside it are junk in an installed app.
+			continue
+		}
 
 		// Guard against path traversal: the joined, cleaned path must stay
 		// within destDir. internal/util owns the containment rule.
@@ -255,11 +262,44 @@ func extractSymlink(hdr *tar.Header, appRoot, target string) error {
 	return nil
 }
 
+// swapLockPerm keeps the swap lock file owner-only. It sits beside the
+// installed bundle, typically in /Applications, so it is created once and
+// reused in place by every later swap.
+const swapLockPerm = 0o600
+
+// appleDoublePrefix marks an AppleDouble sidecar. macOS /usr/bin/tar emits one
+// per member by default — "._Bladerunner.app" beside "Bladerunner.app/" — to
+// carry resource forks and extended attributes. They are an artifact of the
+// archiver, never part of the bundle, and `tar -tzf` does not show them, so
+// anyone building a bundle by hand cannot see what went wrong.
+const appleDoublePrefix = "._"
+
+// isAppleDouble reports whether the last component of name is an AppleDouble
+// sidecar. Only the final component matters: a real bundle nested under a
+// sidecar's name cannot occur, because a sidecar is a regular file.
+func isAppleDouble(name string) bool {
+	name = filepath.ToSlash(name)
+	for part := range strings.SplitSeq(name, "/") {
+		if strings.HasPrefix(part, appleDoublePrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // topAppComponent returns the first path component of name if it ends in
 // ".app", else "".
+//
+// An AppleDouble sidecar never names the bundle. "._Bladerunner.app" ends in
+// ".app" and sorts BEFORE "Bladerunner.app/" in a macOS tar, so without this it
+// would latch on as the bundle root and the real bundle would then be refused as
+// "a second bundle" — a message that blames the wrong thing entirely.
 func topAppComponent(name string) string {
 	name = strings.TrimPrefix(filepath.ToSlash(name), "./")
 	first, _, _ := strings.Cut(name, "/")
+	if strings.HasPrefix(first, appleDoublePrefix) {
+		return ""
+	}
 	if strings.HasSuffix(strings.ToLower(first), ".app") {
 		return first
 	}
@@ -295,11 +335,34 @@ func writeRegular(r io.Reader, target string, mode os.FileMode) error {
 // which the process can stop. The parent directory is synced after each rename
 // so the state a crash leaves on disk is the state this function reasons about.
 //
+// That reasoning holds for ONE swapper at a time, and only one. Two concurrent
+// swaps share the single fixed backup path, and interleaving them destroys the
+// bundle outright: A moves dst aside, B's recovery reads the backup-without-dst
+// state as an interrupted swap and restores it, A's install then fails
+// ENOTEMPTY, and A's rollback removes what is now B's restored bundle and finds
+// its own backup already gone. Nothing is left at dst. So the whole sequence,
+// recovery included, runs under an exclusive lock — the recovery read is part of
+// the critical section, not a preamble to it.
+//
+// The lock BLOCKS rather than refusing. Both callers want the same end state and
+// the critical section is a handful of renames, so the loser waits, re-reads a
+// now-settled pair, and installs its own generation over the winner's.
+//
 // TestSwapBundle_RecoversFromInterruptedSwap and its neighbors in swap_test.go
-// hold this contract.
+// hold the crash contract; TestSwapBundle_ConcurrentSwapsNeverDestroyTheBundle
+// holds this one.
 func swapBundle(dst, newApp string) (err error) {
 	parent := filepath.Dir(dst)
 	backup := filepath.Join(parent, "."+filepath.Base(dst)+".old")
+
+	// Guards the (dst, backup) pair. It lives beside them so every process
+	// swapping this bundle contends for the same claim, and is never removed —
+	// see util.AcquireLock on why unlinking a lock file is unsafe.
+	lock, err := util.AcquireLock(filepath.Join(parent, "."+filepath.Base(dst)+".swap.lock"), swapLockPerm)
+	if err != nil {
+		return fmt.Errorf("update: serialize bundle swap: %w", err)
+	}
+	defer lock.Release()
 
 	if err := recoverInterruptedSwap(dst, backup, parent); err != nil {
 		return err
